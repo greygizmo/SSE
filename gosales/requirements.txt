@@ -1,0 +1,17 @@
+pandas
+polars
+numpy
+sqlalchemy>=2.0
+pyodbc
+scikit-learn
+lightgbm
+mlflow
+implicit
+mlxtend
+streamlit
+prefect
+python-dotenv
+ruff
+black
+pytest
+PyYAML
