@@ -124,3 +124,7 @@ models/artifacts/
 
 # outputs
 outputs/
+
+# database files
+*.db
+gosales.db
