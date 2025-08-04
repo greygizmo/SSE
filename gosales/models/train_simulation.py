@@ -11,27 +11,37 @@ from gosales.utils.paths import MODELS_DIR
 
 logger = get_logger(__name__)
 
-def train_simulation_model(engine):
-    """Trains a model to predict which customers are most likely to buy the Simulation product.
+def train_supplies_model(engine):
+    """Trains a model to predict which customers are most likely to buy the Supplies product.
 
     Args:
         engine (sqlalchemy.engine.base.Engine): The database engine.
     """
-    logger.info("Training Simulation model...")
+    logger.info("Training Supplies model...")
 
     # Create the feature matrix
-    feature_matrix = create_feature_matrix(engine, "Simulation")
+    feature_matrix = create_feature_matrix(engine, "Supplies")
 
     # If the feature matrix is empty, log a warning and return
     if feature_matrix.is_empty():
         logger.warning("Feature matrix is empty. Cannot train model.")
         return
 
-    # Split the data into training and testing sets
-    X = feature_matrix.drop("customer_id")
-    y = feature_matrix["customer_id"]
+    # Check if we have enough positive examples for training
+    positive_examples = feature_matrix.filter(pl.col("bought_product") == 1).height
+    if positive_examples < 2:
+        logger.warning(f"Not enough positive examples ({positive_examples}). Cannot train model.")
+        return
+
+    # FIXED: Use proper binary target and feature columns
+    # Features: customer behavior (exclude customer_id and target)
+    X = feature_matrix.drop(["customer_id", "bought_product"]).to_pandas()
+    y = feature_matrix["bought_product"].to_pandas()  # FIXED: Use binary target
+    
+    logger.info(f"Training with {len(X)} customers, {positive_examples} positive examples")
+    
     X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42
+        X, y, test_size=0.2, random_state=42, stratify=y  # stratify to maintain class balance
     )
 
     # Train the logistic regression model
@@ -54,13 +64,13 @@ def train_simulation_model(engine):
         logger.info(f"LightGBM is the best model with AUC: {lgbm_auc}")
 
     # Save the best model
-    mlflow.sklearn.save_model(best_model, MODELS_DIR / "simulation_model")
-    logger.info("Successfully trained and saved Simulation model.")
+    mlflow.sklearn.save_model(best_model, MODELS_DIR / "supplies_model")
+    logger.info("Successfully trained and saved Supplies model.")
 
 
 if __name__ == "__main__":
     # Get database connection
     db_engine = get_db_connection()
 
-    # Train the Simulation model
-    train_simulation_model(db_engine)
+    # Train the Supplies model
+    train_supplies_model(db_engine)

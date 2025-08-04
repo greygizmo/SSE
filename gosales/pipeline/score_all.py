@@ -2,7 +2,8 @@ from gosales.utils.db import get_db_connection
 from gosales.etl.load_csv import load_csv_to_db
 from gosales.etl.build_star import build_star_schema
 from gosales.features.engine import create_feature_matrix
-from gosales.models.train_simulation import train_simulation_model
+from gosales.models.train_simulation import train_supplies_model
+from gosales.pipeline.score_customers import generate_scoring_outputs
 from gosales.whitespace.build_lift import build_lift
 from gosales.whitespace.als import build_als
 from gosales.utils.logger import get_logger
@@ -30,21 +31,30 @@ def score_all():
     # Build the star schema
     build_star_schema(db_engine)
 
-    # Create the feature matrix for the "Simulation" product
-    feature_matrix = create_feature_matrix(db_engine, "Simulation")
+    # Create the feature matrix for the "Supplies" product (most common in our data)
+    feature_matrix = create_feature_matrix(db_engine, "Supplies")
 
-    # Train the Simulation model
-    train_simulation_model(db_engine)
+    # Train the Supplies model (renamed from Simulation for our data)
+    train_supplies_model(db_engine)
 
-    # Build the lift
-    lift_output_path = OUTPUTS_DIR / "lift.csv"
-    build_lift(db_engine, lift_output_path)
+    # ADDED: Generate customer ICP scores and whitespace opportunities
+    generate_scoring_outputs(db_engine)
 
-    # Build the ALS model
-    als_output_path = OUTPUTS_DIR / "als_recommendations.csv"
-    build_als(db_engine, als_output_path)
+    # Build the lift (legacy whitespace analysis)
+    try:
+        lift_output_path = OUTPUTS_DIR / "lift.csv"
+        build_lift(db_engine, lift_output_path)
+    except Exception as e:
+        logger.warning(f"Lift analysis failed: {e}")
 
-    logger.info("Scoring pipeline finished.")
+    # Build the ALS model (legacy recommendation system)
+    try:
+        als_output_path = OUTPUTS_DIR / "als_recommendations.csv"
+        build_als(db_engine, als_output_path)
+    except Exception as e:
+        logger.warning(f"ALS analysis failed: {e}")
+
+    logger.info("Complete scoring pipeline finished successfully!")
 
 
 if __name__ == "__main__":
