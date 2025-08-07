@@ -81,6 +81,19 @@ def train_division_model(engine, division_name: str, cutoff_date: str = "2024-12
     best_model = lr if lr_auc > lgbm_auc else lgbm
     best_model_name = "Logistic Regression" if lr_auc > lgbm_auc else "LightGBM"
     best_auc = max(lr_auc, lgbm_auc)
+
+    # Save a simple model card CSV
+    try:
+        OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame([
+            {"metric": "auc_lr", "value": lr_auc},
+            {"metric": "auc_lgbm", "value": lgbm_auc},
+            {"metric": "best_model", "value": best_model_name},
+            {"metric": "positives", "value": int(positive_examples)},
+            {"metric": "total", "value": int(len(X))},
+        ]).to_csv(OUTPUTS_DIR / f"model_card_{division_name.lower()}.csv", index=False)
+    except Exception:
+        pass
     
     logger.info(f"Best model for {division_name} is {best_model_name} with AUC: {best_auc:.4f}")
 

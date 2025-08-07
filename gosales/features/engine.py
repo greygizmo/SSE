@@ -247,12 +247,33 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
     # Example interaction features (post-join) if present
     try:
         interaction_cols = [c for c in feature_matrix.columns if c.startswith("is_") or c.startswith("is_sub_")]
-        if "total_services_gp" in feature_matrix.columns and interaction_cols:
-            # Multiply normalized services GP by industry flags (simple scaled interaction)
-            max_services = float(feature_matrix["total_services_gp"].max()) or 1.0
-            svc_norm = feature_matrix["total_services_gp"].cast(pl.Float64) / max_services
-            for c in interaction_cols[:10]:  # limit to top few to avoid explosion
-                feature_matrix = feature_matrix.with_columns((svc_norm * feature_matrix[c].cast(pl.Float64)).alias(f"{c}_x_services"))
+        # Normalizers and derived metrics
+        max_services = float(feature_matrix["total_services_gp"].max()) if "total_services_gp" in feature_matrix.columns else 1.0
+        max_avg_gp = float(feature_matrix["avg_transaction_gp"].max()) if "avg_transaction_gp" in feature_matrix.columns else 1.0
+        max_diversity = float(feature_matrix["product_diversity_score"].max()) if "product_diversity_score" in feature_matrix.columns else 1.0
+        # Growth ratio
+        if "gp_2024" in feature_matrix.columns and "gp_2023" in feature_matrix.columns:
+            feature_matrix = feature_matrix.with_columns(
+                (feature_matrix["gp_2024"].cast(pl.Float64) / (feature_matrix["gp_2023"].cast(pl.Float64) + 1.0)).alias("growth_ratio_24_over_23")
+            )
+        # Build interactions (limit to first 12 flags to control dimensionality)
+        if interaction_cols:
+            if "total_services_gp" in feature_matrix.columns:
+                svc_norm = feature_matrix["total_services_gp"].cast(pl.Float64) / (max_services or 1.0)
+                for c in interaction_cols[:12]:
+                    feature_matrix = feature_matrix.with_columns((svc_norm * feature_matrix[c].cast(pl.Float64)).alias(f"{c}_x_services"))
+            if "avg_transaction_gp" in feature_matrix.columns:
+                avg_norm = feature_matrix["avg_transaction_gp"].cast(pl.Float64) / (max_avg_gp or 1.0)
+                for c in interaction_cols[:12]:
+                    feature_matrix = feature_matrix.with_columns((avg_norm * feature_matrix[c].cast(pl.Float64)).alias(f"{c}_x_avg_gp"))
+            if "product_diversity_score" in feature_matrix.columns:
+                div_norm = feature_matrix["product_diversity_score"].cast(pl.Float64) / (max_diversity or 1.0)
+                for c in interaction_cols[:12]:
+                    feature_matrix = feature_matrix.with_columns((div_norm * feature_matrix[c].cast(pl.Float64)).alias(f"{c}_x_diversity"))
+            if "growth_ratio_24_over_23" in feature_matrix.columns:
+                gr = feature_matrix["growth_ratio_24_over_23"].cast(pl.Float64)
+                for c in interaction_cols[:12]:
+                    feature_matrix = feature_matrix.with_columns((gr * feature_matrix[c].cast(pl.Float64)).alias(f"{c}_x_growth"))
     except Exception:
         pass
 
