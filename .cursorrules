@@ -1,0 +1,10 @@
+Act as the coding agent for this repo. Use Ultrathink reasoning.
+
+Goal: Improve the intelligence and feature robustness of the ICP/whitespace engine while preserving time-aware, leakage-free training.
+
+Follow the “ICP Algorithm Roadmap — Cursor (GPT-5, Ultrathink)” in the repository root. For each phase:
+- Restate the sub-goal, propose 3–6 concrete steps, and execute.
+- Keep features strictly ≤ cutoff_date; targets strictly in the forward window.
+- After each change: run tests (if present) and the pipeline on sample data; emit acceptance artifacts.
+- If optional dependencies (ALS, enrichment) are missing, continue with model-only signals; do not block.
+- Keep diffs small and well-scoped; summarize changes and artifacts produced.

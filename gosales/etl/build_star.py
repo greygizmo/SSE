@@ -1,5 +1,6 @@
 import polars as pl
 import pandas as pd
+import json
 try:
     from rapidfuzz import process, fuzz
     FUZZY_AVAILABLE = True
@@ -9,6 +10,14 @@ from sqlalchemy import text
 from gosales.utils.db import get_db_connection
 from gosales.utils.paths import OUTPUTS_DIR
 from gosales.utils.logger import get_logger
+from gosales.etl.sku_map import get_sku_mapping
+from gosales.etl.cleaners import clean_currency_value, coerce_datetime, summarise_dataframe_schema
+from gosales.etl.contracts import (
+    check_required_columns,
+    check_primary_key_not_null,
+    check_no_duplicate_pk,
+    violations_to_dataframe,
+)
 
 logger = get_logger(__name__)
 
@@ -33,6 +42,40 @@ def build_star_schema(engine):
     logger.info("Reading sales_log table...")
     try:
         sales_log_pd = pd.read_sql("SELECT * FROM sales_log", engine)
+        # Data contracts: required columns and PK/null checks
+        OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+        contracts_dir = OUTPUTS_DIR / "contracts"
+        contracts_dir.mkdir(parents=True, exist_ok=True)
+
+        # Persist schema snapshot
+        schema_json = summarise_dataframe_schema(sales_log_pd)
+        with open(contracts_dir / "schema.json", "w", encoding="utf-8") as f:
+            json.dump(schema_json, f, indent=2)
+
+        required_cols = list({"CustomerId", "Rec Date", "Division"})
+        # Extend with GP/Qty pairs from mapping for visibility (not all required to exist)
+        mapping = get_sku_mapping()
+        for gp_col, meta in mapping.items():
+            required_cols.extend([gp_col, meta["qty_col"]])
+
+        violations = []
+        violations += check_required_columns(sales_log_pd, "sales_log", required_cols)
+
+        # PK checks (blockers)
+        pk_cols = tuple(c for c in ("CustomerId", "Rec Date") if c in sales_log_pd.columns)
+        violations += check_primary_key_not_null(sales_log_pd, "sales_log", pk_cols)
+        # Duplicate check only if both cols available (best-effort)
+        if len(pk_cols) >= 2:
+            violations += check_no_duplicate_pk(sales_log_pd, "sales_log", pk_cols)
+
+        vdf = violations_to_dataframe(violations)
+        vdf.to_csv(contracts_dir / "violations.csv", index=False)
+
+        # Block on PK/null/duplicate violations
+        if any(v.violation_type in {"null_in_pk", "missing_pk_column", "duplicate_pk"} for v in violations):
+            logger.error("Data contract violations detected. See outputs/contracts/violations.csv")
+            return
+
         sales_log = pl.from_pandas(sales_log_pd)
     except Exception as e:
         logger.error(f"Failed to read sales_log table: {e}")
@@ -250,20 +293,8 @@ def build_star_schema(engine):
         logger.warning(f"Failed to write industry coverage reports: {e}")
 
     # --- 2. Define SKU and Division Mapping ---
-    # This mapping is the core logic for the unpivot operation.
-    # It links GP columns to their corresponding Qty columns and assigns a Division.
-    sku_mapping = {
-        'SWX_Core': {'qty_col': 'SWX_Core_Qty', 'division': 'Solidworks'},
-        'SWX_Pro_Prem': {'qty_col': 'SWX_Pro_Prem_Qty', 'division': 'Solidworks'},
-        'Core_New_UAP': {'qty_col': 'Core_New_UAP_Qty', 'division': 'Solidworks'},
-        'Pro_Prem_New_UAP': {'qty_col': 'Pro_Prem_New_UAP_Qty', 'division': 'Solidworks'},
-        'PDM': {'qty_col': 'PDM_Qty', 'division': 'Solidworks'},
-        'Simulation': {'qty_col': 'Simulation_Qty', 'division': 'Simulation'},
-        'Services': {'qty_col': 'Services_Qty', 'division': 'Services'},
-        'Training': {'qty_col': 'Training_Qty', 'division': 'Services'},
-        'Success Plan GP': {'qty_col': 'Success_Plan_Qty', 'division': 'Services'},
-        'Supplies': {'qty_col': 'Consumables_Qty', 'division': 'Hardware'}, # Assuming supplies = consumables
-    }
+    # Centralized mapping for unpivot operation.
+    sku_mapping = get_sku_mapping()
 
     # --- 3. Unpivot the data to create fact_transactions ---
     logger.info("Unpivoting sales_log to create fact_transactions table...")
@@ -307,20 +338,10 @@ def build_star_schema(engine):
     
     # Clean the data
     fact_transactions_pd['customer_id'] = pd.to_numeric(fact_transactions_pd['CustomerId'], errors='coerce')
-    fact_transactions_pd['order_date'] = pd.to_datetime(fact_transactions_pd['Rec Date'])
-    
-    # Clean currency columns
-    def clean_currency(value):
-        if pd.isna(value):
-            return 0.0
-        if isinstance(value, str):
-            # Handle negative values in parentheses
-            if '(' in value and ')' in value:
-                value = '-' + value.replace('(', '').replace(')', '')
-            return float(value.replace('$', '').replace(',', ''))
-        return float(value)
-    
-    fact_transactions_pd['gross_profit'] = fact_transactions_pd['gross_profit'].apply(clean_currency)
+    fact_transactions_pd['order_date'] = coerce_datetime(fact_transactions_pd['Rec Date'])
+
+    # Clean currency columns using shared cleaner
+    fact_transactions_pd['gross_profit'] = fact_transactions_pd['gross_profit'].apply(clean_currency_value)
     fact_transactions_pd['quantity'] = pd.to_numeric(fact_transactions_pd['quantity'], errors='coerce').fillna(0)
     
     # Filter out rows with no meaningful transaction data
@@ -328,16 +349,37 @@ def build_star_schema(engine):
         (fact_transactions_pd['gross_profit'] != 0) | (fact_transactions_pd['quantity'] != 0)
     ]
     
-    # Select final columns
+    # Select and deterministically sort final columns
     fact_transactions_pd = fact_transactions_pd[[
         'customer_id', 'order_date', 'product_sku', 'product_division', 'gross_profit', 'quantity'
-    ]]
+    ]].sort_values(by=['customer_id', 'order_date', 'product_sku'], kind='mergesort').reset_index(drop=True)
     
     # Convert back to polars
     fact_transactions = pl.from_pandas(fact_transactions_pd)
 
     fact_transactions.write_database("fact_transactions", engine, if_table_exists="replace")
     logger.info(f"Successfully created fact_transactions table with {len(fact_transactions)} total line items.")
+
+    # Row count audit
+    try:
+        row_counts = pd.DataFrame([
+            {"table": "sales_log", "rows": int(len(sales_log_pd))},
+            {"table": "dim_customer", "rows": int(len(dim_customer))},
+            {"table": "fact_transactions", "rows": int(len(fact_transactions))},
+        ])
+        (OUTPUTS_DIR / "contracts").mkdir(parents=True, exist_ok=True)
+        row_counts.to_csv(OUTPUTS_DIR / "contracts" / "row_counts.csv", index=False)
+    except Exception:
+        pass
+
+    # Sample heads for quick inspection
+    try:
+        samples_dir = OUTPUTS_DIR / "samples"
+        samples_dir.mkdir(parents=True, exist_ok=True)
+        dim_customer.head(20).to_pandas().to_csv(samples_dir / "dim_customer_head.csv", index=False)
+        fact_transactions.head(50).to_pandas().to_csv(samples_dir / "fact_transactions_head.csv", index=False)
+    except Exception:
+        pass
     
     # --- Deprecate old tables ---
     logger.info("Dropping old fact_orders and dim_product tables...")
