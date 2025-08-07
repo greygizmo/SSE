@@ -2,6 +2,7 @@ from gosales.utils.db import get_db_connection
 from gosales.etl.load_csv import load_csv_to_db
 from gosales.etl.build_star import build_star_schema
 from gosales.models.train_division_model import train_division_model
+from gosales.pipeline.label_audit import compute_label_audit
 from gosales.pipeline.score_customers import generate_scoring_outputs
 from gosales.utils.logger import get_logger
 from gosales.utils.paths import DATA_DIR
@@ -38,14 +39,20 @@ def score_all():
     build_star_schema(db_engine)
     logger.info("--- ETL Phase Complete ---")
 
-    # --- 3. Model Training Phase ---
-    logger.info(f"--- Phase 2: Training model for {target_division} division ---")
-    # Use 2024-09-30 as cutoff, predict 3 months into 2024 (Oct-Dec 2024)
-    train_division_model(db_engine, target_division, cutoff_date="2024-09-30", prediction_window_months=3)
+    # --- 3. Label Audit (Phase 2) ---
+    logger.info("--- Phase 2: Label audit (leakage-safe targets) ---")
+    cutoff_date = "2024-09-30"
+    prediction_window_months = 6
+    compute_label_audit(db_engine, target_division, cutoff_date, prediction_window_months)
+    logger.info("--- Label audit complete ---")
+
+    # --- 4. Model Training Phase ---
+    logger.info(f"--- Phase 3: Training model for {target_division} division ---")
+    train_division_model(db_engine, target_division, cutoff_date=cutoff_date, prediction_window_months=prediction_window_months)
     logger.info("--- Model Training Phase Complete ---")
 
-    # --- 4. Scoring Phase ---
-    logger.info("--- Phase 3: Generating Scores and Whitespace ---")
+    # --- 5. Scoring Phase ---
+    logger.info("--- Phase 4: Generating Scores and Whitespace ---")
     generate_scoring_outputs(db_engine)
     logger.info("--- Scoring Phase Complete ---")
 
