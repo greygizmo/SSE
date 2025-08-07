@@ -1,12 +1,7 @@
 #!/usr/bin/env python3
 """
-Customer scoring pipeline that generates ICP scores and whitespace analysis.
-
-This module loads trained models and scores all customers, outputting:
-- icp_scores.csv: Customer ICP scores for each product
-- whitespace.csv: Whitespace opportunities for customers
+Customer scoring pipeline that generates ICP scores and whitespace analysis for specific divisions.
 """
-
 import polars as pl
 import pandas as pd
 import mlflow.sklearn
@@ -19,208 +14,130 @@ from gosales.features.engine import create_feature_matrix
 
 logger = get_logger(__name__)
 
-
-def score_customers_for_product(engine, product_name: str, model_path: Path):
-    """Score all customers for a specific product.
-    
-    Args:
-        engine: Database engine
-        product_name: Name of the product to score
-        model_path: Path to the trained model
-        
-    Returns:
-        polars.DataFrame: Customers with their scores
+def score_customers_for_division(engine, division_name: str, model_path: Path):
     """
-    logger.info(f"Scoring customers for product: {product_name}")
+    Score all customers for a specific division using a trained ML model.
+    """
+    logger.info(f"Scoring customers for division: {division_name}")
     
     try:
-        # Load the trained model
         model = mlflow.sklearn.load_model(str(model_path))
         logger.info(f"Loaded model from {model_path}")
     except Exception as e:
         logger.error(f"Failed to load model from {model_path}: {e}")
         return pl.DataFrame()
     
-    # Get feature matrix for all customers
-    feature_matrix = create_feature_matrix(engine, product_name)
+    # Get feature matrix for all customers for the specified division
+    feature_matrix = create_feature_matrix(engine, division_name)
     
     if feature_matrix.is_empty():
-        logger.warning(f"No feature matrix for {product_name}")
+        logger.warning(f"No feature matrix for {division_name}")
         return pl.DataFrame()
     
-    # Prepare features for scoring (same as training)
-    X = feature_matrix.drop(["customer_id", "bought_product"]).to_pandas()
+    # Prepare features for scoring (must match training)
+    X = feature_matrix.drop(["customer_id", "bought_in_division"]).to_pandas()
     
-    # Score all customers
     try:
-        # Get probability of buying the product
-        probabilities = model.predict_proba(X)[:, 1]  # Probability of class 1 (buying)
+        # Get the probability of buying from the division
+        probabilities = model.predict_proba(X)[:, 1]
         
-        # Create scoring results
-        scores_df = feature_matrix.select(["customer_id", "bought_product"]).to_pandas()
-        scores_df['product_name'] = product_name
+        scores_df = feature_matrix.select(["customer_id", "bought_in_division"]).to_pandas()
+        scores_df['division_name'] = division_name
         scores_df['icp_score'] = probabilities
-        scores_df['confidence'] = 'medium'  # Could be enhanced based on probability ranges
         
-        # Add customer names if available
-        try:
-            customer_names = pl.read_database(
-                "select customer_id, customer_name from dim_customer", engine
-            ).to_pandas()
-            scores_df = scores_df.merge(customer_names, on='customer_id', how='left')
-        except:
-            scores_df['customer_name'] = 'Unknown'
+        customer_names = pd.read_sql("select customer_id, customer_name from dim_customer", engine)
+        scores_df = scores_df.merge(customer_names, on='customer_id', how='left')
         
-        logger.info(f"Successfully scored {len(scores_df)} customers for {product_name}")
+        logger.info(f"Successfully scored {len(scores_df)} customers for {division_name}")
         return pl.from_pandas(scores_df)
         
     except Exception as e:
-        logger.error(f"Failed to score customers for {product_name}: {e}")
+        logger.error(f"Failed to score customers for {division_name}: {e}")
         return pl.DataFrame()
 
-
 def generate_whitespace_opportunities(engine):
-    """Generate whitespace opportunities based on product purchase patterns.
-    
-    Args:
-        engine: Database engine
-        
-    Returns:
-        polars.DataFrame: Whitespace opportunities
+    """
+    Generate whitespace opportunities based on division purchase patterns.
+    This is a simplified version and can be enhanced.
     """
     logger.info("Generating whitespace opportunities...")
-    
     try:
-        # Get all customer-product combinations
-        fact_orders = pl.read_database("select * from fact_orders", engine)
+        transactions = pl.from_pandas(pd.read_sql("SELECT * FROM fact_transactions", engine))
+        customers = pl.from_pandas(pd.read_sql("SELECT * FROM dim_customer", engine))
         
-        # Get customers and their purchased products
-        customer_products = (
-            fact_orders
+        customer_summary = (
+            transactions
             .group_by("customer_id")
             .agg([
-                pl.col("product_name").unique().alias("products_bought"),
-                pl.sum("revenue").alias("total_revenue"),
-                pl.len().alias("total_orders")
+                pl.col("product_division").unique().alias("divisions_bought"),
+                pl.sum("gross_profit").alias("total_gp"),
             ])
         )
         
-        # Get all available products
-        all_products = fact_orders.select("product_name").unique()["product_name"].to_list()
+        all_divisions = transactions.select("product_division").unique()["product_division"].to_list()
         
-        whitespace_opportunities = []
-        
-        for row in customer_products.iter_rows(named=True):
-            customer_id = row["customer_id"]
-            products_bought = row["products_bought"]
-            total_revenue = row["total_revenue"]
-            
-            # Find products not bought by this customer
-            not_bought = [p for p in all_products if p not in products_bought]
-            
-            for product in not_bought:
-                # Simple whitespace scoring based on customer value
-                if total_revenue > 5000:
-                    whitespace_score = 0.8
-                    priority = "High"
-                elif total_revenue > 1000:
-                    whitespace_score = 0.6
-                    priority = "Medium"
-                else:
-                    whitespace_score = 0.3
-                    priority = "Low"
+        opportunities = []
+        for row in customer_summary.iter_rows(named=True):
+            not_bought = [div for div in all_divisions if div not in row["divisions_bought"]]
+            for division in not_bought:
+                score = 0.5 # Placeholder logic
+                if row["total_gp"] > 10000: score = 0.8
+                elif row["total_gp"] > 1000: score = 0.6
                 
-                whitespace_opportunities.append({
-                    "customer_id": customer_id,
-                    "product_name": product,
-                    "whitespace_score": whitespace_score,
-                    "priority": priority,
-                    "reason": f"Customer spent ${total_revenue:.0f}, likely to buy {product}"
+                opportunities.append({
+                    "customer_id": row["customer_id"],
+                    "whitespace_division": division,
+                    "whitespace_score": score,
+                    "reason": f"Customer has high engagement but has not bought from the {division} division."
                 })
         
-        whitespace_df = pl.DataFrame(whitespace_opportunities)
-        
-        # Add customer names
-        try:
-            customer_names = pl.read_database(
-                "select customer_id, customer_name from dim_customer", engine
-            )
-            whitespace_df = whitespace_df.join(customer_names, on="customer_id", how="left")
-        except:
-            whitespace_df = whitespace_df.with_columns(pl.lit("Unknown").alias("customer_name"))
-        
+        if not opportunities:
+            return pl.DataFrame()
+
+        whitespace_df = pl.DataFrame(opportunities).join(customers, on="customer_id", how="left")
         logger.info(f"Generated {len(whitespace_df)} whitespace opportunities")
         return whitespace_df
-        
+
     except Exception as e:
         logger.error(f"Failed to generate whitespace opportunities: {e}")
         return pl.DataFrame()
 
-
 def generate_scoring_outputs(engine):
-    """Generate ICP scores and whitespace analysis outputs.
-    
-    Args:
-        engine: Database engine
     """
-    logger.info("Starting customer scoring pipeline...")
-    
-    # Ensure outputs directory exists
+    Generate and save ICP scores and whitespace analysis.
+    """
+    logger.info("Starting customer scoring and whitespace analysis...")
     OUTPUTS_DIR.mkdir(exist_ok=True)
     
-    # Initialize scoring results
-    all_scores = []
-    
-    # Score for available products with trained models
     available_models = {
-        "Supplies": MODELS_DIR / "supplies_model"
+        "Solidworks": MODELS_DIR / "solidworks_model"
     }
     
-    for product_name, model_path in available_models.items():
+    all_scores = []
+    for division_name, model_path in available_models.items():
         if model_path.exists():
-            scores = score_customers_for_product(engine, product_name, model_path)
+            scores = score_customers_for_division(engine, division_name, model_path)
             if not scores.is_empty():
                 all_scores.append(scores)
         else:
-            logger.warning(f"Model not found for {product_name}: {model_path}")
-    
-    # Combine all scores and save to CSV
+            logger.warning(f"Model not found for {division_name}: {model_path}")
+            
     if all_scores:
         combined_scores = pl.concat(all_scores, how="vertical")
-        
-        # Save ICP scores
         icp_scores_path = OUTPUTS_DIR / "icp_scores.csv"
         combined_scores.write_csv(str(icp_scores_path))
-        logger.info(f"Saved ICP scores to {icp_scores_path}")
-        
-        # Display summary
-        logger.info(f"Scored {combined_scores.height} customer-product combinations")
-        for product in combined_scores["product_name"].unique():
-            product_scores = combined_scores.filter(pl.col("product_name") == product)
-            avg_score = product_scores["icp_score"].mean()
-            logger.info(f"  {product}: {len(product_scores)} customers, avg score: {avg_score:.3f}")
+        logger.info(f"Saved ICP scores for {len(combined_scores)} customer-division combinations to {icp_scores_path}")
     else:
-        logger.warning("No models available for scoring")
+        logger.warning("No models were available for scoring.")
     
-    # Generate whitespace opportunities
     whitespace = generate_whitespace_opportunities(engine)
     if not whitespace.is_empty():
         whitespace_path = OUTPUTS_DIR / "whitespace.csv"
         whitespace.write_csv(str(whitespace_path))
         logger.info(f"Saved whitespace opportunities to {whitespace_path}")
-        
-        # Display summary
-        high_priority = whitespace.filter(pl.col("priority") == "High").height
-        medium_priority = whitespace.filter(pl.col("priority") == "Medium").height
-        low_priority = whitespace.filter(pl.col("priority") == "Low").height
-        logger.info(f"Whitespace: {high_priority} high, {medium_priority} medium, {low_priority} low priority")
-    
-    logger.info("Customer scoring pipeline completed successfully!")
 
+    logger.info("Scoring pipeline completed successfully!")
 
 if __name__ == "__main__":
-    # Get database connection
     db_engine = get_db_connection()
-    
-    # Generate scoring outputs
     generate_scoring_outputs(db_engine)

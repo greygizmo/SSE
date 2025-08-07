@@ -4,6 +4,7 @@ from sqlalchemy.engine import URL
 from dotenv import load_dotenv
 
 from gosales.utils.logger import get_logger
+from gosales.utils.paths import ROOT_DIR
 
 load_dotenv()
 
@@ -35,4 +36,6 @@ def get_db_connection():
         return create_engine(connection_string)
     else:
         logger.info("Azure SQL credentials not found, falling back to SQLite.")
-        return create_engine("sqlite:///gosales.db")
+        db_path = ROOT_DIR.parent / "gosales.db"
+        logger.info(f"Using SQLite database at: {db_path}")
+        return create_engine(f"sqlite:///{db_path}")

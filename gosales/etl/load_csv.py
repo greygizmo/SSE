@@ -14,7 +14,25 @@ def load_csv_to_db(file_path: str, table_name: str, engine):
         engine (sqlalchemy.engine.base.Engine): The database engine.
     """
     logger.info(f"Loading {file_path} into table {table_name}...")
-    df = pd.read_csv(file_path)
+    
+    # Try different encodings to handle encoding issues
+    encodings = ['utf-8', 'latin-1', 'cp1252', 'iso-8859-1']
+    df = None
+    
+    for encoding in encodings:
+        try:
+            df = pd.read_csv(file_path, encoding=encoding)
+            logger.info(f"Successfully read {file_path} with encoding: {encoding}")
+            break
+        except UnicodeDecodeError:
+            continue
+        except Exception as e:
+            logger.warning(f"Failed to read {file_path} with encoding {encoding}: {e}")
+            continue
+    
+    if df is None:
+        raise ValueError(f"Could not read {file_path} with any of the attempted encodings")
+    
     df.to_sql(table_name, engine, if_exists="replace", index=False)
     logger.info(f"Successfully loaded {file_path} into table {table_name}.")
 

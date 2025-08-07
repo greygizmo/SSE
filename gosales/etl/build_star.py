@@ -1,4 +1,5 @@
 import polars as pl
+import pandas as pd
 from sqlalchemy import text
 from gosales.utils.db import get_db_connection
 from gosales.utils.logger import get_logger
@@ -6,123 +7,143 @@ from gosales.utils.logger import get_logger
 logger = get_logger(__name__)
 
 def build_star_schema(engine):
-    """Builds the star schema from the raw data.
-
+    """
+    Builds a tidy, analytics-ready star schema from the raw sales_log data.
+    
+    This function performs the following transformations:
+    1.  Reads the raw `sales_log` table.
+    2.  Creates a clean `dim_customer` dimension table.
+    3.  Defines a comprehensive mapping of raw columns to standardized SKUs and Divisions.
+    4.  "Unpivots" the wide `sales_log` table into a tidy `fact_transactions` table,
+        where each row represents a single product line item within a transaction.
+    5.  Cleans and standardizes data types for key columns.
+    
     Args:
         engine (sqlalchemy.engine.base.Engine): The database engine.
     """
-    logger.info("Building star schema...")
+    logger.info("Building star schema with new tidy transaction model...")
 
-    # Read the raw data from the database
-    sales_log = pl.read_database("select * from sales_log", engine)
-    analytics_sales_logs = pl.read_database(
-        "select * from analytics_sales_logs", engine
-    )
+    # Read the raw data from the database using pandas first, then convert to polars
+    logger.info("Reading sales_log table...")
+    try:
+        sales_log_pd = pd.read_sql("SELECT * FROM sales_log", engine)
+        sales_log = pl.from_pandas(sales_log_pd)
+    except Exception as e:
+        logger.error(f"Failed to read sales_log table: {e}")
+        return
 
-    # Create the dim_customer table
+    # --- 1. Create dim_customer ---
     logger.info("Creating dim_customer table...")
     dim_customer = (
         sales_log.lazy()
-        .select(["Sales Log[Customer]", "Sales Log[CustomerId]"])
-        .unique()
-        .rename({"Sales Log[Customer]": "customer_name", "Sales Log[CustomerId]": "customer_id"})
+        .select(["Customer", "CustomerId"])
+        .unique(subset=["CustomerId"])
+        .rename({"Customer": "customer_name", "CustomerId": "customer_id"})
+        .filter(pl.col("customer_id").is_not_null())
         .collect()
     )
-    dim_customer.write_database(
-        "dim_customer", engine, if_table_exists="replace"
-    )
-    logger.info("Successfully created dim_customer table.")
+    dim_customer.write_database("dim_customer", engine, if_table_exists="replace")
+    logger.info(f"Successfully created dim_customer table with {len(dim_customer)} unique customers.")
 
-    # Create the dim_product table
-    logger.info("Creating dim_product table...")
-    dim_product = (
-        analytics_sales_logs.lazy()
-        .select(["Analytics_SalesLogs[Description]"])
-        .unique()
-        .rename({"Analytics_SalesLogs[Description]": "product_name"})
-        .collect()
-    )
-    dim_product.write_database(
-        "dim_product", engine, if_table_exists="replace"
-    )
-    logger.info("Successfully created dim_product table.")
+    # --- 2. Define SKU and Division Mapping ---
+    # This mapping is the core logic for the unpivot operation.
+    # It links GP columns to their corresponding Qty columns and assigns a Division.
+    sku_mapping = {
+        'SWX_Core': {'qty_col': 'SWX_Core_Qty', 'division': 'Solidworks'},
+        'SWX_Pro_Prem': {'qty_col': 'SWX_Pro_Prem_Qty', 'division': 'Solidworks'},
+        'Core_New_UAP': {'qty_col': 'Core_New_UAP_Qty', 'division': 'Solidworks'},
+        'Pro_Prem_New_UAP': {'qty_col': 'Pro_Prem_New_UAP_Qty', 'division': 'Solidworks'},
+        'PDM': {'qty_col': 'PDM_Qty', 'division': 'Solidworks'},
+        'Simulation': {'qty_col': 'Simulation_Qty', 'division': 'Simulation'},
+        'Services': {'qty_col': 'Services_Qty', 'division': 'Services'},
+        'Training': {'qty_col': 'Training_Qty', 'division': 'Services'},
+        'Success Plan GP': {'qty_col': 'Success_Plan_Qty', 'division': 'Services'},
+        'Supplies': {'qty_col': 'Consumables_Qty', 'division': 'Hardware'}, # Assuming supplies = consumables
+    }
 
-    # Create the fact_orders table
-    logger.info("Creating fact_orders table...")
+    # --- 3. Unpivot the data to create fact_transactions ---
+    logger.info("Unpivoting sales_log to create fact_transactions table...")
     
-    # FIXED: Use CustomerID instead of ID for joining, and handle sparse data
-    # First try CustomerID join, then fallback to using analytics data directly
-    fact_orders_joined = (
-        sales_log.lazy()
-        .join(
-            analytics_sales_logs.lazy(),
-            left_on="Sales Log[CustomerId]",
-            right_on="Analytics_SalesLogs[CustomerId]",
-            how="inner",
-        )
-        .select(
-            [
-                "Sales Log[Id]",
-                "Sales Log[CustomerId]",
-                "Analytics_SalesLogs[Description]",
-                "Sales Log[Revenue]",
-                "Sales Log[Rec Date]",
-            ]
-        )
-        .rename(
-            {
-                "Sales Log[Id]": "order_id",
-                "Sales Log[CustomerId]": "customer_id",
-                "Analytics_SalesLogs[Description]": "product_name",
-                "Sales Log[Revenue]": "revenue",
-                "Sales Log[Rec Date]": "order_date",
-            }
-        )
-        .collect()
-    )
+    all_transactions = []
     
-    # If joined data is sparse, supplement with analytics data
-    if fact_orders_joined.height < 10:  # Less than 10 records
-        logger.info("Sparse joined data detected. Adding analytics-only records...")
-        analytics_only = (
-            analytics_sales_logs.lazy()
-            .filter(pl.col("Analytics_SalesLogs[CustomerId]").is_not_null())
-            .filter(pl.col("Analytics_SalesLogs[Description]").is_not_null())
-            .select(
-                [
-                    "Analytics_SalesLogs[Id]",
-                    "Analytics_SalesLogs[CustomerId]",
-                    "Analytics_SalesLogs[Description]",
-                ]
+    # Base columns to keep for every transaction line item
+    id_vars = ["CustomerId", "Rec Date", "Division"]
+
+    for gp_col, details in sku_mapping.items():
+        qty_col = details['qty_col']
+        division = details['division']
+
+        if gp_col in sales_log.columns and qty_col in sales_log.columns:
+            # Melt for the current SKU
+            melted_df = (
+                sales_log.lazy()
+                .select(id_vars + [gp_col, qty_col])
+                .filter(pl.col(gp_col).is_not_null() | pl.col(qty_col).is_not_null())
+                .with_columns([
+                    pl.lit(gp_col).alias("product_sku"),
+                    pl.lit(division).alias("product_division")
+                ])
+                .rename({gp_col: "gross_profit", qty_col: "quantity"})
+                .collect()
             )
-            .with_columns([
-                pl.lit(1000.0).alias("revenue"),  # Default revenue for demo
-                pl.lit("2023-01-01").alias("order_date"),  # Default date for demo
-            ])
-            .rename(
-                {
-                    "Analytics_SalesLogs[Id]": "order_id",
-                    "Analytics_SalesLogs[CustomerId]": "customer_id",
-                    "Analytics_SalesLogs[Description]": "product_name",
-                }
-            )
-            .collect()
-        )
-        
-        # Combine both datasets
-        fact_orders = pl.concat([fact_orders_joined, analytics_only], how="vertical")
-        logger.info(f"Combined fact_orders: {fact_orders.height} total records")
-    else:
-        fact_orders = fact_orders_joined
-    fact_orders.write_database(
-        "fact_orders", engine, if_table_exists="replace"
-    )
-    logger.info("Successfully created fact_orders table.")
+            all_transactions.append(melted_df)
+
+    if not all_transactions:
+        logger.error("No transactions could be processed from the sku_mapping. Aborting.")
+        return
+
+    # Combine all the melted DataFrames into one large table
+    fact_transactions = pl.concat(all_transactions, how="vertical_relaxed")
+    
+    # --- 4. Clean and Finalize the Table ---
+    logger.info("Cleaning and finalizing fact_transactions table...")
+    
+    # Convert to pandas for easier data cleaning
+    fact_transactions_pd = fact_transactions.to_pandas()
+    
+    # Clean the data
+    fact_transactions_pd['customer_id'] = pd.to_numeric(fact_transactions_pd['CustomerId'], errors='coerce')
+    fact_transactions_pd['order_date'] = pd.to_datetime(fact_transactions_pd['Rec Date'])
+    
+    # Clean currency columns
+    def clean_currency(value):
+        if pd.isna(value):
+            return 0.0
+        if isinstance(value, str):
+            # Handle negative values in parentheses
+            if '(' in value and ')' in value:
+                value = '-' + value.replace('(', '').replace(')', '')
+            return float(value.replace('$', '').replace(',', ''))
+        return float(value)
+    
+    fact_transactions_pd['gross_profit'] = fact_transactions_pd['gross_profit'].apply(clean_currency)
+    fact_transactions_pd['quantity'] = pd.to_numeric(fact_transactions_pd['quantity'], errors='coerce').fillna(0)
+    
+    # Filter out rows with no meaningful transaction data
+    fact_transactions_pd = fact_transactions_pd[
+        (fact_transactions_pd['gross_profit'] != 0) | (fact_transactions_pd['quantity'] != 0)
+    ]
+    
+    # Select final columns
+    fact_transactions_pd = fact_transactions_pd[[
+        'customer_id', 'order_date', 'product_sku', 'product_division', 'gross_profit', 'quantity'
+    ]]
+    
+    # Convert back to polars
+    fact_transactions = pl.from_pandas(fact_transactions_pd)
+
+    fact_transactions.write_database("fact_transactions", engine, if_table_exists="replace")
+    logger.info(f"Successfully created fact_transactions table with {len(fact_transactions)} total line items.")
+    
+    # --- Deprecate old tables ---
+    logger.info("Dropping old fact_orders and dim_product tables...")
+    with engine.connect() as connection:
+        connection.execute(text("DROP TABLE IF EXISTS fact_orders;"))
+        connection.execute(text("DROP TABLE IF EXISTS dim_product;"))
+        connection.commit()
+    logger.info("Old tables dropped successfully.")
 
 
 if __name__ == "__main__":
-    # Get database connection
     db_engine = get_db_connection()
-
-    # Build the star schema
     build_star_schema(db_engine)

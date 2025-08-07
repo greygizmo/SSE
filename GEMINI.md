@@ -1,20 +1,29 @@
-# Project: GoSales - ICP & Whitespace Engine for Software Sales
+# Project: GoSales - ICP & Whitespace Engine (v2)
 
 ## Project Overview
 
-This project, codenamed "GoSales," is a multi-product Ideal Customer Profile (ICP) and whitespace analysis engine designed for software sales. The system analyzes historical sales data to score existing customers on their likelihood to purchase additional products, and to identify "whitespace" opportunities – products a customer has not purchased but is likely to need.
+This project, codenamed "GoSales," is a **division-focused Ideal Customer Profile (ICP) and whitespace analysis engine**. It is designed to help B2B sales organizations identify high-potential customers by analyzing historical sales data. The system scores existing customers on their likelihood to purchase from a specific business division (e.g., Solidworks, Simulation) and surfaces cross-sell and up-sell opportunities.
 
-The project is built in Python and leverages a modern data science stack, including:
+The key innovation in v2 is its **time-aware modeling architecture**. By using a strict `cutoff_date` to separate historical feature data from future target labels, the system avoids data leakage and produces realistic, actionable predictive scores.
+
+The project is built in Python and leverages a modern data science stack:
 
 *   **Data Manipulation:** Pandas, Polars
-*   **Database Interaction:** SQLAlchemy (for Azure SQL MI or SQLite)
+*   **Database Interaction:** SQLAlchemy (for Azure SQL MI or local SQLite)
 *   **Machine Learning:** Scikit-learn (for Logistic Regression), LightGBM
-*   **Whitespace Analysis:** MLxtend (for Market Basket analysis), Implicit (for Collaborative Filtering)
+*   **Model Management**: MLflow
 *   **User Interface:** Streamlit
-*   **Workflow Orchestration (planned):** Prefect
 *   **Linting and Formatting:** Ruff, Black
 
-The project is designed to be run locally on a single machine, with configuration managed through a `.env` file.
+## Core Architecture
+
+The project follows a modular, pipeline-driven architecture:
+
+1.  **ETL (`gosales/etl/`)**: Ingests raw, wide CSV sales logs and "unpivots" them into a tidy `fact_transactions` table. This is the clean foundation for all downstream analysis.
+2.  **Feature Engineering (`gosales/features/`)**: Creates a rich feature matrix for a specified division and `cutoff_date`. Features include RFM (Recency, Frequency, Monetary) metrics, product adoption signals (e.g., seat counts), and cross-divisional behavior.
+3.  **Model Training (`gosales/models/`)**: Trains a predictive model (e.g., Logistic Regression) to identify which customers are likely to purchase from the target division within a future prediction window.
+4.  **Scoring Pipeline (`gosales/pipeline/`)**: Orchestrates the entire workflow, from ETL to training to final scoring. Includes a separate `validate_holdout.py` script to test model performance on unseen future data.
+5.  **UI (`gosales/ui/`)**: A Streamlit dashboard for visualizing customer scores and exploring whitespace opportunities.
 
 ## Building and Running
 
@@ -28,38 +37,39 @@ The following steps outline how to set up and run the GoSales project.
 
 2.  **Install dependencies:**
     ```bash
-    pip install -r requirements.txt
+    pip install -r gosales/requirements.txt
     ```
 
 3.  **Configure environment variables:**
     *   Copy the `.env.template` file to `.env`.
-    *   Fill in the `AZSQL_*` variables to connect to an Azure SQL Managed Instance. If left blank, the application will fall back to using a local SQLite database.
-    *   Add your `OPENAI_API_KEY` or `GEMINI_API_KEY` if you wish to use the respective LLM vendor.
+    *   Fill in the `AZSQL_*` variables to connect to an Azure SQL Managed Instance. If left blank, the application will fall back to using a local SQLite database (`gosales.db`).
 
 4.  **Place data files:**
-    *   Place the raw CSV data files into the `data/` directory (this directory will need to be created).
+    *   Place primary training data (e.g., 2023-2024 sales logs) into `gosales/data/database_samples/`.
+    *   Place holdout validation data (e.g., 2025 YTD sales logs) into `gosales/data/holdout/`.
 
 5.  **Run the pipeline:**
-    *   The main pipeline can be executed by running:
+    *   The main training and scoring pipeline is executed via:
         ```bash
-        python pipeline/score_all.py
+        python gosales/pipeline/score_all.py
         ```
-    *   Alternatively, a `Makefile` may be provided with a command like `make all`.
+    *   To validate the trained model against the holdout data, run:
+        ```bash
+        python gosales/pipeline/validate_holdout.py
+        ```
 
 6.  **Launch the UI:**
     *   To view the results, start the Streamlit application:
         ```bash
-        streamlit run ui/app.py
+        streamlit run gosales/ui/app.py
         ```
+    *   On Windows, a convenience script is provided: `.\run_streamlit.ps1`.
 
 ## Development Conventions
 
-The project follows a structured and modular design to ensure code quality and maintainability.
-
-*   **Directory Structure:** The codebase is organized into distinct modules for ETL, feature engineering, modeling, whitespace analysis, and UI. This separation of concerns makes the project easier to navigate and extend.
-*   **Configuration:** All secrets and environment-specific settings are managed in a `.env` file and should never be hard-coded.
-*   **Logging:** All informational and error messages should be logged using the custom logger in `utils/logger.py`. Bare `print()` statements should be avoided.
-*   **Type Hinting and Docstrings:** All functions are expected to have clear type hints and docstrings to improve code clarity and maintainability.
-*   **Linting and Formatting:** The project uses `ruff` for linting and `black` for code formatting to ensure a consistent coding style.
-*   **Testing:** The project will include a suite of `pytest` unit tests to ensure the correctness of individual functions.
-*   **Commits:** Commit messages should follow the Conventional Commits specification (`<scope>: <imperative summary>`).
+*   **Modular Design**: The codebase is organized into distinct modules for ETL, features, models, etc., to ensure clarity and maintainability.
+*   **Configuration**: Secrets and environment-specific settings are managed in a `.env` file.
+*   **Logging**: A custom logger in `utils/logger.py` is used for all informational and error messages.
+*   **Type Hinting & Docstrings**: All functions have clear type hints and docstrings.
+*   **Linting & Formatting**: `ruff` and `black` are used to enforce a consistent coding style.
+*   **Commits**: Commit messages follow the Conventional Commits specification.
