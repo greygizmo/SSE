@@ -1,5 +1,10 @@
 import polars as pl
 import pandas as pd
+try:
+    from rapidfuzz import process, fuzz
+    FUZZY_AVAILABLE = True
+except Exception:
+    FUZZY_AVAILABLE = False
 from sqlalchemy import text
 from gosales.utils.db import get_db_connection
 from gosales.utils.logger import get_logger
@@ -32,18 +37,164 @@ def build_star_schema(engine):
         logger.error(f"Failed to read sales_log table: {e}")
         return
 
-    # --- 1. Create dim_customer ---
-    logger.info("Creating dim_customer table...")
-    dim_customer = (
+    # --- 1. Create dim_customer with industry enrichment ---
+    logger.info("Creating dim_customer table with industry enrichment...")
+
+    # Read industry enrichment data if available
+    try:
+        industry_enrichment_pd = pd.read_sql("SELECT * FROM industry_enrichment", engine)
+        industry_enrichment = pl.from_pandas(industry_enrichment_pd)
+        logger.info(f"Successfully loaded industry enrichment data with {len(industry_enrichment)} records.")
+    except Exception as e:
+        logger.warning(f"Industry enrichment table not found: {e}")
+        industry_enrichment = None
+
+    # Start with basic customer data from sales_log
+    # Keep both the legacy CustomerId and the ERP internal Id (ns_id) for robust joining
+    # Build per-customer record; keep exact and normalised customer name for joining with enrichment
+    dim_customer_base = (
         sales_log.lazy()
-        .select(["Customer", "CustomerId"])
-        .unique(subset=["CustomerId"])
-        .rename({"Customer": "customer_name", "CustomerId": "customer_id"})
+        .select(["Customer", "CustomerId"]) 
+        .rename({
+            "Customer": "customer_name",
+            "CustomerId": "customer_id",
+        })
+        .group_by("customer_id")
+        .agg([
+            pl.col("customer_name").first().cast(pl.Utf8).str.strip_chars().alias("customer_name"),
+        ])
+        .with_columns([
+            # Keep primary customer_id numeric (to match fact tables)
+            pl.col("customer_id").cast(pl.Float64),
+            # Normalised name and numeric prefix for robust matching
+            pl.col("customer_name").cast(pl.Utf8).str.to_lowercase().str.replace_all(r"\s+", " ").alias("customer_name_norm"),
+            pl.col("customer_name")
+                .cast(pl.Utf8)
+                .str.extract(r"^\s*(\d+)")
+                .cast(pl.Int64, strict=False)
+                .alias("customer_prefix_id"),
+        ])
         .filter(pl.col("customer_id").is_not_null())
-        .collect()
     )
+
+    if industry_enrichment is not None:
+        # Join with industry enrichment data
+        # Note: Mapping CustomerId from sales_log to ID from industry enrichment
+        industry_clean = (
+            industry_enrichment.lazy()
+            .select([
+                "Customer",
+                "Cleaned Customer Name",
+                "Web Address",
+                "Industry",
+                "Industry Sub List",
+                "Reasoning",
+                "ID",
+            ])
+            .rename({
+                "Customer": "customer_name",
+                "Cleaned Customer Name": "cleaned_customer_name",
+                "Web Address": "web_address",
+                "Industry": "industry",
+                "Industry Sub List": "industry_sub",
+                "Reasoning": "industry_reasoning",
+                "ID": "industry_id_raw",
+            })
+            .with_columns([
+                # Normalise customer name for exact match join
+                pl.col("customer_name").cast(pl.Utf8).str.strip_chars().alias("customer_name"),
+                pl.col("customer_name").cast(pl.Utf8).str.to_lowercase().str.replace_all(r"\s+", " ").alias("customer_name_norm"),
+                pl.col("industry_id_raw").cast(pl.Utf8).str.strip_chars().cast(pl.Int64, strict=False).alias("industry_id_int"),
+            ])
+            .filter(pl.col("customer_name").is_not_null())
+        )
+        
+        # Left join to preserve all customers, even those without industry data
+        # A) Join on normalised customer name
+        dc_name = (
+            dim_customer_base
+            .join(industry_clean.select(["customer_name_norm", "industry", "industry_sub", "web_address", "cleaned_customer_name", "industry_reasoning"]).unique(),
+                  on="customer_name_norm", how="left")
+        )
+
+        # B) Fallback join on numeric prefix id -> enrichment ID
+        dc_prefix = (
+            dim_customer_base
+            .join(industry_clean.select(["industry_id_int", "industry", "industry_sub", "web_address", "cleaned_customer_name", "industry_reasoning"]).unique(),
+                  left_on="customer_prefix_id", right_on="industry_id_int", how="left")
+            .rename({
+                "industry": "industry_fallback",
+                "industry_sub": "industry_sub_fallback",
+                "web_address": "web_address_fallback",
+                "cleaned_customer_name": "cleaned_customer_name_fallback",
+                "industry_reasoning": "industry_reasoning_fallback",
+            })
+        )
+
+        dim_customer = (
+            dc_name
+            .join(dc_prefix.select(["customer_id", "industry_fallback", "industry_sub_fallback", "web_address_fallback", "cleaned_customer_name_fallback", "industry_reasoning_fallback"]), on="customer_id", how="left")
+            .with_columns([
+                pl.coalesce([pl.col("industry"), pl.col("industry_fallback")]).alias("industry"),
+                pl.coalesce([pl.col("industry_sub"), pl.col("industry_sub_fallback")]).alias("industry_sub"),
+                pl.coalesce([pl.col("web_address"), pl.col("web_address_fallback")]).alias("web_address"),
+                pl.coalesce([pl.col("cleaned_customer_name"), pl.col("cleaned_customer_name_fallback")]).alias("cleaned_customer_name"),
+                pl.coalesce([pl.col("industry_reasoning"), pl.col("industry_reasoning_fallback")]).alias("industry_reasoning"),
+            ])
+            .drop(["industry_fallback", "industry_sub_fallback", "web_address_fallback", "cleaned_customer_name_fallback", "industry_reasoning_fallback"])
+            .collect()
+        )
+
+        # C) Optional fuzzy-match fallback for remaining unmatched names
+        try:
+            if FUZZY_AVAILABLE:
+                unmatched = dim_customer.filter(pl.col("industry").is_null())
+                if len(unmatched) > 0:
+                    logger.info(f"Attempting fuzzy match for {len(unmatched)} customers without industry data...")
+                    # Collect eager frames to pandas
+                    unmatched_pd = unmatched.select(["customer_id", "customer_name_norm"]).to_pandas()
+                    choices_pd = industry_clean.select(["customer_name_norm"]).unique().collect().to_pandas()
+                    choices = choices_pd["customer_name_norm"].dropna().tolist()
+
+                    # Build mapping using high threshold to avoid bad matches
+                    matches = []
+                    for name in unmatched_pd["customer_name_norm"].fillna(""):
+                        if not name:
+                            matches.append((name, None, 0))
+                            continue
+                        match = process.extractOne(name, choices, scorer=fuzz.token_sort_ratio)
+                        if match and match[1] >= 95:
+                            matches.append((name, match[0], match[1]))
+                        else:
+                            matches.append((name, None, 0))
+
+                    match_df = pd.DataFrame(matches, columns=["customer_name_norm", "matched_name_norm", "score"]).dropna(subset=["matched_name_norm"]) 
+                    if not match_df.empty:
+                        # Join back to enrichment to fetch attributes
+                        enrich_pd = industry_clean.select(["customer_name_norm", "industry", "industry_sub", "web_address", "cleaned_customer_name", "industry_reasoning"]).unique().collect().to_pandas()
+                        fuzz_join = match_df.merge(enrich_pd, left_on="matched_name_norm", right_on="customer_name_norm", how="left")
+                        fuzz_join = fuzz_join[["customer_name_norm_x", "industry", "industry_sub", "web_address", "cleaned_customer_name", "industry_reasoning"]].rename(columns={"customer_name_norm_x": "customer_name_norm"})
+
+                        # Merge into dim_customer
+                        dim_pd = dim_customer.to_pandas()
+                        dim_pd = dim_pd.merge(fuzz_join, on="customer_name_norm", how="left", suffixes=("", "_fuzzy"))
+                        for col in ["industry", "industry_sub", "web_address", "cleaned_customer_name", "industry_reasoning"]:
+                            dim_pd[col] = dim_pd[col].where(dim_pd[col].notna(), dim_pd[f"{col}_fuzzy"])  # fill nulls with fuzzy
+                            fcol = f"{col}_fuzzy"
+                            if fcol in dim_pd.columns:
+                                dim_pd.drop(columns=[fcol], inplace=True)
+                        dim_customer = pl.from_pandas(dim_pd)
+                        logger.info("Fuzzy matching applied to fill remaining industry data.")
+            else:
+                logger.info("rapidfuzz not available; skipping fuzzy fallback.")
+        except Exception as e:
+            logger.warning(f"Fuzzy match fallback failed: {e}")
+        logger.info(f"Successfully created dim_customer table with {len(dim_customer)} customers, industry data available for {dim_customer.filter(pl.col('industry').is_not_null()).height} customers.")
+    else:
+        dim_customer = dim_customer_base.collect()
+        logger.info(f"Successfully created dim_customer table with {len(dim_customer)} unique customers (no industry data).")
+
     dim_customer.write_database("dim_customer", engine, if_table_exists="replace")
-    logger.info(f"Successfully created dim_customer table with {len(dim_customer)} unique customers.")
 
     # --- 2. Define SKU and Division Mapping ---
     # This mapping is the core logic for the unpivot operation.

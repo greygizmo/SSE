@@ -6,6 +6,7 @@ pyodbc
 scikit-learn
 lightgbm
 mlflow
+rapidfuzz
 implicit
 mlxtend
 streamlit

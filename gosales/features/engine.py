@@ -102,13 +102,20 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
             pl.col("gross_profit").filter(pl.col("order_date").dt.year().is_in([2023, 2024])).sum().alias("total_gp_last_2y"),
             pl.mean("gross_profit").alias("avg_transaction_gp"),
 
-            # Growth & Scale Features
-            pl.col("quantity").filter(pl.col("product_sku") == "SWX_Core").sum().alias("total_core_seats"),
-            pl.col("quantity").filter(pl.col("product_sku") == "SWX_Pro_Prem").sum().alias("total_pro_prem_seats"),
+            # Cross-division behavioral patterns (non-leaky features)
+            pl.col("product_division").filter(pl.col("product_division") == "Services").len().alias("services_transaction_count"),
+            pl.col("product_division").filter(pl.col("product_division") == "Simulation").len().alias("simulation_transaction_count"),
+            pl.col("product_division").filter(pl.col("product_division") == "Hardware").len().alias("hardware_transaction_count"),
+
+            # Services engagement (proxy for technical sophistication)
+            pl.col("gross_profit").filter(pl.col("product_division") == "Services").sum().alias("total_services_gp"),
+            pl.col("gross_profit").filter(pl.col("product_sku") == "Training").sum().alias("total_training_gp"),
+
+            # Growth trajectory features
+            pl.col("gross_profit").filter(pl.col("order_date").dt.year() == 2024).sum().alias("gp_2024"),
+            pl.col("gross_profit").filter(pl.col("order_date").dt.year() == 2023).sum().alias("gp_2023"),
             
-            # Ecosystem Engagement Features
-            pl.col("product_sku").filter(pl.col("product_sku").is_in(["Core_New_UAP", "Pro_Prem_New_UAP"])).is_not_null().any().alias("has_uap_support"),
-            pl.col("product_sku").filter(pl.col("product_sku") == "Success Plan GP").is_not_null().any().alias("has_success_plan"),
+            # General engagement features
             pl.n_unique("product_division").alias("product_diversity_score"),
         ])
         .collect()
@@ -172,13 +179,69 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
     # Fill nulls and ensure proper data types
     feature_matrix_pd = feature_matrix_pd.fillna(0)
     
-    # Convert boolean columns properly
-    boolean_columns = ['has_uap_support', 'has_success_plan']
-    for col in boolean_columns:
-        if col in feature_matrix_pd.columns:
-            feature_matrix_pd[col] = feature_matrix_pd[col].astype(int)
-    
+    # Convert back to polars
     feature_matrix = pl.from_pandas(feature_matrix_pd)
+
+    # Join with customer industry data
+    try:
+        logger.info("Joining industry data with feature matrix...")
+        customers_with_industry_pd = pd.read_sql("""
+            SELECT customer_id, industry, industry_sub 
+            FROM dim_customer 
+            WHERE industry IS NOT NULL
+        """, engine)
+        
+        if not customers_with_industry_pd.empty:
+            # Normalise text
+            customers_with_industry_pd['industry'] = customers_with_industry_pd['industry'].astype(str).str.strip()
+            customers_with_industry_pd['industry_sub'] = customers_with_industry_pd['industry_sub'].astype(str).str.strip()
+
+            # Top-N categories
+            top_industries = customers_with_industry_pd['industry'].value_counts().head(20).index.tolist()
+            top_subs = customers_with_industry_pd['industry_sub'].value_counts().head(30).index.tolist()
+
+            # Industry dummies
+            for industry in top_industries:
+                key = industry.replace(" ", "_").replace("&", "and").replace("-", "_").lower()
+                customers_with_industry_pd[f"is_{key}"] = (customers_with_industry_pd['industry'] == industry).astype(int)
+
+            # Sub-industry dummies
+            for sub in top_subs:
+                key = sub.replace(" ", "_").replace("&", "and").replace("-", "_").lower()
+                customers_with_industry_pd[f"is_sub_{key}"] = (customers_with_industry_pd['industry_sub'] == sub).astype(int)
+
+            # Interaction examples: industry × services engagement will be created post-join
+
+            # Convert to polars and join
+            industry_features = pl.from_pandas(customers_with_industry_pd)
+            feature_columns = ["customer_id"] + \
+                [f"is_{i.replace(' ', '_').replace('&','and').replace('-','_').lower()}" for i in top_industries] + \
+                [f"is_sub_{s.replace(' ', '_').replace('&','and').replace('-','_').lower()}" for s in top_subs]
+
+            feature_matrix = feature_matrix.join(
+                industry_features.select(feature_columns),
+                on="customer_id",
+                how="left"
+            ).fill_null(0)
+            
+            logger.info(f"Successfully joined industry data. Added {len(top_industries)} industry and {len(top_subs)} sub-industry dummies.")
+        else:
+            logger.warning("No industry data available for joining.")
+            
+    except Exception as e:
+        logger.warning(f"Could not join industry data: {e}")
+
+    # Example interaction features (post-join) if present
+    try:
+        interaction_cols = [c for c in feature_matrix.columns if c.startswith("is_") or c.startswith("is_sub_")]
+        if "total_services_gp" in feature_matrix.columns and interaction_cols:
+            # Multiply normalized services GP by industry flags (simple scaled interaction)
+            max_services = float(feature_matrix["total_services_gp"].max()) or 1.0
+            svc_norm = feature_matrix["total_services_gp"].cast(pl.Float64) / max_services
+            for c in interaction_cols[:10]:  # limit to top few to avoid explosion
+                feature_matrix = feature_matrix.with_columns((svc_norm * feature_matrix[c].cast(pl.Float64)).alias(f"{c}_x_services"))
+    except Exception:
+        pass
 
     logger.info(f"Successfully created feature matrix for division: {division_name}.")
     logger.info(f"Total customers processed: {feature_matrix.height}")

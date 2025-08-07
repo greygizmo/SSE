@@ -29,6 +29,7 @@ def score_all():
     # Define the CSV files and their corresponding table names
     csv_files = {
         "Sales_Log.csv": "sales_log",
+        "TR - Industry Enrichment.csv": "industry_enrichment",
     }
     for file_name, table_name in csv_files.items():
         file_path = DATA_DIR / "database_samples" / file_name
@@ -39,8 +40,8 @@ def score_all():
 
     # --- 3. Model Training Phase ---
     logger.info(f"--- Phase 2: Training model for {target_division} division ---")
-    # Use 2024-12-31 as cutoff, predict 6 months into 2025
-    train_division_model(db_engine, target_division, cutoff_date="2024-12-31", prediction_window_months=6)
+    # Use 2024-09-30 as cutoff, predict 3 months into 2024 (Oct-Dec 2024)
+    train_division_model(db_engine, target_division, cutoff_date="2024-09-30", prediction_window_months=3)
     logger.info("--- Model Training Phase Complete ---")
 
     # --- 4. Scoring Phase ---
