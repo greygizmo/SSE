@@ -77,10 +77,21 @@ elif page == "Features & Explainability":
     st.subheader("SHAP Values (per-customer)")
     with st.expander("How to interpret SHAP"):
         st.markdown(
-            "- Positive SHAP: pushes a customer's ICP score up (more likely to buy).\n"
-            "- Negative SHAP: pushes the score down (less likely).\n"
-            "- Magnitude: size of impact on the model's decision for that customer.\n"
-            "- Units: model margin; compare relatively across features for a customer."
+            """
+            - SHAP explains a single prediction by attributing impact to each feature.\
+              For binary classification, the model computes a score on the log-odds scale.\
+              The sum of all SHAP values + a baseline equals the model's raw score for that customer.\
+            - **Sign**: Positive SHAP increases the ICP likelihood; negative decreases it.\
+            - **Magnitude**: Absolute value is the strength of the effect for that customer.\
+            - **Categorical flags** (e.g., `is_industry...`, `is_sub_...`): 1 means the customer is in that group.\
+              A positive value indicates membership in that group is associated with higher conversion likelihood,\
+              conditioned on the other features.\
+            - **Interactions** (e.g., `_x_services`, `_x_avg_gp`, `_x_diversity`, `_x_growth`): quantify how the base\
+              effect of an industry/sub-industry changes as engagement or growth increases. Positive means the combo\
+              is especially favorable.\
+            - SHAP values are additive explanations; compare features for the same customer rather than across very\
+              different customers with very different profiles.\
+            """
         )
     shap_file = OUTPUTS_DIR / 'shap_values_solidworks.csv'
     if shap_file.exists():
@@ -88,6 +99,26 @@ elif page == "Features & Explainability":
         st.write("Sample of SHAP values (top 100 rows):")
         st.dataframe(shap_df.head(100), use_container_width=True)
         st.download_button("Download SHAP CSV", data=shap_df.to_csv(index=False), file_name='shap_values.csv')
+
+        # Merge customer name and ICP score; then show Top 100 by score
+        try:
+            icp_df = pd.read_csv(OUTPUTS_DIR / 'icp_scores.csv', usecols=['customer_id','customer_name','icp_score'])
+            # Align dtypes to ensure the join works
+            if 'customer_id' in shap_df.columns:
+                shap_df['customer_id'] = pd.to_numeric(shap_df['customer_id'], errors='coerce')
+            icp_df['customer_id'] = pd.to_numeric(icp_df['customer_id'], errors='coerce')
+            merged = shap_df.merge(icp_df, on='customer_id', how='left')
+            # Reorder columns to surface name and score first
+            leading_cols = [c for c in ['customer_name','icp_score','customer_id'] if c in merged.columns]
+            remaining_cols = [c for c in merged.columns if c not in leading_cols]
+            merged = merged[leading_cols + remaining_cols]
+            top_n = merged.sort_values('icp_score', ascending=False, na_position='last').head(100)
+            st.subheader("Top 100 Accounts by ICP Score (with SHAP detail)")
+            st.caption("Sorted by predicted probability; includes customer name and SHAP contributions.")
+            st.dataframe(top_n, use_container_width=True, height=500)
+            st.download_button("Download Top 100 (with SHAP)", data=top_n.to_csv(index=False), file_name='top100_shap.csv')
+        except Exception as e:
+            st.warning(f"Could not merge SHAP with scores for top-100 view: {e}")
         # Feature glossary
         st.subheader("Feature Glossary")
         def _describe_feature(name: str) -> str:
