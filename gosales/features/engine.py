@@ -200,14 +200,27 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
             top_industries = customers_with_industry_pd['industry'].value_counts().head(20).index.tolist()
             top_subs = customers_with_industry_pd['industry_sub'].value_counts().head(30).index.tolist()
 
+            # Helper to sanitize feature names for LightGBM (alnum + underscore only)
+            import re
+            def sanitize_key(text: str) -> str:
+                if text is None:
+                    return "unknown"
+                key = str(text).lower()
+                key = key.replace("&", " and ")
+                key = re.sub(r"[^0-9a-zA-Z]+", "_", key)
+                key = re.sub(r"_+", "_", key).strip("_")
+                if not key:
+                    key = "unknown"
+                return key
+
             # Industry dummies
-            for industry in top_industries:
-                key = industry.replace(" ", "_").replace("&", "and").replace("-", "_").lower()
+            industry_key_map = {industry: sanitize_key(industry) for industry in top_industries}
+            for industry, key in industry_key_map.items():
                 customers_with_industry_pd[f"is_{key}"] = (customers_with_industry_pd['industry'] == industry).astype(int)
 
             # Sub-industry dummies
-            for sub in top_subs:
-                key = sub.replace(" ", "_").replace("&", "and").replace("-", "_").lower()
+            sub_key_map = {sub: sanitize_key(sub) for sub in top_subs}
+            for sub, key in sub_key_map.items():
                 customers_with_industry_pd[f"is_sub_{key}"] = (customers_with_industry_pd['industry_sub'] == sub).astype(int)
 
             # Interaction examples: industry × services engagement will be created post-join
@@ -215,8 +228,8 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
             # Convert to polars and join
             industry_features = pl.from_pandas(customers_with_industry_pd)
             feature_columns = ["customer_id"] + \
-                [f"is_{i.replace(' ', '_').replace('&','and').replace('-','_').lower()}" for i in top_industries] + \
-                [f"is_sub_{s.replace(' ', '_').replace('&','and').replace('-','_').lower()}" for s in top_subs]
+                [f"is_{industry_key_map[i]}" for i in top_industries] + \
+                [f"is_sub_{sub_key_map[s]}" for s in top_subs]
 
             feature_matrix = feature_matrix.join(
                 industry_features.select(feature_columns),

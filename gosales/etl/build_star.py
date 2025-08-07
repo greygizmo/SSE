@@ -7,6 +7,7 @@ except Exception:
     FUZZY_AVAILABLE = False
 from sqlalchemy import text
 from gosales.utils.db import get_db_connection
+from gosales.utils.paths import OUTPUTS_DIR
 from gosales.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -156,28 +157,46 @@ def build_star_schema(engine):
                     choices_pd = industry_clean.select(["customer_name_norm"]).unique().collect().to_pandas()
                     choices = choices_pd["customer_name_norm"].dropna().tolist()
 
-                    # Build mapping using high threshold to avoid bad matches
-                    matches = []
-                    for name in unmatched_pd["customer_name_norm"].fillna(""):
-                        if not name:
-                            matches.append((name, None, 0))
-                            continue
-                        match = process.extractOne(name, choices, scorer=fuzz.token_sort_ratio)
-                        if match and match[1] >= 95:
-                            matches.append((name, match[0], match[1]))
-                        else:
-                            matches.append((name, None, 0))
+                    # Two-pass threshold: strict then slightly relaxed
+                    def run_fuzzy(names: pd.Series, threshold: int) -> pd.DataFrame:
+                        local_matches = []
+                        for name in names.fillna(""):
+                            if not name:
+                                local_matches.append((name, None, 0))
+                                continue
+                            match = process.extractOne(name, choices, scorer=fuzz.token_sort_ratio)
+                            if match and match[1] >= threshold:
+                                local_matches.append((name, match[0], match[1]))
+                            else:
+                                local_matches.append((name, None, 0))
+                        return pd.DataFrame(local_matches, columns=["customer_name_norm", "matched_name_norm", "score"])\
+                            .dropna(subset=["matched_name_norm"]) 
 
-                    match_df = pd.DataFrame(matches, columns=["customer_name_norm", "matched_name_norm", "score"]).dropna(subset=["matched_name_norm"]) 
+                    match_df = run_fuzzy(unmatched_pd["customer_name_norm"], 97)
+                    # For names still unmatched, try threshold 94
+                    if len(match_df) < len(unmatched_pd):
+                        remaining = unmatched_pd.merge(match_df[["customer_name_norm"]], on="customer_name_norm", how="left", indicator=True)
+                        remaining = remaining[remaining['_merge'] == 'left_only']
+                        if not remaining.empty:
+                            match_df_relaxed = run_fuzzy(remaining["customer_name_norm"], 94)
+                            match_df = pd.concat([match_df, match_df_relaxed], ignore_index=True)
+
                     if not match_df.empty:
                         # Join back to enrichment to fetch attributes
                         enrich_pd = industry_clean.select(["customer_name_norm", "industry", "industry_sub", "web_address", "cleaned_customer_name", "industry_reasoning"]).unique().collect().to_pandas()
                         fuzz_join = match_df.merge(enrich_pd, left_on="matched_name_norm", right_on="customer_name_norm", how="left")
-                        fuzz_join = fuzz_join[["customer_name_norm_x", "industry", "industry_sub", "web_address", "cleaned_customer_name", "industry_reasoning"]].rename(columns={"customer_name_norm_x": "customer_name_norm"})
+                        fuzz_join = fuzz_join[["customer_name_norm_x", "matched_name_norm", "score", "industry", "industry_sub", "web_address", "cleaned_customer_name", "industry_reasoning"]].rename(columns={"customer_name_norm_x": "customer_name_norm"})
+
+                        # Persist fuzzy pairs for audit
+                        try:
+                            OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+                            fuzz_join.to_csv(OUTPUTS_DIR / 'industry_fuzzy_matches.csv', index=False)
+                        except Exception:
+                            pass
 
                         # Merge into dim_customer
                         dim_pd = dim_customer.to_pandas()
-                        dim_pd = dim_pd.merge(fuzz_join, on="customer_name_norm", how="left", suffixes=("", "_fuzzy"))
+                        dim_pd = dim_pd.merge(fuzz_join.drop(columns=["matched_name_norm", "score"]), on="customer_name_norm", how="left", suffixes=("", "_fuzzy"))
                         for col in ["industry", "industry_sub", "web_address", "cleaned_customer_name", "industry_reasoning"]:
                             dim_pd[col] = dim_pd[col].where(dim_pd[col].notna(), dim_pd[f"{col}_fuzzy"])  # fill nulls with fuzzy
                             fcol = f"{col}_fuzzy"
@@ -195,6 +214,40 @@ def build_star_schema(engine):
         logger.info(f"Successfully created dim_customer table with {len(dim_customer)} unique customers (no industry data).")
 
     dim_customer.write_database("dim_customer", engine, if_table_exists="replace")
+
+    # Write industry coverage report
+    try:
+        OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+        dim_pd = dim_customer.to_pandas()
+        total = len(dim_pd)
+        with_industry = int(dim_pd['industry'].notna().sum())
+        summary_rows = [
+            {"metric": "total_customers", "value": total},
+            {"metric": "with_industry", "value": with_industry},
+            {"metric": "coverage_pct", "value": round(with_industry/total*100, 2) if total else 0},
+        ]
+        top_ind = (
+            dim_pd[['industry']]
+            .dropna()
+            .value_counts()
+            .reset_index()
+            .rename(columns={0: 'count'})
+            .head(50)
+        )
+        top_sub = (
+            dim_pd[['industry_sub']]
+            .dropna()
+            .value_counts()
+            .reset_index()
+            .rename(columns={0: 'count'})
+            .head(50)
+        )
+        pd.DataFrame(summary_rows).to_csv(OUTPUTS_DIR / 'industry_coverage_summary.csv', index=False)
+        top_ind.to_csv(OUTPUTS_DIR / 'industry_top50.csv', index=False)
+        top_sub.to_csv(OUTPUTS_DIR / 'sub_industry_top50.csv', index=False)
+        logger.info("Wrote industry coverage reports to outputs directory.")
+    except Exception as e:
+        logger.warning(f"Failed to write industry coverage reports: {e}")
 
     # --- 2. Define SKU and Division Mapping ---
     # This mapping is the core logic for the unpivot operation.

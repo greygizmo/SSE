@@ -3,6 +3,9 @@ from sklearn.model_selection import train_test_split
 from sklearn.linear_model import LogisticRegression
 from lightgbm import LGBMClassifier
 from sklearn.metrics import roc_auc_score
+import shap
+import pandas as pd
+from gosales.utils.paths import OUTPUTS_DIR
 import mlflow
 import shutil
 import click
@@ -92,6 +95,30 @@ def train_division_model(engine, division_name: str, cutoff_date: str = "2024-12
     
     mlflow.sklearn.save_model(best_model, str(model_path))
     logger.info(f"Successfully trained and saved {division_name} model to {model_path}")
+
+    # --- SHAP Explainability export ---
+    try:
+        OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+        feature_names = list(X.columns)
+        if best_model_name == "LightGBM":
+            explainer = shap.TreeExplainer(best_model)
+            shap_values = explainer.shap_values(X)
+            # For binary classification, shap_values is a list [neg, pos]
+            if isinstance(shap_values, list) and len(shap_values) == 2:
+                shap_matrix = shap_values[1]
+            else:
+                shap_matrix = shap_values
+        else:
+            # Linear model SHAP
+            explainer = shap.LinearExplainer(best_model, X_train)
+            shap_matrix = explainer.shap_values(X)
+
+        shap_df = pd.DataFrame(shap_matrix, columns=feature_names)
+        shap_df.insert(0, 'customer_id', feature_matrix['customer_id'].to_pandas().values)
+        shap_df.to_csv(OUTPUTS_DIR / f"shap_values_{division_name.lower()}.csv", index=False)
+        logger.info("Exported SHAP values for explainability.")
+    except Exception as e:
+        logger.warning(f"Failed to compute/export SHAP values: {e}")
 
 @click.command()
 @click.option('--division', default='Solidworks', help='The division to train a model for.')

@@ -16,3 +16,4 @@ ruff
 black
 pytest
 PyYAML
+shap
