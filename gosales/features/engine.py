@@ -225,9 +225,15 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
             stdv = float(np.std(y))
             return pd.Series({'slope': slope, 'std': stdv})
 
-        gp_dynamics = monthly.groupby('customer_id').apply(lambda df: _slope_std(df, 'month_gp')).reset_index()
+        try:
+            gp_dynamics = monthly.groupby('customer_id').apply(lambda df: _slope_std(df, 'month_gp'), include_groups=False).reset_index()
+        except TypeError:
+            gp_dynamics = monthly.groupby('customer_id').apply(lambda df: _slope_std(df, 'month_gp')).reset_index()
         gp_dynamics.rename(columns={'slope': 'gp_monthly_slope_12m', 'std': 'gp_monthly_std_12m'}, inplace=True)
-        tx_dynamics = monthly.groupby('customer_id').apply(lambda df: _slope_std(df, 'month_tx')).reset_index()
+        try:
+            tx_dynamics = monthly.groupby('customer_id').apply(lambda df: _slope_std(df, 'month_tx'), include_groups=False).reset_index()
+        except TypeError:
+            tx_dynamics = monthly.groupby('customer_id').apply(lambda df: _slope_std(df, 'month_tx')).reset_index()
         tx_dynamics.rename(columns={'slope': 'tx_monthly_slope_12m', 'std': 'tx_monthly_std_12m'}, inplace=True)
 
         # Tenure and interpurchase intervals
@@ -241,7 +247,10 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
             diffs = np.diff(dates).astype('timedelta64[D]').astype(int)
             return pd.Series({'ipi_median_days': float(np.median(diffs)), 'ipi_mean_days': float(np.mean(diffs)), 'last_gap_days': float((cutoff_dt - g['order_date'].max()).days)})
 
-        ipi = fd.groupby('customer_id').apply(_intervals).reset_index()
+        try:
+            ipi = fd.groupby('customer_id').apply(_intervals, include_groups=False).reset_index()
+        except TypeError:
+            ipi = fd.groupby('customer_id').apply(_intervals).reset_index()
 
         # Active months over last 24 months
         last24 = fd[(fd['order_date'] > (cutoff_dt - pd.DateOffset(months=24))) & (fd['order_date'] <= cutoff_dt)].copy()
@@ -519,6 +528,36 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
     except Exception:
         pass
 
+    # Returns features (12m, all divisions)
+    try:
+        last12_mask = (fd['order_date'] > (cutoff_dt - pd.DateOffset(months=12))) & (fd['order_date'] <= cutoff_dt)
+        sub12a = fd.loc[last12_mask, ['customer_id', 'gross_profit']].copy()
+        sub12a['is_return'] = (pd.to_numeric(sub12a['gross_profit'], errors='coerce') < 0).astype(int)
+        ret_counts_a = sub12a.groupby('customer_id')['is_return'].sum().rename('returns__all__return_tx_n__12m').reset_index()
+        tx_counts_a = sub12a.groupby('customer_id')['is_return'].count().rename('tx_n_12m_all').reset_index()
+        reta = ret_counts_a.merge(tx_counts_a, on='customer_id', how='left')
+        reta['returns__all__return_rate__12m'] = reta['returns__all__return_tx_n__12m'] / reta['tx_n_12m_all'].replace(0, np.nan)
+        reta['returns__all__return_rate__12m'] = reta['returns__all__return_rate__12m'].fillna(0.0)
+        feature_matrix_pd = feature_matrix_pd.merge(reta[['customer_id','returns__all__return_tx_n__12m','returns__all__return_rate__12m']], on='customer_id', how='left')
+        feature_matrix_pd['returns__all__return_tx_n__12m'] = feature_matrix_pd['returns__all__return_tx_n__12m'].fillna(0)
+        feature_matrix_pd['returns__all__return_rate__12m'] = feature_matrix_pd['returns__all__return_rate__12m'].fillna(0.0)
+    except Exception:
+        pass
+
+    # Diversity across windows: SKU nunique (all/div)
+    try:
+        for w in window_months:
+            maskw = (fd['order_date'] > (cutoff_dt - pd.DateOffset(months=w))) & (fd['order_date'] <= cutoff_dt)
+            dlw = fd.loc[maskw, ['customer_id', 'product_division', 'product_sku']].copy()
+            if not dlw.empty:
+                sku_all_w = dlw.groupby('customer_id')['product_sku'].nunique().rename(f'diversity__all__sku_nunique__{w}m').reset_index()
+                sku_div_w = dlw.loc[dlw['product_division'] == division_name].groupby('customer_id')['product_sku'].nunique().rename(f'diversity__div__sku_nunique__{w}m').reset_index()
+                feature_matrix_pd = feature_matrix_pd.merge(sku_all_w, on='customer_id', how='left').merge(sku_div_w, on='customer_id', how='left')
+                feature_matrix_pd[f'diversity__all__sku_nunique__{w}m'] = feature_matrix_pd[f'diversity__all__sku_nunique__{w}m'].fillna(0)
+                feature_matrix_pd[f'diversity__div__sku_nunique__{w}m'] = feature_matrix_pd[f'diversity__div__sku_nunique__{w}m'].fillna(0)
+    except Exception:
+        pass
+
     # Winsorize monetary gp_sum features based on config
     try:
         p = load_config().features.gp_winsor_p
@@ -532,14 +571,15 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
                     feature_matrix_pd[col] = s.clip(lower=lower, upper=upper)
     except Exception:
         pass
-    # Add missingness flags if configured
+    # Add missingness flags if configured (single concat to avoid fragmentation)
     try:
         if load_config().features.add_missingness_flags:
-            for col in list(feature_matrix_pd.columns):
-                if col == 'customer_id' or col == 'bought_in_division':
-                    continue
-                miss_col = f"{col}_missing"
-                feature_matrix_pd[miss_col] = 0  # filled already; hook for future per-block missing
+            cols = [c for c in feature_matrix_pd.columns if c not in ('customer_id','bought_in_division')]
+            if cols:
+                import numpy as np
+                zeros = np.zeros((len(feature_matrix_pd), len(cols)), dtype=np.int8)
+                flags = pd.DataFrame(zeros, columns=[f"{c}_missing" for c in cols], index=feature_matrix_pd.index)
+                feature_matrix_pd = pd.concat([feature_matrix_pd, flags], axis=1)
     except Exception:
         pass
     
