@@ -53,8 +53,14 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
             feature_data = transactions_pd.copy()
             prediction_data = transactions_pd.copy()
         
+        # Enforce consistent dtypes for join keys
         transactions = pl.from_pandas(feature_data)
-        customers = pl.from_pandas(pd.read_sql("SELECT customer_id FROM dim_customer", engine))
+        if "customer_id" in transactions.columns:
+            transactions = transactions.with_columns(pl.col("customer_id").cast(pl.Int64, strict=False))
+
+        customers_pd = pd.read_sql("SELECT customer_id FROM dim_customer", engine)
+        customers_pd["customer_id"] = pd.to_numeric(customers_pd["customer_id"], errors="coerce").astype("Int64")
+        customers = pl.from_pandas(customers_pd).with_columns(pl.col("customer_id").cast(pl.Int64, strict=False))
     except Exception as e:
         logger.error(f"Failed to read necessary tables from the database: {e}")
         return pl.DataFrame()

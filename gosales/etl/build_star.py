@@ -108,8 +108,8 @@ def build_star_schema(engine):
             pl.col("customer_name").first().cast(pl.Utf8).str.strip_chars().alias("customer_name"),
         ])
         .with_columns([
-            # Keep primary customer_id numeric (to match fact tables)
-            pl.col("customer_id").cast(pl.Float64),
+            # Keep primary customer_id as integer to match fact tables and downstream joins
+            pl.col("customer_id").cast(pl.Int64, strict=False),
             # Normalised name and numeric prefix for robust matching
             pl.col("customer_name").cast(pl.Utf8).str.to_lowercase().str.replace_all(r"\s+", " ").alias("customer_name_norm"),
             pl.col("customer_name")
