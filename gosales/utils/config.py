@@ -86,6 +86,27 @@ class Config:
 
     modeling: 'Config.Modeling' = field(default_factory=Modeling)
 
+    # Phase 4 whitespace ranking configuration
+    @dataclass
+    class WhitespaceEligibility:
+        exclude_if_owned_ever: bool = True
+        exclude_if_recent_contact_days: int = 0
+        exclude_if_open_deal: bool = False
+        require_region_match: bool = False
+
+    @dataclass
+    class Whitespace:
+        weights: list[float] = field(default_factory=lambda: [0.60, 0.20, 0.10, 0.10])  # [p_icp_pct, lift_norm, als_norm, EV_norm]
+        normalize: str = "percentile"  # percentile | pooled
+        eligibility: 'Config.WhitespaceEligibility' = field(default_factory=WhitespaceEligibility)
+        capacity_mode: str = "top_percent"  # top_percent | per_rep | hybrid
+        accounts_per_rep: int = 25
+        ev_cap_percentile: float = 0.95
+        als_coverage_threshold: float = 0.30
+        bias_division_max_share_topN: float = 0.6
+
+    whitespace: 'Config.Whitespace' = field(default_factory=Whitespace)
+
     def to_dict(self) -> Dict[str, Any]:
         def _convert(obj: Any) -> Any:
             if isinstance(obj, Path):
@@ -104,6 +125,7 @@ class Config:
             "labels": _convert(self.labels),
             "features": _convert(self.features),
             "modeling": _convert(self.modeling),
+            "whitespace": _convert(self.whitespace),
         }
 
 
@@ -173,6 +195,7 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
     labels_cfg = cfg_dict.get("labels", {})
     feat_cfg = cfg_dict.get("features", {})
     mdl_cfg = cfg_dict.get("modeling", {})
+    ws_cfg = cfg_dict.get("whitespace", {})
 
     cfg = Config(
         paths=_paths_from_dict(paths_dict),
@@ -218,6 +241,21 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
             calibration_methods=list(mdl_cfg.get("calibration_methods", ["platt", "isotonic"])),
             top_k_percents=list(mdl_cfg.get("top_k_percents", [5, 10, 20])),
             capacity_percent=int(mdl_cfg.get("capacity_percent", 10)),
+        ),
+        whitespace=Config.Whitespace(
+            weights=list(ws_cfg.get("weights", [0.60, 0.20, 0.10, 0.10])),
+            normalize=str(ws_cfg.get("normalize", "percentile")),
+            eligibility=Config.WhitespaceEligibility(
+                exclude_if_owned_ever=bool(ws_cfg.get("eligibility", {}).get("exclude_if_owned_ever", True)),
+                exclude_if_recent_contact_days=int(ws_cfg.get("eligibility", {}).get("exclude_if_recent_contact_days", 0)),
+                exclude_if_open_deal=bool(ws_cfg.get("eligibility", {}).get("exclude_if_open_deal", False)),
+                require_region_match=bool(ws_cfg.get("eligibility", {}).get("require_region_match", False)),
+            ),
+            capacity_mode=str(ws_cfg.get("capacity_mode", "top_percent")),
+            accounts_per_rep=int(ws_cfg.get("accounts_per_rep", 25)),
+            ev_cap_percentile=float(ws_cfg.get("ev_cap_percentile", 0.95)),
+            als_coverage_threshold=float(ws_cfg.get("als_coverage_threshold", 0.30)),
+            bias_division_max_share_topN=float(ws_cfg.get("bias_division_max_share_topN", 0.6)),
         ),
     )
 

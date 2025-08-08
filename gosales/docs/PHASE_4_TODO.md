@@ -41,8 +41,8 @@
   - Deterministic checksum for ranked CSV. TODO
 
 - CLI
-  - `gosales/pipeline/rank_whitespace.py` with flags: `--cutoff`, `--window-months`, `--weights`, `--normalize`, `--capacity-mode`, `--accounts-per-rep`, `--config`. TODO
-  - Wire to existing Phase‑2/3 artifacts (features for EV segments; models for p_icp; ALS if enabled). TODO
+  - `gosales/pipeline/rank_whitespace.py` with flags: `--cutoff`, `--window-months`, `--weights`, `--normalize`, `--capacity-mode`, `--accounts-per-rep`, `--config`. PARTIAL (skeleton + percentile norm + blend)
+  - Wire to existing Phase‑2/3 artifacts (features for EV segments; models for p_icp; ALS if enabled). PARTIAL (features + model scoring wired)
 
 - Guardrails
   - Cross‑division bias: if one division > X% of top‑N, warn; optional diversification slice. TODO

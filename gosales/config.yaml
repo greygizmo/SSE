@@ -47,4 +47,18 @@ modeling:
   top_k_percents: [5, 10, 20]
   capacity_percent: 10
 
+whitespace:
+  weights: [0.60, 0.20, 0.10, 0.10]   # [p_icp_pct, lift_norm, als_norm, EV_norm]
+  normalize: percentile               # percentile | pooled
+  eligibility:
+    exclude_if_owned_ever: true
+    exclude_if_recent_contact_days: 21
+    exclude_if_open_deal: true
+    require_region_match: true
+  capacity_mode: top_percent          # top_percent | per_rep | hybrid
+  accounts_per_rep: 25
+  ev_cap_percentile: 0.95
+  als_coverage_threshold: 0.30
+  bias_division_max_share_topN: 0.6
+
 
