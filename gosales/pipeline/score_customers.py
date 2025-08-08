@@ -29,7 +29,20 @@ def score_customers_for_division(engine, division_name: str, model_path: Path):
         return pl.DataFrame()
     
     # Get feature matrix for all customers for the specified division
-    feature_matrix = create_feature_matrix(engine, division_name)
+    cutoff = None
+    window_months = None
+    try:
+        with open(model_path / "metadata.json", "r", encoding="utf-8") as f:
+            meta = json.load(f)
+            cutoff = meta.get("cutoff_date")
+            window_months = int(meta.get("prediction_window_months")) if meta.get("prediction_window_months") is not None else None
+    except Exception:
+        pass
+
+    if cutoff and window_months:
+        feature_matrix = create_feature_matrix(engine, division_name, cutoff, window_months)
+    else:
+        feature_matrix = create_feature_matrix(engine, division_name)
     
     if feature_matrix.is_empty():
         logger.warning(f"No feature matrix for {division_name}")
