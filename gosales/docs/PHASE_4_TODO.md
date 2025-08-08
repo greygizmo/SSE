@@ -1,11 +1,11 @@
 ### Phase 4 To-Do (Whitespace Ranking / Next‑Best‑Action vs playbook)
 
 - Config & setup
-  - Add `whitespace` section to `gosales/config.yaml` with: weights, normalization mode, eligibility rules, capacity modes, EV cap pctl, ALS coverage thresholds, diversification/bias guard thresholds. TODO
+  - Add `whitespace` section to `gosales/config.yaml` with: weights, normalization mode, eligibility rules, capacity modes, EV cap pctl, ALS coverage thresholds, diversification/bias guard thresholds. DONE
   - Snapshot resolved config; log settings at run start. TODO
 
 - Candidates & eligibility
-  - Build candidate set per `(customer, division, cutoff)` excluding divisions already owned pre‑cutoff (or last N months, configurable). TODO
+  - Build candidate set per `(customer, division, cutoff)` excluding divisions already owned pre‑cutoff (or last N months, configurable). PARTIAL (derived from div-scope tx_n/recency if present)
   - Enforce region/territory allow‑list, DNC/legal/compliance holds, and open‑deal exclusion; log counts per rule. TODO
   - Deterministic customer/division ordering for reproducible IDs. TODO
 
@@ -20,13 +20,13 @@
   - Graceful degradation: if a signal missing (e.g., ALS), set to 0, reduce weight if below coverage threshold; log weight adjustments. TODO
 
 - Scoring & ranking
-  - Champion blend (static): `score = w1*p_icp_pct + w2*lift_norm + w3*als_norm + w4*EV_norm` with defaults 0.60/0.20/0.10/0.10 and per‑division overrides. TODO
-  - Tie‑breakers: higher `p_icp`, higher `EV`, fresher activity, `customer_id` asc; deterministic stable sort. TODO
+  - Champion blend (static): `score = w1*p_icp_pct + w2*lift_norm + w3*als_norm + w4*EV_norm` with defaults 0.60/0.20/0.10/0.10 and per‑division overrides. DONE (configurable weights)
+  - Tie‑breakers: higher `p_icp`, higher `EV`, fresher activity, `customer_id` asc; deterministic stable sort. DONE (p_icp/EV/customer_id asc)
   - Optional challengers: meta‑learner or pairwise LTR on [p_icp, lift, als, EV] (behind flag). TODO
 
 - Business‑rule gating & capacity
-  - Apply gating AFTER scoring; log rule counts (kept/removed). TODO
-  - Capacity slicing modes: top‑N%, per‑rep capacity, hybrid with diversification; configurable and logged. TODO
+  - Apply gating AFTER scoring; log rule counts (kept/removed). PARTIAL (eligibility filter; needs per-rule counts)
+  - Capacity slicing modes: top‑N%, per‑rep capacity, hybrid with diversification; configurable and logged. PARTIAL (top_percent implemented; bias share check)
   - Cooldown logic: de‑emphasize accounts surfaced recently without action. TODO
 
 - Explanations
@@ -34,11 +34,11 @@
   - Content guard: no sensitive attributes; fallback reason if signals are weak. TODO
 
 - Artifacts
-  - `whitespace_{cutoff}.csv` with: `customer_id, division, score, p_icp, p_icp_pct, lift_norm, als_norm, EV_norm, nba_reason`. TODO
-  - `whitespace_explanations_{cutoff}.csv` with expanded fields if needed. TODO
-  - `whitespace_metrics_{cutoff}.json` (capture@K, diversity by division/segment, stability vs prior run). TODO
-  - `thresholds_whitespace_{cutoff}.csv` (capacity/threshold grid). TODO
-  - Deterministic checksum for ranked CSV. TODO
+  - `whitespace_{cutoff}.csv` with: `customer_id, division, score, p_icp, p_icp_pct, lift_norm, als_norm, EV_norm, nba_reason`. PARTIAL (core columns written)
+  - `whitespace_explanations_{cutoff}.csv` with expanded fields if needed. DONE
+  - `whitespace_metrics_{cutoff}.json` (capture@K, diversity by division/segment, stability vs prior run). PARTIAL (rows, checksum, division shares; add capture/stability)
+  - `thresholds_whitespace_{cutoff}.csv` (capacity/threshold grid). DONE (top_percent)
+  - Deterministic checksum for ranked CSV. DONE
 
 - CLI
   - `gosales/pipeline/rank_whitespace.py` with flags: `--cutoff`, `--window-months`, `--weights`, `--normalize`, `--capacity-mode`, `--accounts-per-rep`, `--config`. PARTIAL (skeleton + percentile norm + blend)

@@ -162,6 +162,17 @@ def main(cutoff: str, window_months: int, division: str | None, weights: str | N
             continue
         df = pd.read_parquet(feat_path)
 
+        # Derive owned pre-cutoff if not present (any div-scope tx in windows implies owned)
+        if 'owned_division_pre_cutoff' not in df.columns:
+            win_cols = [f'rfm__div__tx_n__{w}m' for w in cfg.features.windows_months]
+            present_cols = [c for c in win_cols if c in df.columns]
+            if present_cols:
+                df['owned_division_pre_cutoff'] = (df[present_cols].sum(axis=1) > 0).astype(bool)
+            elif 'rfm__div__recency_days__life' in df.columns:
+                df['owned_division_pre_cutoff'] = pd.to_numeric(df['rfm__div__recency_days__life'], errors='coerce').fillna(0) > 0
+            else:
+                df['owned_division_pre_cutoff'] = False
+
         # Eligibility
         df = _apply_eligibility(df, cfg)
         if df.empty:
@@ -200,6 +211,27 @@ def main(cutoff: str, window_months: int, division: str | None, weights: str | N
     out = pd.concat(rows, ignore_index=True)
     # Tie-breakers: higher p_icp, higher EV, then customer_id asc
     out = out.sort_values(['score', 'p_icp', 'EV_norm', 'customer_id'], ascending=[False, False, False, True])
+    # Capacity slicing (top_percent mode)
+    cap_mode = capacity_mode or cfg.whitespace.capacity_mode
+    thresholds_rows = []
+    selected = out
+    if cap_mode == 'top_percent':
+        cap_percent = cfg.modeling.capacity_percent
+        k = max(1, int(len(out) * (cap_percent / 100.0)))
+        thr = float(np.sort(out['score'].values)[-k])
+        selected = out[out['score'] >= thr]
+        thresholds_rows.append({'mode': 'top_percent', 'k_percent': cap_percent, 'threshold': thr, 'count': int(len(selected))})
+
+    # Cross-division bias share at capacity
+    shares = (
+        selected.groupby('division')['customer_id'].size().sort_values(ascending=False)
+    )
+    total_sel = max(1, int(len(selected)))
+    share_map = {div: float(cnt) / total_sel for div, cnt in shares.items()}
+    max_share = max(share_map.values()) if share_map else 0.0
+    if max_share > cfg.whitespace.bias_division_max_share_topN:
+        logger.warning(f"Division share {max_share:.2f} exceeds bias guard threshold at capacity")
+
     # Deterministic checksum
     checksum = pd.util.hash_pandas_object(out[['customer_id','division','score']]).sum()
     metrics = {
@@ -207,11 +239,20 @@ def main(cutoff: str, window_months: int, division: str | None, weights: str | N
         'weights': w,
         'rows': int(len(out)),
         'checksum': int(checksum),
+        'capacity_mode': cap_mode,
+        'selected_rows': int(len(selected)),
+        'division_shares_topN': share_map,
     }
     out_path = OUTPUTS_DIR / f"whitespace_{cutoff}.csv"
     out.to_csv(out_path, index=False)
+    # Explanations export (subset)
+    expl_path = OUTPUTS_DIR / f"whitespace_explanations_{cutoff}.csv"
+    out[['customer_id','division','score','nba_reason','p_icp','p_icp_pct','lift_norm','als_norm','EV_norm']].to_csv(expl_path, index=False)
+    # Thresholds export
+    pd.DataFrame(thresholds_rows).to_csv(OUTPUTS_DIR / f"thresholds_whitespace_{cutoff}.csv", index=False)
+    # Metrics export
     (OUTPUTS_DIR / f"whitespace_metrics_{cutoff}.json").write_text(pd.Series(metrics).to_json(indent=2), encoding='utf-8')
-    logger.info(f"Wrote {out_path} with {len(out)} rows")
+    logger.info(f"Wrote {out_path} with {len(out)} rows; selected {len(selected)} for capacity mode {cap_mode}")
 
 
 if __name__ == "__main__":
