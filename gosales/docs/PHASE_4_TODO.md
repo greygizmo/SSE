@@ -26,7 +26,7 @@
 
 - Business‑rule gating & capacity
   - Apply gating AFTER scoring; log rule counts (kept/removed). PARTIAL (per-rule counts aggregated when columns available)
-  - Capacity slicing modes: top‑N%, per‑rep capacity, hybrid with diversification; configurable and logged. PARTIAL (top_percent implemented; bias share check)
+  - Capacity slicing modes: top‑N%, per‑rep capacity, hybrid with diversification; configurable and logged. PARTIAL (top_percent + per_rep implemented; bias share check)
   - Cooldown logic: de‑emphasize accounts surfaced recently without action. TODO
 
 - Explanations

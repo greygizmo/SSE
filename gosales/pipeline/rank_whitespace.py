@@ -113,12 +113,27 @@ def _compute_affinity_lift(df: pd.DataFrame) -> pd.Series:
 
 
 def _compute_als_norm(df: pd.DataFrame, cfg) -> pd.Series:
-    # If ALS embeddings were exported to per-customer division similarity, consume; else zeros
+    # If explicit similarity present, use it
     for c in ["als_sim_division", "als_affinity"]:
         if c in df.columns:
             s = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
-            norm = _percentile_normalize(s).rename("als_norm")
-            return norm
+            return _percentile_normalize(s).rename("als_norm")
+    # Else, if embedding columns present (als_f0..als_fN), compute dot with division centroid from pre-cutoff owners
+    als_cols = [c for c in df.columns if c.startswith("als_f")]
+    if als_cols:
+        try:
+            owned_mask = df.get('owned_division_pre_cutoff', pd.Series(False, index=df.index)).astype(bool)
+            base = df.loc[owned_mask, als_cols]
+            if base.empty:
+                return pd.Series(0.0, index=df.index, name="als_norm")
+            centroid = base.mean(axis=0).values
+            # dot product
+            mat = df[als_cols].fillna(0.0).values
+            sim = mat.dot(centroid)
+            s = pd.Series(sim, index=df.index)
+            return _percentile_normalize(s).rename("als_norm")
+        except Exception:
+            return pd.Series(0.0, index=df.index, name="als_norm")
     return pd.Series(0.0, index=df.index, name="als_norm")
 
 
@@ -266,6 +281,7 @@ def main(cutoff: str, window_months: int, division: str | None, weights: str | N
             'lift_norm': lift_norm.values,
             'als_norm': als_norm.values,
             'EV_norm': ev_norm.values,
+            'label': df.get('bought_in_division', pd.Series(0, index=df.index)).astype(int).values,
         })
         # Blend
         tmp['score'] = (
@@ -305,6 +321,20 @@ def main(cutoff: str, window_months: int, division: str | None, weights: str | N
         thr = float(np.sort(out['score'].values)[-k])
         selected = out[out['score'] >= thr]
         thresholds_rows.append({'mode': 'top_percent', 'k_percent': cap_percent, 'threshold': thr, 'count': int(len(selected))})
+    elif cap_mode == 'per_rep':
+        # Select top N per rep if 'rep' column exists, else fallback to top_percent
+        n = accounts_per_rep or cfg.whitespace.accounts_per_rep
+        if 'rep' in out.columns:
+            selected = out.sort_values(['rep','score','p_icp','EV_norm','customer_id'], ascending=[True, False, False, False, True])
+            selected = selected.groupby('rep', as_index=False).head(n)
+            thresholds_rows.append({'mode': 'per_rep', 'accounts_per_rep': int(n), 'count': int(len(selected))})
+        else:
+            logger.warning("per_rep capacity requested but 'rep' column not found; falling back to top_percent")
+            cap_percent = cfg.modeling.capacity_percent
+            k = max(1, int(len(out) * (cap_percent / 100.0)))
+            thr = float(np.sort(out['score'].values)[-k])
+            selected = out[out['score'] >= thr]
+            thresholds_rows.append({'mode': 'top_percent', 'k_percent': cap_percent, 'threshold': thr, 'count': int(len(selected))})
 
     # Cross-division bias share at capacity
     shares = (
@@ -318,6 +348,19 @@ def main(cutoff: str, window_months: int, division: str | None, weights: str | N
 
     # Deterministic checksum
     checksum = pd.util.hash_pandas_object(out[['customer_id','division','score']]).sum()
+    # Capture@K (global) using available labels
+    capture_at_k = {}
+    try:
+        if 'label' in out.columns:
+            total_pos = int(out['label'].sum())
+            for k in list(set(getattr(cfg.modeling, 'top_k_percents', [10]))):
+                kk = max(1, int(len(out) * (k / 100.0)))
+                topk = out.nlargest(kk, ['score','p_icp','EV_norm','customer_id'])
+                hit = int(topk['label'].sum())
+                capture_at_k[str(k)] = float(hit / max(1, total_pos))
+    except Exception:
+        pass
+
     metrics = {
         'cutoff': cutoff,
         'weights': w,
@@ -327,6 +370,7 @@ def main(cutoff: str, window_months: int, division: str | None, weights: str | N
         'capacity_mode': cap_mode,
         'selected_rows': int(len(selected)),
         'division_shares_topN': share_map,
+        'capture_at_k': capture_at_k,
         'by_division': metrics_div,
     }
     out_path = OUTPUTS_DIR / f"whitespace_{cutoff}.csv"
