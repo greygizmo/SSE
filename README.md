@@ -1,27 +1,32 @@
-# GoSales Engine (v2)
+# GoSales Engine — ICP & Whitespace (Phases 0–3)
 
-A **division-focused Ideal Customer Profile (ICP) & Whitespace Engine** for B2B sales organizations.
-This project ingests raw CSV sales logs, transforms them into a tidy transaction table, engineers a rich set of behavioral features, and trains predictive models to score every customer's likelihood of purchasing from a specific business division.
-
-The key architectural shift in v2 is from a simple per-product model to a robust, **division-level, time-aware modeling pipeline**. This prevents the common "label leakage" problem and produces realistic, actionable scores.
+A division-focused Ideal Customer Profile (ICP) & Whitespace engine. The pipeline ingests raw sales logs, builds a curated star schema, engineers leakage-safe features at a time cutoff, trains and calibrates per-division models, and produces scores and whitespace opportunities ready for a Streamlit UI.
 
 ---
 
-## 1. Core Concepts
+## What’s implemented (by phase)
 
-| Phase | What it does | Key Files |
-|-------|--------------|-----------|
-| **ETL** | Loads raw wide CSVs → stages data → unpivots into a tidy `fact_transactions` table where each row is a single SKU sold. | `gosales/etl/build_star.py` |
-| **Feature Engineering** | Builds a feature matrix for a specific **division** (e.g., Solidworks) using data **up to a specified `cutoff_date`**. This includes recency, frequency, monetary, and cross-division behavioral features. | `gosales/features/engine.py` |
-| **Model Training** | Trains a model to predict which customers will buy from a division in a **future time window** (e.g., 6 months after the cutoff). This time-based split is critical for preventing leakage. | `gosales/models/train_division_model.py` |
-| **Customer Scoring** | Uses the trained model to generate ICP scores for all customers. | `gosales/pipeline/score_customers.py` |
-| **Whitespace Analysis** | Identifies products and divisions a customer has not purchased, prioritized by their ICP score. | `gosales/pipeline/score_customers.py` |
-| **Validation** | Tests the model's performance on a **holdout dataset** (e.g., 2025 data) to get a realistic measure of its predictive power. | `gosales/pipeline/validate_holdout.py` |
-| **Dashboard** | A Streamlit app to visualize ICP scores and explore whitespace opportunities. | `gosales/ui/app.py` |
+- Phase 0 — ETL, Star Schema, Contracts
+  - Tidy `fact_transactions` and `dim_customer` with enrichment and fuzzy fallback
+  - Contracts: required columns, PK checks, date-bounds; violations CSV
+  - Curated Parquet + QA: schema snapshot, row counts, violations, checksums
+  - CLI flags: `--config`, `--rebuild`, `--staging-only`, `--fail-soft`
+- Phase 1 — Labels
+  - Leakage-safe labels per `(customer, division, cutoff)` with modes: `expansion|all`
+  - Cohorts (`is_new_logo`, `is_expansion`, `is_renewal_like`), censoring detection
+  - Denylist SKUs and GP threshold via config; artifacts: labels parquet, prevalence CSV, cutoff JSON
+- Phase 2 — Features
+  - RFM windows (3/6/12/24m), trajectory (monthly slope/std), lifecycle (tenure, gaps, active months), seasonality, cross-division shares (EB-smoothed), diversity, returns
+  - Optional toggles: market-basket affinity, ALS embeddings
+  - Artifacts: features parquet, feature catalog CSV, feature stats JSON (coverage, winsor caps, checksum)
+  - Determinism and winsorization tests
+- Phase 3 — Modeling (initial)
+  - Config-driven modeling grids and seeds
+  - Training CLI for LR (elastic-net) and LGBM across multiple cutoffs, with calibration (Platt/Isotonic) and selection by mean lift@10 (tie-breaker Brier)
 
 ---
 
-## 2. Quick-Start (Windows/PowerShell)
+## Quick Start (Windows/PowerShell)
 
 ```powershell
 # 1) Clone the repository and set up the Python environment
@@ -37,27 +42,34 @@ copy "path\to\your\Sales_Log.csv" "gosales\data\database_samples\"
 # The holdout validation data (e.g., 2025 YTD)
 copy "path\to\your\Sales Log 2025 YTD.csv" "gosales\data\holdout\"
 
-# 3) Run the end-to-end training and scoring pipeline
-# This trains a model on historical data.
-python gosales/pipeline/score_all.py
+# 3) Phase 0 — Build star schema (curated)
+$env:PYTHONPATH = "$PWD"; python -m gosales.etl.build_star --config gosales/config.yaml --rebuild
 
-# 4) (Optional) Run the validation pipeline against holdout data
-# This tests the trained model on future data to get a realistic AUC.
-python gosales/pipeline/validate_holdout.py
+# 4) Phase 1 — Build labels
+$env:PYTHONPATH = "$PWD"; python -m gosales.pipeline.build_labels --division Solidworks --cutoff "2024-06-30" --window-months 6 --mode expansion --config gosales/config.yaml
 
-# 5) Launch the Streamlit Dashboard
-.\run_streamlit.ps1
+# 5) Phase 2 — Build features
+$env:PYTHONPATH = "$PWD"; python -m gosales.features.build --division Solidworks --cutoff "2024-06-30" --config gosales/config.yaml
+
+# 6) Phase 3 — Train models across cutoffs (example)
+$env:PYTHONPATH = "$PWD"; python -m gosales.models.train --division Solidworks --cutoffs "2023-06-30,2023-09-30,2023-12-31" --window-months 6 --models logreg,lgbm --calibration platt,isotonic --config gosales/config.yaml
+
+# 7) Score and generate whitespace + UI artifacts
+$env:PYTHONPATH = "$PWD"; python gosales/pipeline/score_all.py
+
+# 8) Launch the UI
+./run_streamlit.ps1
 ```
 
 ---
 
-## 6. Modeling & Validation Notes
+## Modeling & Validation Notes
 
 - Class imbalance is handled via class weights (LR) and `scale_pos_weight` (LightGBM).
 - Probability calibration curves are exported to `gosales/outputs/calibration_<division>.csv`.
 - Holdout labels for 2025 are derived directly from `gosales/data/holdout/Sales Log 2025 YTD.csv` using `Division == 'Solidworks'` and dates in Jan–Jun 2025.
 
-## 7. Feature Library (Phase 2 expansion)
+## Feature Library (Phase 2 highlights)
 
 The feature set includes and extends:
 - Core: recency, frequency, monetary; product and SKU diversity.
@@ -69,7 +81,7 @@ The feature set includes and extends:
 - SKU micro-signals (12m): sku_gp, sku_qty, gp_per_unit for key SKUs.
 - Industry join and selected interaction terms.
 
-Artifacts: `gosales/outputs/feature_catalog_<division>.csv` lists all feature names and coverage.
+Artifacts: `gosales/outputs/feature_catalog_<division>_<cutoff>.csv` lists feature names and coverage.
 
 ## 8. Changelog
 
@@ -79,7 +91,7 @@ Artifacts: `gosales/outputs/feature_catalog_<division>.csv` lists all feature na
 
 ---
 
-## 3. Data Flow
+## Data Flow
 
 The new data flow is designed to prevent leakage by strictly separating past and future data.
 
@@ -120,18 +132,15 @@ graph TD
 
 ---
 
-## 4. How to Add a New Division
+## Multi‑Division support
 
-The new architecture is designed for easy expansion. To add a model for the 'Simulation' division:
-
-1.  **Add to SKU Mapping**: In `gosales/etl/build_star.py`, ensure all relevant 'Simulation' SKUs are mapped to the `Simulation` division.
-2.  **Update Feature Engine**: In `gosales/features/engine.py`, add any features specific to Simulation cross-selling (e.g., `has_bought_solidworks`).
-3.  **Train the Model**: Run the training pipeline, but change the `target_division` in `gosales/pipeline/score_all.py` to `'Simulation'`.
-4.  **Update Scoring**: In `gosales/pipeline/score_customers.py`, add `'Simulation'` to the list of divisions to be scored.
+Known divisions are sourced from `etl/sku_map.division_set()`; cross-division features adapt automatically.
+Scoring auto-discovers models in `models/*_model` and scores each division with an available model.
+To add a division: extend `etl/sku_map.py` (or overrides CSV) with SKUs and division mapping; rebuild star and features; train with `--division <Name>`.
 
 ---
 
-## 5. Directory Layout
+## Repository structure
 
 ```
 gosales/
@@ -140,9 +149,9 @@ gosales/
 │  └─ holdout/              # Holdout validation data (e.g., 2025 YTD)
 ├─ etl/                      # Ingestion & star-schema builders
 ├─ features/                 # Time-aware feature engineering
-├─ models/                   # Training scripts & MLflow model artifacts
+├─ models/                   # Training CLI and artifacts
 ├─ pipeline/                 # Orchestration scripts (score_all, validate_holdout)
 ├─ ui/                       # Streamlit application
 ├─ utils/                    # DB helper, logger, etc.
-└─ outputs/                  # Pipeline results (scores, metrics)
+└─ outputs/                  # All run artifacts (git-ignored)
 ```
