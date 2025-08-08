@@ -4,7 +4,7 @@ import numpy as np
 from datetime import datetime
 from gosales.utils.db import get_db_connection
 from gosales.utils.logger import get_logger
-from gosales.utils.config import load_config
+from gosales.utils import config as cfg
 from gosales.features.utils import filter_to_cutoff, winsorize_series
 from gosales.utils.paths import OUTPUTS_DIR
 
@@ -170,13 +170,13 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
     
     # --- 3a. Windowed RFM and temporal dynamics (pandas) ---
     try:
-        cfg = load_config()
+        cfgmod = cfg.load_config()
         cutoff_dt = pd.to_datetime(cutoff_date) if cutoff_date else transactions_pd['order_date'].max()
         fd = feature_data.copy()
         fd['order_date'] = pd.to_datetime(fd['order_date'])
         fd = fd.sort_values(['customer_id', 'order_date'])
 
-        window_months = cfg.features.windows_months or [3, 6, 12, 24]
+        window_months = cfgmod.features.windows_months or [3, 6, 12, 24]
         per_customer_frames = []
         per_customer_frames_div = []
         for w in window_months:
@@ -265,16 +265,27 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
             active = pd.DataFrame(columns=['customer_id','lifecycle__all__active_months__24m'])
 
         # Seasonality (Q1..Q4 proportions over last 24 months)
-        last24_mask = (fd['order_date'] > (cutoff_dt - pd.DateOffset(months=24))) & (fd['order_date'] <= cutoff_dt)
-        s = fd.loc[last24_mask, ['customer_id', 'order_date']].copy()
-        s['quarter'] = s['order_date'].dt.quarter
-        season_counts = s.groupby(['customer_id', 'quarter']).size().unstack(fill_value=0)
-        season_counts = season_counts.rename(columns={1: 'q1_count_24m', 2: 'q2_count_24m', 3: 'q3_count_24m', 4: 'q4_count_24m'})
-        season_counts['season_total_24m'] = season_counts.sum(axis=1)
-        for q in ['q1', 'q2', 'q3', 'q4']:
-            season_counts[f'{q}_share_24m'] = season_counts[f'{q}_count_24m'] / season_counts['season_total_24m'].replace(0, np.nan)
-            season_counts[f'{q}_share_24m'] = season_counts[f'{q}_share_24m'].fillna(0.0)
-        season_counts = season_counts.reset_index()[['customer_id', 'q1_share_24m', 'q2_share_24m', 'q3_share_24m', 'q4_share_24m']]
+        try:
+            last24_mask = (fd['order_date'] > (cutoff_dt - pd.DateOffset(months=24))) & (fd['order_date'] <= cutoff_dt)
+            s = fd.loc[last24_mask, ['customer_id', 'order_date']].copy()
+            if not s.empty:
+                s['quarter'] = s['order_date'].dt.quarter
+                season_counts = s.groupby(['customer_id', 'quarter']).size().unstack(fill_value=0)
+                # Ensure all quarters present
+                for qnum in [1, 2, 3, 4]:
+                    if qnum not in season_counts.columns:
+                        season_counts[qnum] = 0
+                season_counts = season_counts.rename(columns={1: 'q1_count_24m', 2: 'q2_count_24m', 3: 'q3_count_24m', 4: 'q4_count_24m'})
+                season_counts['season_total_24m'] = season_counts[['q1_count_24m','q2_count_24m','q3_count_24m','q4_count_24m']].sum(axis=1)
+                for q in ['q1', 'q2', 'q3', 'q4']:
+                    denom = season_counts['season_total_24m'].replace(0, np.nan)
+                    season_counts[f'{q}_share_24m'] = season_counts[f'{q}_count_24m'] / denom
+                    season_counts[f'{q}_share_24m'] = season_counts[f'{q}_share_24m'].fillna(0.0)
+                season_counts = season_counts.reset_index()[['customer_id', 'q1_share_24m', 'q2_share_24m', 'q3_share_24m', 'q4_share_24m']]
+            else:
+                season_counts = pd.DataFrame(columns=['customer_id','q1_share_24m','q2_share_24m','q3_share_24m','q4_share_24m'])
+        except Exception:
+            season_counts = pd.DataFrame(columns=['customer_id','q1_share_24m','q2_share_24m','q3_share_24m','q4_share_24m'])
 
         # Division-level features (last 12 months)
         known_divisions = ['Solidworks', 'Services', 'Simulation', 'Hardware']
@@ -292,7 +303,7 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
 
         # EB smoothing for target division share (optional)
         try:
-            if cfg.features.use_eb_smoothing:
+            if cfgmod.features.use_eb_smoothing:
                 target_col = f'{division_name.lower()}_gp_share_12m'
                 if target_col in div_df.columns:
                     prior = float(div_df[target_col].mean())
@@ -406,8 +417,8 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
 
         # --- Basket lift / affinity ---
         try:
-            cfg = load_config()
-            if cfg.features.use_market_basket:
+            cfgmod = cfg.load_config()
+            if cfgmod.features.use_market_basket:
                 # Compute presence by SKU in feature period per customer
                 fd_sku = fd[['customer_id', 'product_sku']].dropna().copy()
                 fd_sku['product_sku'] = fd_sku['product_sku'].astype(str)
@@ -564,7 +575,7 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
 
     # Winsorize monetary gp_sum features based on config
     try:
-        p = load_config().features.gp_winsor_p
+        p = cfg.load_config().features.gp_winsor_p
         for w in window_months:
             for scope in ['all','div']:
                 col = f'rfm__{scope}__gp_sum__{w}m'
@@ -577,10 +588,9 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
         pass
     # Add missingness flags if configured (single concat to avoid fragmentation)
     try:
-        if load_config().features.add_missingness_flags:
+        if cfg.load_config().features.add_missingness_flags:
             cols = [c for c in feature_matrix_pd.columns if c not in ('customer_id','bought_in_division')]
             if cols:
-                import numpy as np
                 zeros = np.zeros((len(feature_matrix_pd), len(cols)), dtype=np.int8)
                 flags = pd.DataFrame(zeros, columns=[f"{c}_missing" for c in cols], index=feature_matrix_pd.index)
                 feature_matrix_pd = pd.concat([feature_matrix_pd, flags], axis=1)
