@@ -7,8 +7,12 @@ try:
 except Exception:
     FUZZY_AVAILABLE = False
 from sqlalchemy import text
+from pathlib import Path
+import hashlib
 from gosales.utils.db import get_db_connection
 from gosales.utils.paths import OUTPUTS_DIR
+from gosales.utils.config import load_config
+from gosales.ops.run import run_context
 from gosales.utils.logger import get_logger
 from gosales.etl.sku_map import get_sku_mapping
 from gosales.etl.cleaners import clean_currency_value, coerce_datetime, summarise_dataframe_schema
@@ -21,7 +25,20 @@ from gosales.etl.contracts import (
 
 logger = get_logger(__name__)
 
-def build_star_schema(engine):
+def _checksum_parquet(parquet_path: Path) -> str:
+    h = hashlib.sha256()
+    with open(parquet_path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return "sha256:" + h.hexdigest()
+
+
+def _ensure_parquet_dirs(curated_dir: Path) -> None:
+    (curated_dir / "fact").mkdir(parents=True, exist_ok=True)
+    (curated_dir / "dim").mkdir(parents=True, exist_ok=True)
+
+
+def build_star_schema(engine, config_path: str | Path | None = None, rebuild: bool = False, staging_only: bool = False, fail_soft: bool = False):
     """
     Builds a tidy, analytics-ready star schema from the raw sales_log data.
     
@@ -37,6 +54,29 @@ def build_star_schema(engine):
         engine (sqlalchemy.engine.base.Engine): The database engine.
     """
     logger.info("Building star schema with new tidy transaction model...")
+    cfg = load_config(config_path)
+    curated_dir = Path(cfg.paths.curated)
+    _ensure_parquet_dirs(curated_dir)
+
+    # Destructive rebuild (curated layer only)
+    if rebuild:
+        try:
+            logger.info("Rebuild requested: dropping curated tables and removing parquet snapshots")
+            with engine.connect() as connection:
+                connection.execute(text("DROP TABLE IF EXISTS fact_transactions;"))
+                connection.execute(text("DROP TABLE IF EXISTS dim_customer;"))
+                connection.execute(text("DROP TABLE IF EXISTS dim_product;"))
+                connection.execute(text("DROP TABLE IF EXISTS dim_date;"))
+                connection.commit()
+        except Exception as e:
+            logger.warning(f"Failed to drop curated tables: {e}")
+        # Remove parquet files (keep directory)
+        try:
+            for sub in [curated_dir / "fact", curated_dir / "dim"]:
+                for p in sub.glob("*.parquet"):
+                    p.unlink(missing_ok=True)
+        except Exception as e:
+            logger.warning(f"Failed to clean curated parquet: {e}")
 
     # Read the raw data from the database using pandas first, then convert to polars
     logger.info("Reading sales_log table...")
@@ -90,10 +130,31 @@ def build_star_schema(engine):
         contracts_dir = OUTPUTS_DIR / "contracts"
         contracts_dir.mkdir(parents=True, exist_ok=True)
 
-        # Persist schema snapshot
+        # Persist schema snapshot & staging parquet and profile
         schema_json = summarise_dataframe_schema(sales_log_pd)
         with open(contracts_dir / "schema.json", "w", encoding="utf-8") as f:
             json.dump(schema_json, f, indent=2)
+
+        # Write normalized staging parquet
+        staging_dir = Path(cfg.paths.staging)
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            pl.from_pandas(sales_log_pd).write_parquet(staging_dir / "sales_log_normalized.parquet")
+        except Exception as e:
+            logger.warning(f"Failed to write staging parquet: {e}")
+
+        # Column profile
+        try:
+            prof = []
+            for col in sales_log_pd.columns:
+                series = sales_log_pd[col]
+                null_pct = float(series.isna().mean()) if hasattr(series, 'isna') else 0.0
+                card = int(series.nunique(dropna=True)) if hasattr(series, 'nunique') else 0
+                prof.append({"column": col, "null_pct": round(null_pct, 6), "cardinality": card, "dtype": str(series.dtype)})
+            with open(contracts_dir / "column_profile.json", "w", encoding="utf-8") as f:
+                json.dump(prof, f, indent=2)
+        except Exception as e:
+            logger.warning(f"Failed to write column profile: {e}")
 
         required_cols = list({"CustomerId", "Rec Date", "Division"})
         # Extend with GP/Qty pairs from mapping for visibility (not all required to exist)
@@ -114,9 +175,16 @@ def build_star_schema(engine):
         vdf = violations_to_dataframe(violations)
         vdf.to_csv(contracts_dir / "violations.csv", index=False)
 
-        # Block on PK/null/duplicate violations
+        # Block on PK/null/duplicate violations unless fail_soft
         if any(v.violation_type in {"null_in_pk", "missing_pk_column", "duplicate_pk"} for v in violations):
-            logger.error("Data contract violations detected. See outputs/contracts/violations.csv")
+            if fail_soft:
+                logger.warning("Contract violations present, continuing due to fail_soft=True")
+            else:
+                logger.error("Data contract violations detected. See outputs/contracts/violations.csv")
+                return
+
+        if staging_only:
+            logger.info("Staging-only flag set; stopping after contracts.")
             return
 
         sales_log = pl.from_pandas(sales_log_pd)
@@ -300,6 +368,9 @@ def build_star_schema(engine):
         logger.info(f"Successfully created dim_customer table with {len(dim_customer)} unique customers (no industry data).")
 
     dim_customer.write_database("dim_customer", engine, if_table_exists="replace")
+    # Write Parquet snapshot
+    dim_customer_parquet = curated_dir / "dim" / "dim_customer.parquet"
+    dim_customer.write_parquet(dim_customer_parquet)
 
     # Write industry coverage report
     try:
@@ -401,6 +472,9 @@ def build_star_schema(engine):
     fact_transactions = pl.from_pandas(fact_transactions_pd)
 
     fact_transactions.write_database("fact_transactions", engine, if_table_exists="replace")
+    # Write Parquet snapshot and checksum
+    fact_parquet = curated_dir / "fact" / "fact_transactions.parquet"
+    fact_transactions.write_parquet(fact_parquet)
     logger.info(f"Successfully created fact_transactions table with {len(fact_transactions)} total line items.")
 
     # Row count audit
@@ -415,6 +489,33 @@ def build_star_schema(engine):
     except Exception:
         pass
 
+    # --- QA summary & report ---
+    try:
+        qa_dir = OUTPUTS_DIR / 'qa'
+        qa_dir.mkdir(parents=True, exist_ok=True)
+        summary = {
+            "tables": {
+                "fact_transactions": {
+                    "rows": int(len(fact_transactions)),
+                    "sum_gp": float(fact_transactions.select(pl.col("gross_profit").sum()).item()),
+                    "checksum": _checksum_parquet(fact_parquet) if fact_parquet.exists() else None,
+                },
+                "dim_customer": {
+                    "rows": int(len(dim_customer)),
+                    "checksum": _checksum_parquet(dim_customer_parquet) if dim_customer_parquet.exists() else None,
+                },
+            }
+        }
+        with open(qa_dir / 'summary.json', 'w', encoding='utf-8') as f:
+            json.dump(summary, f, indent=2)
+        # Minimal markdown report
+        with open(qa_dir / 'phase0_report.md', 'w', encoding='utf-8') as f:
+            f.write("# Phase 0 QA Report\n\n")
+            f.write(f"Fact rows: {summary['tables']['fact_transactions']['rows']}\\n\n")
+            f.write(f"Dim customer rows: {summary['tables']['dim_customer']['rows']}\\n")
+    except Exception as e:
+        logger.warning(f"Failed to write QA summary/report: {e}")
+
     # Sample heads for quick inspection
     try:
         samples_dir = OUTPUTS_DIR / "samples"
@@ -424,15 +525,69 @@ def build_star_schema(engine):
     except Exception:
         pass
     
+    # --- dim_date and dim_product (minimal) ---
+    try:
+        logger.info("Building dim_date and dim_product")
+        # dim_date: derive from min/max order_date in facts
+        fpd = fact_transactions.to_pandas()
+        if not fpd.empty:
+            mind = fpd["order_date"].min()
+            maxd = fpd["order_date"].max()
+            if pd.notna(mind) and pd.notna(maxd):
+                rng = pd.date_range(mind, maxd, freq="D")
+                dim_date = pl.DataFrame({
+                    "date_key": [int(d.strftime("%Y%m%d")) for d in rng],
+                    "date": [d.date().isoformat() for d in rng],
+                    "year": [d.year for d in rng],
+                    "quarter": [int((d.month - 1) / 3) + 1 for d in rng],
+                    "month": [d.month for d in rng],
+                })
+                dim_date.write_database("dim_date", engine, if_table_exists="replace")
+                dim_date.write_parquet(curated_dir / "dim" / "dim_date.parquet")
+        # dim_product: unique SKUs/divisions
+        dp = (
+            fact_transactions.select(["product_sku", "product_division"])\
+            .unique()
+        )
+        dp.write_database("dim_product", engine, if_table_exists="replace")
+        dp.write_parquet(curated_dir / "dim" / "dim_product.parquet")
+    except Exception as e:
+        logger.warning(f"Failed to build dim_date/dim_product: {e}")
+
     # --- Deprecate old tables ---
-    logger.info("Dropping old fact_orders and dim_product tables...")
-    with engine.connect() as connection:
-        connection.execute(text("DROP TABLE IF EXISTS fact_orders;"))
-        connection.execute(text("DROP TABLE IF EXISTS dim_product;"))
-        connection.commit()
-    logger.info("Old tables dropped successfully.")
+    try:
+        logger.info("Dropping old fact_orders and dim_product tables if legacy names exist...")
+        with engine.connect() as connection:
+            connection.execute(text("DROP TABLE IF EXISTS fact_orders;"))
+            connection.execute(text("DROP TABLE IF EXISTS dim_product_legacy;"))
+            connection.commit()
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":
-    db_engine = get_db_connection()
-    build_star_schema(db_engine)
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Build curated star schema")
+    parser.add_argument("--config", type=str, default=str((Path(__file__).parents[1] / "config.yaml").resolve()))
+    parser.add_argument("--rebuild", action="store_true")
+    parser.add_argument("--staging-only", action="store_true")
+    parser.add_argument("--fail-soft", action="store_true")
+    args = parser.parse_args()
+
+    with run_context("PHASE0") as rc:
+        # Persist resolved config
+        cfg = load_config(args.config)
+        runs_dir = Path(rc["run_dir"])
+        runs_dir.mkdir(parents=True, exist_ok=True)
+        resolved_path = runs_dir / "config_resolved.yaml"
+        try:
+            import yaml
+
+            with open(resolved_path, "w", encoding="utf-8") as f:
+                yaml.safe_dump(cfg.to_dict(), f, sort_keys=False)
+        except Exception:
+            pass
+
+        db_engine = get_db_connection()
+        build_star_schema(db_engine, config_path=args.config, rebuild=args.rebuild, staging_only=args.staging_only, fail_soft=args.fail_soft)

@@ -1,0 +1,22 @@
+paths:
+  raw: gosales/data/raw
+  staging: gosales/data/staging
+  curated: gosales/data/curated
+  outputs: gosales/outputs
+database:
+  engine: sqlite          # sqlite | duckdb | azure
+  sqlite_path: gosales/gosales.db
+run:
+  cutoff_date: "2024-12-31"
+  prediction_window_months: 6
+  lookback_years: 3
+etl:
+  coerce_dates_tz: "UTC"
+  currency: "USD"
+  fail_on_contract_breach: true
+  allow_unknown_columns: false
+logging:
+  level: INFO
+  jsonl: true
+
+
