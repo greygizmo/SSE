@@ -13,36 +13,35 @@ from sklearn.linear_model import SGDClassifier, LogisticRegression
 from sklearn.metrics import roc_auc_score, precision_recall_curve, auc, brier_score_loss
 from sklearn.calibration import CalibratedClassifierCV
 from lightgbm import LGBMClassifier
-import shap
+try:
+    import shap  # type: ignore
+    _HAS_SHAP = True
+except Exception:
+    _HAS_SHAP = False
 
 from gosales.utils.config import load_config
 from gosales.utils.db import get_db_connection
 from gosales.features.engine import create_feature_matrix
 from gosales.utils.paths import OUTPUTS_DIR, MODELS_DIR
 from gosales.utils.logger import get_logger
+from gosales.models.metrics import (
+    compute_lift_at_k,
+    compute_weighted_lift_at_k,
+    compute_topk_threshold,
+    calibration_bins,
+    calibration_mae,
+)
 
 
 logger = get_logger(__name__)
 
 
 def _lift_at_k(y_true: np.ndarray, y_score: np.ndarray, k_percent: int) -> float:
-    n = len(y_true)
-    k = max(1, int(n * (k_percent / 100.0)))
-    idx = np.argsort(-y_score)[:k]
-    topk_rate = float(np.mean(y_true[idx]))
-    base_rate = float(np.mean(y_true)) if np.mean(y_true) > 0 else 1e-9
-    return topk_rate / base_rate
+    return compute_lift_at_k(y_true, y_score, k_percent)
 
 
 def _weighted_lift_at_k(y_true: np.ndarray, y_score: np.ndarray, weights: np.ndarray, k_percent: int) -> float:
-    n = len(y_true)
-    k = max(1, int(n * (k_percent / 100.0)))
-    idx = np.argsort(-y_score)[:k]
-    top_y = y_true[idx]
-    top_w = weights[idx]
-    base = (y_true * weights).sum() / max(1e-9, weights.sum())
-    top = (top_y * top_w).sum() / max(1e-9, top_w.sum())
-    return float(top / max(1e-9, base))
+    return compute_weighted_lift_at_k(y_true, y_score, weights, k_percent)
 
 
 def _train_test_split_time_aware(X: pd.DataFrame, y: pd.Series, seed: int) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
@@ -257,22 +256,22 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
         gains = gains_df.groupby("decile").agg(bought_in_division_mean=("y","mean"), count=("y","size"), p_mean=("p","mean")).reset_index()
         gains.to_csv(OUTPUTS_DIR / f"gains_{division.lower()}.csv", index=False)
 
-        # Calibration bins (quantile bins)
+        # Calibration bins & MAE
         try:
-            bins = pd.qcut(gains_df["p"], q=10, duplicates="drop")
-            calib = gains_df.assign(bin=bins).groupby("bin").agg(mean_predicted=("p","mean"), fraction_positives=("y","mean"), count=("y","size")).reset_index()
+            calib = calibration_bins(y_final, p_final, n_bins=10)
             calib.to_csv(OUTPUTS_DIR / f"calibration_{division.lower()}.csv", index=False)
+            cal_mae = calibration_mae(calib, weighted=True)
         except Exception:
-            pass
+            cal_mae = None
 
         # Thresholds for top-K percents
         thr_rows = []
         for k in cfg.modeling.top_k_percents:
             if p_final is None or len(p_final) == 0:
                 continue
+            thr = compute_topk_threshold(p_final, k)
             cutoff_idx = max(1, int(len(p_final) * (k/100.0)))
-            thr = float(np.sort(p_final)[-cutoff_idx])
-            thr_rows.append({"k_percent": k, "threshold": thr, "count": cutoff_idx})
+            thr_rows.append({"k_percent": k, "threshold": float(thr), "count": cutoff_idx})
         pd.DataFrame(thr_rows).to_csv(OUTPUTS_DIR / f"thresholds_{division.lower()}.csv", index=False)
 
         # LR coefficients (if available)
@@ -293,7 +292,7 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
             base = getattr(model, "base_estimator", None)
             if base is None and hasattr(model, "estimator"):
                 base = model.estimator
-            if base is not None and hasattr(base, 'predict_proba'):
+            if _HAS_SHAP and base is not None and hasattr(base, 'predict_proba'):
                 if isinstance(base, LGBMClassifier):
                     explainer = shap.TreeExplainer(base)
                     shap_vals = explainer.shap_values(X_final)
@@ -315,6 +314,7 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
             logger.warning(f"Failed SHAP export: {e}")
 
         # Model card / metrics
+        # Model card / metrics
         metrics = {
             "division": division,
             "cutoffs": cut_list,
@@ -324,6 +324,7 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
                 "auc": float(auc_val) if auc_val is not None else None,
                 "pr_auc": float(pr_auc) if pr_auc is not None else None,
                 "brier": float(brier) if brier is not None else None,
+                "cal_mae": float(cal_mae) if cal_mae is not None else None,
                 **lifts,
                 **weighted_lifts,
             },
@@ -332,6 +333,34 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
         }
         with open(OUTPUTS_DIR / f"metrics_{division.lower()}.json", "w", encoding="utf-8") as f:
             json.dump(metrics, f, indent=2)
+
+        # Model card JSON
+        card = {
+            "division": division,
+            "cutoffs": cut_list,
+            "window_months": int(window_months),
+            "selected_model": winner,
+            "seed": int(cfg.modeling.seed),
+            "params": {
+                "lr_grid": cfg.modeling.lr_grid,
+                "lgbm_grid": cfg.modeling.lgbm_grid,
+            },
+            "data": {
+                "n_customers": int(len(y_final)),
+                "prevalence": float(np.mean(y_final)) if len(y_final) > 0 else None,
+            },
+            "calibration": {"mae_weighted": float(cal_mae) if cal_mae is not None else None},
+            "artifacts": {
+                "model_pickle": str(out_dir / "model.pkl"),
+                "feature_list": str(out_dir / "feature_list.json"),
+                "metrics_json": str(OUTPUTS_DIR / f"metrics_{division.lower()}.json"),
+                "gains_csv": str(OUTPUTS_DIR / f"gains_{division.lower()}.csv"),
+                "calibration_csv": str(OUTPUTS_DIR / f"calibration_{division.lower()}.csv"),
+                "thresholds_csv": str(OUTPUTS_DIR / f"thresholds_{division.lower()}.csv"),
+            },
+        }
+        with open(OUTPUTS_DIR / f"model_card_{division.lower()}.json", "w", encoding="utf-8") as f:
+            json.dump(card, f, indent=2)
     except Exception as e:
         logger.warning(f"Failed writing Phase 3 artifacts: {e}")
 

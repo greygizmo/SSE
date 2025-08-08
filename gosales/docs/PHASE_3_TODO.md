@@ -17,10 +17,10 @@
   - Emit calibration bins CSV per cutoff and final model. DONE (final model)
 
 - Metrics & artifacts
-  - Compute AUC, PR-AUC, lift@{5,10,20}%, Brier, cal-MAE; revenue-weighted lift. PARTIAL (AUC, PR-AUC, Brier, lift@K implemented)
+  - Compute AUC, PR-AUC, lift@{5,10,20}%, Brier, cal-MAE; revenue-weighted lift. PARTIAL (AUC, PR-AUC, Brier, lift@K, rev_lift@K, cal-MAE implemented for final)
   - Export gains.csv, calibration.csv, metrics.json, thresholds.csv (top-N%, capacity). DONE (final model)
-  - Export model artifacts: model, scaler (LR), calibrator, feature_list.json, coef_.csv (LR) or SHAP summaries (LGBM). PARTIAL (LR coef exported when available)
-  - Model card (JSON): data versions, prevalence, params, seed, selected model. PARTIAL (metrics JSON includes selection & seed)
+  - Export model artifacts: model, scaler (LR), calibrator, feature_list.json, coef_.csv (LR) or SHAP summaries (LGBM). DONE (with SHAP guarded if not installed)
+  - Model card (JSON): data versions, prevalence, params, seed, selected model. DONE
 
 - CLI
   - `gosales/models/train.py` with flags: `--division`, `--cutoffs`, `--window-months`, `--models`, `--calibration`, `--config`. DONE
@@ -32,7 +32,7 @@
 - Tests
   - Determinism test (same config/seed ⇒ same metrics/hash). TODO
   - Leakage probe (future feature injection ⇒ no AUC gain). TODO
-  - Calibration test on synthetic logits. TODO
-  - Threshold math correctness for top-N. TODO
+  - Calibration test on synthetic logits. DONE (bins + MAE sanity)
+  - Threshold math correctness for top-N. DONE
 
 
