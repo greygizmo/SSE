@@ -46,12 +46,19 @@ class Logging:
 
 
 @dataclass
+class Labels:
+    gp_min_threshold: float = 0.0
+    denylist_skus_csv: Optional[Path] = None
+
+
+@dataclass
 class Config:
     paths: Paths
     database: Database = field(default_factory=Database)
     run: Run = field(default_factory=Run)
     etl: ETL = field(default_factory=ETL)
     logging: Logging = field(default_factory=Logging)
+    labels: Labels = field(default_factory=Labels)
 
     def to_dict(self) -> Dict[str, Any]:
         def _convert(obj: Any) -> Any:
@@ -68,6 +75,7 @@ class Config:
             "run": _convert(self.run),
             "etl": _convert(self.etl),
             "logging": _convert(self.logging),
+            "labels": _convert(self.labels),
         }
 
 
@@ -134,6 +142,7 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
     run_cfg = cfg_dict.get("run", {})
     etl_cfg = cfg_dict.get("etl", {})
     log_cfg = cfg_dict.get("logging", {})
+    labels_cfg = cfg_dict.get("labels", {})
 
     cfg = Config(
         paths=_paths_from_dict(paths_dict),
@@ -155,6 +164,10 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
         logging=Logging(
             level=str(log_cfg.get("level", "INFO")),
             jsonl=bool(log_cfg.get("jsonl", True)),
+        ),
+        labels=Labels(
+            gp_min_threshold=float(labels_cfg.get("gp_min_threshold", 0.0)),
+            denylist_skus_csv=(Path(labels_cfg["denylist_skus_csv"]).resolve() if labels_cfg.get("denylist_skus_csv") else None),
         ),
     )
 

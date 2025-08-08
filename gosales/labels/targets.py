@@ -10,6 +10,7 @@ import pandas as pd
 import polars as pl
 
 from gosales.utils.paths import OUTPUTS_DIR
+from gosales.utils import config as cfg
 
 
 Mode = Literal["expansion", "all"]
@@ -56,12 +57,31 @@ def build_labels_for_division(
     # Window-period transactions for target division
     window_df = facts[(facts['order_date'] > cutoff_dt) & (facts['order_date'] <= win_end)].copy()
     window_target = window_df[window_df['product_division'] == params.division].copy()
+    # Optional denylist SKUs exclusion (e.g., trials/POC)
+    try:
+        cfg_obj = cfg.load_config()
+        denylist = []
+        if cfg_obj.labels.denylist_skus_csv and Path(cfg_obj.labels.denylist_skus_csv).exists():
+            dl = pd.read_csv(cfg_obj.labels.denylist_skus_csv)
+            col = None
+            for c in dl.columns:
+                if c.lower() in ("sku", "product_sku", "gp_col"):
+                    col = c
+                    break
+            if col:
+                denylist = dl[col].dropna().astype(str).str.strip().unique().tolist()
+        if denylist:
+            window_target = window_target[~window_target['product_sku'].astype(str).isin(denylist)].copy()
+    except Exception:
+        pass
 
     # Net GP per customer in window
     net_gp = window_target.groupby('customer_id')['gross_profit'].sum().rename('net_gp_window').reset_index()
     labels = cand.merge(net_gp, on='customer_id', how='left')
     labels['net_gp_window'] = labels['net_gp_window'].fillna(0.0)
-    labels['label'] = (labels['net_gp_window'] > float(params.gp_min_threshold)).astype('int8')
+    # Threshold from params or fallback to config if param not provided explicitly
+    gp_thresh = float(params.gp_min_threshold if params.gp_min_threshold is not None else (cfg.load_config().labels.gp_min_threshold or 0.0))
+    labels['label'] = (labels['net_gp_window'] > gp_thresh).astype('int8')
 
     # Cohorts from feature period
     had_any = set(feature_df['customer_id'].dropna().astype('int64').tolist())

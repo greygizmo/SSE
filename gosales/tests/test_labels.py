@@ -5,6 +5,7 @@ import polars as pl
 from sqlalchemy import create_engine
 
 from gosales.labels.targets import LabelParams, build_labels_for_division
+from pathlib import Path
 
 
 def _make_engine(tmp_path):
@@ -25,6 +26,30 @@ def _seed_curated(engine):
     fact.to_sql("fact_transactions", engine, if_exists="replace", index=False)
     dim = pd.DataFrame({"customer_id": [1, 2, 3]})
     dim.to_sql("dim_customer", engine, if_exists="replace", index=False)
+
+
+def test_denylist_threshold(tmp_path, monkeypatch):
+    eng = _make_engine(tmp_path)
+    _seed_curated(eng)
+    # Create denylist file that excludes SWX_Core
+    denylist_path = Path(tmp_path) / "deny.csv"
+    pd.DataFrame({"sku": ["SWX_Core"]}).to_csv(denylist_path, index=False)
+
+    # Monkeypatch config loader to point to temp denylist and threshold 10.0
+    from gosales.utils import config as cfgmod
+    orig = cfgmod.load_config
+    def _fake():
+        c = orig()
+        c.labels.gp_min_threshold = 10.0
+        c.labels.denylist_skus_csv = denylist_path
+        return c
+    monkeypatch.setattr(cfgmod, "load_config", _fake)
+
+    params = LabelParams(division="Solidworks", cutoff="2024-06-30", window_months=6, mode="all", gp_min_threshold=10.0)
+    df = build_labels_for_division(eng, params)
+    pdf = df.to_pandas()
+    # Customer 1 had +20 GP in window but SKU is denied -> label must be 0
+    assert int(pdf.loc[pdf["customer_id"] == 1, "label"].iloc[0]) == 0
 
 
 def test_build_labels_modes(tmp_path):

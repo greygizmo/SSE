@@ -18,5 +18,8 @@ etl:
 logging:
   level: INFO
   jsonl: true
+labels:
+  gp_min_threshold: 0.0
+  denylist_skus_csv: gosales/data/lookup/label_denylist_skus.csv
 
 
