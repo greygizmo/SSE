@@ -30,8 +30,8 @@
   - Overfit/early stop guard; seed determinism. PARTIAL (seed set)
 
 - Tests
-  - Determinism test (same config/seed ⇒ same metrics/hash). TODO
-  - Leakage probe (future feature injection ⇒ no AUC gain). PARTIAL (drop_leaky_features helper + tests)
+  - Determinism test (same config/seed ⇒ same metrics/hash). DONE (synthetic determinism of calibrated LR)
+  - Leakage probe (future feature injection ⇒ no AUC gain). DONE (helper + synthetic probe)
   - Calibration test on synthetic logits. DONE (bins + MAE sanity)
   - Threshold math correctness for top-N. DONE
 
