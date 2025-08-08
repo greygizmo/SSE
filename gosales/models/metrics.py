@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+from typing import List, Tuple
+from sklearn.metrics import roc_auc_score
 
 
 def compute_lift_at_k(y_true: np.ndarray, y_score: np.ndarray, k_percent: int) -> float:
@@ -62,5 +64,47 @@ def calibration_mae(bins_df: pd.DataFrame, weighted: bool = True) -> float:
         w = bins_df["count"].astype(float)
         return float((diff * w).sum() / max(1e-9, w.sum()))
     return float(diff.mean())
+
+
+def drop_leaky_features(
+    X: pd.DataFrame,
+    y: np.ndarray,
+    auc_threshold: float = 0.995,
+    name_patterns: Tuple[str, ...] = ("future", "label", "bought_in_division", "target"),
+) -> Tuple[pd.DataFrame, List[str]]:
+    """Remove features that appear to leak the target.
+
+    - Drops columns whose name suggests leakage (contains any of name_patterns).
+    - Drops numeric columns whose single-variable AUC vs target exceeds auc_threshold.
+    Returns a new DataFrame and the list of columns dropped.
+    """
+    drop_cols: List[str] = []
+    cols = list(X.columns)
+    # Name-based drop
+    for c in cols:
+        lc = str(c).lower()
+        if any(pat in lc for pat in name_patterns):
+            drop_cols.append(c)
+
+    # Score-based drop for numeric columns
+    num_cols = list(X.select_dtypes(include=[np.number]).columns)
+    for c in num_cols:
+        if c in drop_cols:
+            continue
+        s = X[c].to_numpy()
+        if np.allclose(s, s[0]):
+            continue
+        try:
+            auc1 = roc_auc_score(y, s)
+            auc2 = roc_auc_score(y, -s)
+            if max(auc1, auc2) >= auc_threshold:
+                drop_cols.append(c)
+        except Exception:
+            # Non-finite or unsuitable vector; skip
+            continue
+
+    if drop_cols:
+        X = X.drop(columns=list(set(drop_cols)), errors="ignore")
+    return X, drop_cols
 
 

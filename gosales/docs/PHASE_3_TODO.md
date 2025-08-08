@@ -31,7 +31,7 @@
 
 - Tests
   - Determinism test (same config/seed ⇒ same metrics/hash). TODO
-  - Leakage probe (future feature injection ⇒ no AUC gain). TODO
+  - Leakage probe (future feature injection ⇒ no AUC gain). PARTIAL (drop_leaky_features helper + tests)
   - Calibration test on synthetic logits. DONE (bins + MAE sanity)
   - Threshold math correctness for top-N. DONE
 
