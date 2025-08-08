@@ -13,6 +13,7 @@ from gosales.utils.logger import get_logger
 from gosales.features.engine import create_feature_matrix
 from gosales.features.utils import compute_sha256
 from gosales.utils.config import load_config
+from gosales.features.als_embed import customer_als_embeddings
 
 
 logger = get_logger(__name__)
@@ -35,6 +36,11 @@ def main(division: str, cutoff: str, windows: str, config: str, with_eb: bool, w
     cutoffs = [c.strip() for c in cutoff.split(",") if c.strip()]
     for cut in cutoffs:
         fm = create_feature_matrix(engine, division, cut, cfg.run.prediction_window_months)
+        # Optional ALS embeddings
+        if cfg.features.use_als_embeddings:
+            als_df = customer_als_embeddings(engine, cut, factors=16)
+            if not als_df.is_empty():
+                fm = fm.join(als_df, on='customer_id', how='left').fill_null(0)
         if fm.is_empty():
             logger.warning(f"Empty feature matrix for cutoff {cut}")
             continue
