@@ -13,6 +13,7 @@ from sklearn.linear_model import SGDClassifier, LogisticRegression
 from sklearn.metrics import roc_auc_score, precision_recall_curve, auc, brier_score_loss
 from sklearn.calibration import CalibratedClassifierCV
 from lightgbm import LGBMClassifier
+import shap
 
 from gosales.utils.config import load_config
 from gosales.utils.db import get_db_connection
@@ -31,6 +32,17 @@ def _lift_at_k(y_true: np.ndarray, y_score: np.ndarray, k_percent: int) -> float
     topk_rate = float(np.mean(y_true[idx]))
     base_rate = float(np.mean(y_true)) if np.mean(y_true) > 0 else 1e-9
     return topk_rate / base_rate
+
+
+def _weighted_lift_at_k(y_true: np.ndarray, y_score: np.ndarray, weights: np.ndarray, k_percent: int) -> float:
+    n = len(y_true)
+    k = max(1, int(n * (k_percent / 100.0)))
+    idx = np.argsort(-y_score)[:k]
+    top_y = y_true[idx]
+    top_w = weights[idx]
+    base = (y_true * weights).sum() / max(1e-9, weights.sum())
+    top = (top_y * top_w).sum() / max(1e-9, top_w.sum())
+    return float(top / max(1e-9, base))
 
 
 def _train_test_split_time_aware(X: pd.DataFrame, y: pd.Series, seed: int) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
@@ -144,9 +156,9 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
                                     min_data_in_leaf=min_data_in_leaf,
                                     feature_fraction=feature_fraction,
                                     bagging_fraction=bagging_fraction,
-                                    scale_pos_weight=spw,
+                                    scale_pos_weight=min(spw, 10.0),
                                 )
-                                clf.fit(X_train, y_train)
+                                clf.fit(X_train, y_train, eval_set=[(X_valid, y_valid)], eval_metric='auc', verbose=False, early_stopping_rounds=100)
                                 p = clf.predict_proba(X_valid)[:,1]
                                 auc_lgbm = roc_auc_score(y_valid, p)
                                 if auc_lgbm > best_auc:
@@ -227,6 +239,16 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
         pr_auc = auc(pr_rec, pr_prec) if pr_prec is not None else None
         brier = brier_score_loss(y_final, p_final) if p_final is not None else None
         lifts = {f"lift@{k}": _lift_at_k(y_final, p_final, k) for k in cfg.modeling.top_k_percents} if p_final is not None else {}
+        # Revenue-weighted lift using best available weight feature
+        weights = np.ones_like(y_final, dtype=float)
+        try:
+            if 'rfm__all__gp_sum__12m' in df_final.columns:
+                weights = pd.to_numeric(df_final['rfm__all__gp_sum__12m'], errors='coerce').fillna(0.0).values
+            elif 'total_gp_all_time' in df_final.columns:
+                weights = pd.to_numeric(df_final['total_gp_all_time'], errors='coerce').fillna(0.0).values
+        except Exception:
+            pass
+        weighted_lifts = {f"rev_lift@{k}": _weighted_lift_at_k(y_final, p_final, weights, k) for k in cfg.modeling.top_k_percents} if p_final is not None else {}
 
         # Gains (deciles)
         gains_df = pd.DataFrame({"y": y_final, "p": p_final})
@@ -265,6 +287,33 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
         except Exception:
             pass
 
+        # SHAP summaries
+        try:
+            # Use base estimator if present
+            base = getattr(model, "base_estimator", None)
+            if base is None and hasattr(model, "estimator"):
+                base = model.estimator
+            if base is not None and hasattr(base, 'predict_proba'):
+                if isinstance(base, LGBMClassifier):
+                    explainer = shap.TreeExplainer(base)
+                    shap_vals = explainer.shap_values(X_final)
+                    vals = shap_vals[1] if isinstance(shap_vals, list) and len(shap_vals) == 2 else shap_vals
+                    mean_abs = np.mean(np.abs(vals), axis=0)
+                    pd.DataFrame({"feature": feature_names, "mean_abs_shap": mean_abs}).sort_values("mean_abs_shap", ascending=False).to_csv(OUTPUTS_DIR / f"shap_global_{division.lower()}.csv", index=False)
+                    # sample
+                    sample_n = min(200, len(X_final))
+                    sample_idx = np.random.RandomState(cfg.modeling.seed).choice(len(X_final), size=sample_n, replace=False)
+                    sample = pd.DataFrame(vals[sample_idx], columns=feature_names)
+                    sample.insert(0, 'customer_id', df_final.iloc[sample_idx]['customer_id'].values)
+                    sample.to_csv(OUTPUTS_DIR / f"shap_sample_{division.lower()}.csv", index=False)
+                elif isinstance(base, LogisticRegression):
+                    explainer = shap.LinearExplainer(base, X_final)
+                    vals = explainer.shap_values(X_final)
+                    mean_abs = np.mean(np.abs(vals), axis=0)
+                    pd.DataFrame({"feature": feature_names, "mean_abs_shap": mean_abs}).sort_values("mean_abs_shap", ascending=False).to_csv(OUTPUTS_DIR / f"shap_global_{division.lower()}.csv", index=False)
+        except Exception as e:
+            logger.warning(f"Failed SHAP export: {e}")
+
         # Model card / metrics
         metrics = {
             "division": division,
@@ -276,6 +325,7 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
                 "pr_auc": float(pr_auc) if pr_auc is not None else None,
                 "brier": float(brier) if brier is not None else None,
                 **lifts,
+                **weighted_lifts,
             },
             "seed": cfg.modeling.seed,
             "window_months": int(window_months),
