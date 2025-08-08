@@ -197,6 +197,9 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
             }, inplace=True)
             agg[f'avg_gp_per_tx_last_{w}m'] = agg[f'gp_sum_last_{w}m'] / agg[f'tx_count_last_{w}m'].replace(0, np.nan)
             agg[f'avg_gp_per_tx_last_{w}m'] = agg[f'avg_gp_per_tx_last_{w}m'].fillna(0.0)
+            # Margin proxy for all scope
+            col_all_gp = f'gp_sum_last_{w}m'
+            agg[f'margin__all__gp_pct__{w}m'] = agg[col_all_gp].astype(float) / (agg[col_all_gp].abs().astype(float) + 1e-9)
             per_customer_frames.append(agg)
 
             # Division-specific aggregates + margin (gp_pct) proxy over window
