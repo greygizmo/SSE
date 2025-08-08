@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Tuple
+from typing import Tuple, List
 
 import click
 import numpy as np
 import pandas as pd
+import json
 
 from gosales.utils.config import load_config
 from gosales.utils.paths import OUTPUTS_DIR, MODELS_DIR
@@ -34,9 +35,12 @@ def _load_model_for_division(division: str):
 def _score_p_icp(df: pd.DataFrame, division: str) -> Tuple[pd.Series, pd.Series]:
     model = _load_model_for_division(division)
     feature_list_path = MODELS_DIR / f"{division.lower()}_model" / "feature_list.json"
-    feat_cols = None
+    feat_cols: List[str] | None = None
     if feature_list_path.exists():
-        feat_cols = pd.read_json(feature_list_path).tolist()
+        try:
+            feat_cols = json.loads(feature_list_path.read_text(encoding="utf-8"))
+        except Exception:
+            feat_cols = None
     X = df[feat_cols] if feat_cols else df.select_dtypes(include=[np.number])
     p = model.predict_proba(X)[:, 1]
     p = pd.Series(p, index=df.index, name="p_icp")
@@ -60,11 +64,14 @@ def _compute_expected_value(df: pd.DataFrame, cfg) -> pd.Series:
 
 
 def _compute_affinity_lift(df: pd.DataFrame) -> pd.Series:
-    # Placeholder: if market-basket features are present, e.g., mb_lift_max
-    for c in ["mb_lift_max", "mb_lift_mean"]:
+    # Prefer engineered affinity feature; else placeholders if present
+    for c in [
+        "affinity__div__lift_topk__12m",
+        "mb_lift_max",
+        "mb_lift_mean",
+    ]:
         if c in df.columns:
             lift = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
-            # Normalize to [0,1]
             return _percentile_normalize(lift).rename("lift_norm")
     return pd.Series(0.0, index=df.index, name="lift_norm")
 
@@ -94,6 +101,26 @@ def _apply_eligibility(df: pd.DataFrame, cfg) -> pd.DataFrame:
     out = df.loc[mask].copy()
     out['_eligibility_kept'] = mask.sum()
     return out
+
+
+def _explain(row: pd.Series) -> str:
+    parts = []
+    # Main driver: calibrated probability
+    if pd.notna(row.get('p_icp')):
+        parts.append(f"High p={row['p_icp']:.2f}")
+    # Affinity
+    if row.get('lift_norm', 0.0) > 0.75:
+        parts.append("strong affinity")
+    # ALS
+    if row.get('als_norm', 0.0) > 0.75:
+        parts.append("ALS similarity")
+    # EV proxy (approximate dollarization via percentile bucket)
+    if pd.notna(row.get('EV_norm')) and row['EV_norm'] > 0.7:
+        parts.append("high EV")
+    if not parts:
+        parts = ["solid ICP"]
+    txt = "; ".join(parts)
+    return txt[:140]
 
 
 @click.command()
@@ -162,6 +189,8 @@ def main(cutoff: str, window_months: int, division: str | None, weights: str | N
             w[2] * tmp['als_norm'] +
             w[3] * tmp['EV_norm']
         )
+        # Explanations
+        tmp['nba_reason'] = tmp.apply(_explain, axis=1)
         rows.append(tmp)
 
     if not rows:

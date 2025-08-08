@@ -10,10 +10,10 @@
   - Deterministic customer/division ordering for reproducible IDs. TODO
 
 - Signals
-  - p_icp (primary): load Phase‑3 calibrated model per division; score candidates; compute per‑division percentile `p_icp_pct`. TODO
-  - Affinity lift: pre‑cutoff market‑basket rules; compute `lift_max`, `lift_mean` per candidate; normalize (percentile/z) → `lift_norm`. TODO
-  - ALS similarity: reuse Phase‑2 embeddings; compute similarity to target division; quantile‑normalize → `als_norm`; if unavailable, set 0 and flag coverage. TODO
-  - Expected value proxy (EV): segment medians (industry/size/region) blended with global; cap at p95; normalize → `EV_norm`. TODO
+  - p_icp (primary): load Phase‑3 calibrated model per division; score candidates; compute per‑division percentile `p_icp_pct`. PARTIAL (model scoring + pct wired)
+  - Affinity lift: pre‑cutoff market‑basket rules; compute `lift_max`, `lift_mean` per candidate; normalize (percentile/z) → `lift_norm`. PARTIAL (consumes engineered affinity or placeholders)
+  - ALS similarity: reuse Phase‑2 embeddings; compute similarity to target division; quantile‑normalize → `als_norm`; if unavailable, set 0 and flag coverage. PARTIAL (consumes placeholder columns if present)
+  - Expected value proxy (EV): segment medians (industry/size/region) blended with global; cap at p95; normalize → `EV_norm`. PARTIAL (cap + percentile using GP proxy)
 
 - Normalization & comparability
   - Implement per‑division percentile normalization (default) with option for pooled recalibration; verify approx. uniform per division. TODO
@@ -30,7 +30,7 @@
   - Cooldown logic: de‑emphasize accounts surfaced recently without action. TODO
 
 - Explanations
-  - Generate short human‑readable `nba_reason` (<150 chars) using 1–2 strongest drivers (e.g., high p, strong affinity, EV ~$Xk). TODO
+  - Generate short human‑readable `nba_reason` (<150 chars) using 1–2 strongest drivers (e.g., high p, strong affinity, EV ~$Xk). PARTIAL (basic template)
   - Content guard: no sensitive attributes; fallback reason if signals are weak. TODO
 
 - Artifacts
