@@ -5,6 +5,7 @@ Customer scoring pipeline that generates ICP scores and whitespace analysis for 
 import polars as pl
 import pandas as pd
 import mlflow.sklearn
+import json
 from pathlib import Path
 
 from gosales.utils.db import get_db_connection
@@ -36,6 +37,20 @@ def score_customers_for_division(engine, division_name: str, model_path: Path):
     
     # Prepare features for scoring (must match training)
     X = feature_matrix.drop(["customer_id", "bought_in_division"]).to_pandas()
+    # Align columns to training feature order using saved metadata if present
+    try:
+        with open(model_path / "metadata.json", "r", encoding="utf-8") as f:
+            meta = json.load(f)
+        train_cols = meta.get("feature_names", [])
+        if train_cols:
+            # Add any missing columns with zeros, drop extras, and reorder
+            for col in train_cols:
+                if col not in X.columns:
+                    X[col] = 0
+            X = X[train_cols]
+    except Exception:
+        # If metadata missing, proceed with current X
+        pass
     
     try:
         # Get the probability of buying from the division

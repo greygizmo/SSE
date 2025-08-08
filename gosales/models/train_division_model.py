@@ -14,6 +14,8 @@ from gosales.utils.db import get_db_connection
 from gosales.features.engine import create_feature_matrix
 from gosales.utils.logger import get_logger
 from gosales.utils.paths import MODELS_DIR
+import json
+from datetime import datetime
 
 logger = get_logger(__name__)
 
@@ -132,6 +134,23 @@ def train_division_model(engine, division_name: str, cutoff_date: str = "2024-12
         logger.info("Exported SHAP values for explainability.")
     except Exception as e:
         logger.warning(f"Failed to compute/export SHAP values: {e}")
+
+    # --- Persist feature metadata for safe scoring alignment ---
+    try:
+        metadata = {
+            "division": division_name,
+            "cutoff_date": cutoff_date,
+            "prediction_window_months": int(prediction_window_months),
+            "feature_names": list(X.columns),
+            "trained_at": datetime.utcnow().isoformat() + "Z",
+            "best_model": best_model_name,
+            "best_auc": float(best_auc),
+        }
+        with open(model_path / "metadata.json", "w", encoding="utf-8") as f:
+            json.dump(metadata, f, indent=2)
+        logger.info("Saved model feature metadata for scoring alignment.")
+    except Exception as e:
+        logger.warning(f"Failed to write model metadata: {e}")
 
 @click.command()
 @click.option('--division', default='Solidworks', help='The division to train a model for.')
