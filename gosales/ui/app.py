@@ -14,9 +14,20 @@ except ImportError:
     # Fallback if gosales module isn't found
     OUTPUTS_DIR = Path(__file__).parent.parent / "outputs"
 
-st.set_page_config(layout="wide")
+st.set_page_config(
+    layout="wide",
+    page_title="GoEngineer ICP & Whitespace",
+    page_icon=str((Path(__file__).parent.parent / 'docs' / 'GoEngineer Bug Option 1.png').resolve())
+)
 
-st.title("GoSales - ICP & Whitespace Engine")
+with st.container():
+    cols = st.columns([1,6])
+    try:
+        logo_path = Path(__file__).parent.parent / 'docs' / 'GoEngineer-full-logo-horizontal-black.png'
+        cols[0].image(str(logo_path.resolve()), use_container_width=True)
+    except Exception:
+        pass
+    cols[1].markdown("<h2 style='margin-top:0;'>ICP & Whitespace Engine</h2>", unsafe_allow_html=True)
 
 st.sidebar.header("Navigation")
 page = st.sidebar.radio("Go to", [
@@ -58,6 +69,7 @@ if page == "Overview":
 
 elif page == "ETL & Coverage":
     st.subheader("Industry Coverage")
+    st.caption("Brand palette applied across charts to align with GoEngineer style guide.")
     cols = st.columns(3)
     try:
         summary = pd.read_csv(OUTPUTS_DIR / 'industry_coverage_summary.csv')
@@ -76,14 +88,20 @@ elif page == "ETL & Coverage":
         top_ind = pd.read_csv(OUTPUTS_DIR / 'industry_top50.csv')
         c1.subheader("Top Industries")
         c1.caption("Count of customers by industry (top 50). Use to validate distribution and join quality.")
-        c1.dataframe(top_ind, use_container_width=True)
+        import plotly.express as px
+        fig = px.bar(top_ind, x='industry', y='count', color_discrete_sequence=['#BAD532'])
+        fig.update_layout(xaxis_title='', yaxis_title='Customers', height=420, margin=dict(l=10,r=10,b=10,t=10))
+        c1.plotly_chart(fig, use_container_width=True)
     except Exception:
         c1.warning("Top industries not available")
     try:
         top_sub = pd.read_csv(OUTPUTS_DIR / 'sub_industry_top50.csv')
         c2.subheader("Top Sub-Industries")
         c2.caption("Count of customers by sub-industry (top 50). Highlights granularity and long tail.")
-        c2.dataframe(top_sub, use_container_width=True)
+        import plotly.express as px
+        fig2 = px.bar(top_sub, x='industry_sub', y='count', color_discrete_sequence=['#336D91'])
+        fig2.update_layout(xaxis_title='', yaxis_title='Customers', height=420, margin=dict(l=10,r=10,b=10,t=10))
+        c2.plotly_chart(fig2, use_container_width=True)
     except Exception:
         c2.warning("Top sub-industries not available")
 
@@ -248,7 +266,12 @@ elif page == "Modeling & Validation":
     try:
         calib = pd.read_csv(OUTPUTS_DIR / 'calibration_solidworks.csv')
         st.caption("Probability calibration: mean predicted vs fraction positives in quantile bins (train split).")
-        st.line_chart(calib.set_index('bin')[['mean_predicted','fraction_positives']])
+        import plotly.graph_objects as go
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=calib['bin'], y=calib['mean_predicted'], mode='lines+markers', name='Mean predicted', line=dict(color='#336D91')))
+        fig.add_trace(go.Scatter(x=calib['bin'], y=calib['fraction_positives'], mode='lines+markers', name='Fraction positives', line=dict(color='#BAD532')))
+        fig.update_layout(height=380, margin=dict(l=10,r=10,b=10,t=10), xaxis_title='Bin', yaxis_title='Rate')
+        st.plotly_chart(fig, use_container_width=True)
         st.download_button("Download calibration CSV", data=calib.to_csv(index=False), file_name='calibration_solidworks.csv')
     except Exception:
         st.info("Calibration CSV not found.")
@@ -271,6 +294,13 @@ elif page == "Modeling & Validation":
     try:
         gains = pd.read_csv(OUTPUTS_DIR / 'validation_gains_2025.csv', header=[0,1])
         st.caption("Decile analysis (higher deciles = higher predicted probability)")
+        # Flatten multiindex columns if present
+        gains.columns = ['_'.join([str(c) for c in col if c]) for col in gains.columns.values]
+        import plotly.express as px
+        if 'bought_in_division_mean' in gains.columns:
+            figg = px.bar(gains, x=gains.index+1, y='bought_in_division_mean', labels={'x':'Decile','bought_in_division_mean':'Conversion'}, color_discrete_sequence=['#BAD532'])
+            figg.update_layout(height=420, margin=dict(l=10,r=10,b=10,t=10))
+            st.plotly_chart(figg, use_container_width=True)
         st.dataframe(gains, use_container_width=True)
         st.download_button("Download gains CSV", data=gains.to_csv(index=False), file_name='validation_gains_2025.csv')
     except Exception:
@@ -279,8 +309,8 @@ elif page == "Modeling & Validation":
 elif page == "Scores & Whitespace":
     st.subheader("ICP Scores")
     st.caption("Predicted likelihood that a customer will purchase in the Solidworks division within the prediction window.")
-    try:
-        icp_scores = pd.read_csv(OUTPUTS_DIR / "icp_scores.csv")
+try:
+    icp_scores = pd.read_csv(OUTPUTS_DIR / "icp_scores.csv")
         # Simple filters
         min_score = st.slider("Min ICP score", 0.0, 1.0, 0.0, 0.01)
         search = st.text_input("Search customer name contains", "")
@@ -290,14 +320,14 @@ elif page == "Scores & Whitespace":
             df = df[df['customer_name'].astype(str).str.contains(search, case=False, na=False)]
         st.dataframe(df, use_container_width=True, height=500)
         st.download_button("Download filtered scores", data=df.to_csv(index=False), file_name='icp_scores_filtered.csv')
-    except FileNotFoundError:
-        st.warning("ICP scores not available.")
+except FileNotFoundError:
+    st.warning("ICP scores not available.")
 
     st.subheader("Whitespace Opportunities")
     st.caption("Products not yet purchased by a customer where model and behavioral signals suggest potential demand.")
-    try:
-        whitespace = pd.read_csv(OUTPUTS_DIR / "whitespace.csv")
+try:
+    whitespace = pd.read_csv(OUTPUTS_DIR / "whitespace.csv")
         st.dataframe(whitespace, use_container_width=True, height=500)
         st.download_button("Download whitespace", data=whitespace.to_csv(index=False), file_name='whitespace.csv')
-    except FileNotFoundError:
-        st.warning("Whitespace opportunities not available.")
+except FileNotFoundError:
+    st.warning("Whitespace opportunities not available.")
