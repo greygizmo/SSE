@@ -71,11 +71,14 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
 
     # --- 2. Create the Binary Target Variable ---
     # Target: 1 if the customer bought any product in the target division in the prediction window, 0 otherwise.
-    if cutoff_date:
-        # Use prediction window data for target labels
-        prediction_buyers_df = prediction_data[prediction_data['product_division'] == division_name]['customer_id'].unique()
-        division_buyers_pd = pd.DataFrame({'customer_id': prediction_buyers_df, 'bought_in_division': 1})
-        division_buyers = pl.from_pandas(division_buyers_pd).lazy()
+        if cutoff_date:
+            # Use prediction window data for target labels
+            prediction_buyers_df = prediction_data[prediction_data['product_division'] == division_name]['customer_id'].unique()
+            division_buyers_pd = pd.DataFrame({'customer_id': prediction_buyers_df, 'bought_in_division': 1})
+            # Enforce integer customer_id for join compatibility
+            if 'customer_id' in division_buyers_pd.columns:
+                division_buyers_pd['customer_id'] = pd.to_numeric(division_buyers_pd['customer_id'], errors='coerce').astype('Int64')
+            division_buyers = pl.from_pandas(division_buyers_pd).with_columns(pl.col('customer_id').cast(pl.Int64, strict=False)).lazy()
         logger.info(f"Target: {len(prediction_buyers_df)} customers bought {division_name} in prediction window")
     else:
         # Original behavior: ever bought in historical data
@@ -126,7 +129,7 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
         ])
         .collect()
     )
-    
+
     # Calculate recency features in pandas for easier date arithmetic
     features_pd = features.to_pandas()
     
@@ -165,16 +168,20 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
 
     # --- 4. Combine Features and Target ---
     # Start with all customers, then left-join the features and the target variable.
+    # Align join key dtypes explicitly
+    features = features.with_columns(pl.col("customer_id").cast(pl.Int64, strict=False) if "customer_id" in features.columns else pl.lit(None))
+    customers = customers.with_columns(pl.col("customer_id").cast(pl.Int64, strict=False))
+
     feature_matrix = (
         customers.lazy()
         .join(features.lazy(), on="customer_id", how="left")
         .join(division_buyers, on="customer_id", how="left")
         .with_columns([
-            pl.col("bought_in_division").fill_null(0).cast(pl.Int8), # Customers who never bought get 0
+            pl.col("bought_in_division").fill_null(0).cast(pl.Int8),
         ])
         .collect()
     )
-    
+
     # Fill nulls for all other columns in pandas for easier handling
     feature_matrix_pd = feature_matrix.to_pandas()
     
