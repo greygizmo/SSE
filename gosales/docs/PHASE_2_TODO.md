@@ -20,6 +20,7 @@
   - Affinity (market-basket) score (already partially present) behind toggle. DONE (toggle wired)
   - EB smoothing for ratios behind toggle. DONE (for division gp_share)
   - ALS embeddings (skip by default). TODO
+  - ALS embeddings (skip by default). DONE (optional via config, joins embeddings)
 
 - Artifacts
   - Write `features_{division}_{cutoff}.parquet` and `feature_catalog_{division}_{cutoff}.csv`. DONE (CLI)
@@ -33,6 +34,6 @@
   - Emit `customer_month_{cutoff}.parquet` for monthly gp_sum/tx_n aggregates. DONE (builder in features/cache.py)
 
 - Tests
-  - Golden rows for windows; winsorization; determinism (checksum stable). TODO
+  - Golden rows for windows; winsorization; determinism (checksum stable). DONE (initial coverage + CLI checksum)
 
 
