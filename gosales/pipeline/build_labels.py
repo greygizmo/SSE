@@ -18,7 +18,7 @@ logger = get_logger(__name__)
 
 @click.command()
 @click.option("--division", required=True, help="Target division name")
-@click.option("--cutoff", required=True, help="Cutoff date YYYY-MM-DD")
+@click.option("--cutoff", required=True, help="Cutoff date YYYY-MM-DD (or comma-separated list)")
 @click.option("--window-months", default=6, type=int)
 @click.option("--mode", default="expansion", type=click.Choice(["expansion", "all"]))
 @click.option("--gp-min-threshold", default=0.0, type=float)
@@ -28,45 +28,57 @@ def main(division: str, cutoff: str, window_months: int, mode: str, gp_min_thres
     OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
     engine = get_db_connection()
 
-    params = LabelParams(
-        division=division,
-        cutoff=cutoff,
-        window_months=window_months,
-        mode=mode,  # type: ignore[arg-type]
-        gp_min_threshold=gp_min_threshold,
-    )
+    cutoffs = [c.strip() for c in cutoff.split(",") if c.strip()]
+    for cut in cutoffs:
+        params = LabelParams(
+            division=division,
+            cutoff=cut,
+            window_months=window_months,
+            mode=mode,  # type: ignore[arg-type]
+            gp_min_threshold=gp_min_threshold,
+        )
 
-    logger.info(f"Building labels: division={division}, cutoff={cutoff}, window={window_months}, mode={mode}, thresh={gp_min_threshold}")
-    labels = build_labels_for_division(engine, params)
-    if labels.is_empty():
-        logger.warning("Empty labels frame; aborting write.")
-        return
+        logger.info(f"Building labels: division={division}, cutoff={cut}, window={window_months}, mode={mode}, thresh={gp_min_threshold}")
+        labels = build_labels_for_division(engine, params)
+        if labels.is_empty():
+            logger.warning("Empty labels frame; skipping write for this cutoff.")
+            continue
 
-    # Artifacts
-    labels_pd = labels.to_pandas()
-    base = f"{division.lower()}_{cutoff}"
-    labels_path = OUTPUTS_DIR / f"labels_{base}.parquet"
-    labels.write_parquet(labels_path)
+        # Guardrails
+        labels_pd = labels.to_pandas()
+        uniq = labels_pd[['customer_id', 'division']].drop_duplicates()
+        if len(uniq) != len(labels_pd):
+            logger.warning("Duplicate (customer, division) rows detected; deduplication may be needed.")
+        prev = prevalence_report(labels)
+        try:
+            prev_rate = float(prev['prevalence'].iloc[0]) if not prev.empty else 0.0
+            if prev_rate < 0.005 or prev_rate > 0.5:
+                logger.warning(f"Unusual prevalence {prev_rate:.4f}; check windows/thresholds.")
+        except Exception:
+            pass
 
-    prev = prevalence_report(labels)
-    prev.to_csv(OUTPUTS_DIR / f"label_prevalence_{base}.csv", index=False)
+        # Artifacts
+        base = f"{division.lower()}_{cut}"
+        labels_path = OUTPUTS_DIR / f"labels_{base}.parquet"
+        labels.write_parquet(labels_path)
+        prev.to_csv(OUTPUTS_DIR / f"label_prevalence_{base}.csv", index=False)
 
-    report = {
-        "division": division,
-        "cutoff": cutoff,
-        "window_months": int(window_months),
-        "mode": mode,
-        "gp_min_threshold": float(gp_min_threshold),
-        "counts": {
-            "rows": int(len(labels_pd)),
-            "positives": int(labels_pd["label"].sum()),
-            "censored": int(labels_pd["censored_flag"].sum()) if "censored_flag" in labels_pd.columns else 0,
-        },
-    }
-    with open(OUTPUTS_DIR / f"cutoff_report_{base}.json", "w", encoding="utf-8") as f:
-        json.dump(report, f, indent=2)
+        report = {
+            "division": division,
+            "cutoff": cut,
+            "window_months": int(window_months),
+            "mode": mode,
+            "gp_min_threshold": float(gp_min_threshold),
+            "counts": {
+                "rows": int(len(labels_pd)),
+                "positives": int(labels_pd["label"].sum()),
+                "censored": int(labels_pd["censored_flag"].sum()) if "censored_flag" in labels_pd.columns else 0,
+            },
+        }
+        with open(OUTPUTS_DIR / f"cutoff_report_{base}.json", "w", encoding="utf-8") as f:
+            json.dump(report, f, indent=2)
 
-    logger.info(f"Labels written to {labels_path}")
+        logger.info(f"Labels written to {labels_path}")
 
 
 if __name__ == "__main__":
