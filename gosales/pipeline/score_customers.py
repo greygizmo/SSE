@@ -143,9 +143,11 @@ def generate_scoring_outputs(engine):
     logger.info("Starting customer scoring and whitespace analysis...")
     OUTPUTS_DIR.mkdir(exist_ok=True)
     
-    available_models = {
-        "Solidworks": MODELS_DIR / "solidworks_model"
-    }
+    # Discover available models by folder convention *_model
+    available_models = {}
+    for p in MODELS_DIR.glob("*_model"):
+        div = p.name.replace("_model", "").capitalize()
+        available_models[div] = p
     
     all_scores = []
     for division_name, model_path in available_models.items():

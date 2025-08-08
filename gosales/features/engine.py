@@ -7,6 +7,7 @@ from gosales.utils.logger import get_logger
 from gosales.utils import config as cfg
 from gosales.features.utils import filter_to_cutoff, winsorize_series
 from gosales.utils.paths import OUTPUTS_DIR
+from gosales.etl.sku_map import division_set
 
 logger = get_logger(__name__)
 
@@ -288,7 +289,12 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
             season_counts = pd.DataFrame(columns=['customer_id','q1_share_24m','q2_share_24m','q3_share_24m','q4_share_24m'])
 
         # Division-level features (last 12 months)
-        known_divisions = ['Solidworks', 'Services', 'Simulation', 'Hardware']
+        try:
+            known_divisions = list(division_set())
+            if not known_divisions:
+                known_divisions = ['Solidworks', 'Services', 'Simulation', 'Hardware']
+        except Exception:
+            known_divisions = ['Solidworks', 'Services', 'Simulation', 'Hardware']
         dl = fd.loc[last12_mask, ['customer_id', 'product_division', 'gross_profit']].copy()
         div_gp = dl.groupby(['customer_id', 'product_division'])['gross_profit'].sum().unstack(fill_value=0.0)
         div_gp = div_gp.reindex(columns=known_divisions, fill_value=0.0)
