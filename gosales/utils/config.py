@@ -52,6 +52,18 @@ class Labels:
 
 
 @dataclass
+class Features:
+    windows_months: list[int] = field(default_factory=lambda: [3, 6, 12, 24])
+    gp_winsor_p: float = 0.99
+    add_missingness_flags: bool = True
+    use_eb_smoothing: bool = True
+    use_market_basket: bool = True
+    use_als_embeddings: bool = False
+    use_item2vec: bool = False
+    use_text_tags: bool = False
+
+
+@dataclass
 class Config:
     paths: Paths
     database: Database = field(default_factory=Database)
@@ -59,6 +71,7 @@ class Config:
     etl: ETL = field(default_factory=ETL)
     logging: Logging = field(default_factory=Logging)
     labels: Labels = field(default_factory=Labels)
+    features: Features = field(default_factory=Features)
 
     def to_dict(self) -> Dict[str, Any]:
         def _convert(obj: Any) -> Any:
@@ -76,6 +89,7 @@ class Config:
             "etl": _convert(self.etl),
             "logging": _convert(self.logging),
             "labels": _convert(self.labels),
+            "features": _convert(self.features),
         }
 
 
@@ -143,6 +157,7 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
     etl_cfg = cfg_dict.get("etl", {})
     log_cfg = cfg_dict.get("logging", {})
     labels_cfg = cfg_dict.get("labels", {})
+    feat_cfg = cfg_dict.get("features", {})
 
     cfg = Config(
         paths=_paths_from_dict(paths_dict),
@@ -168,6 +183,16 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
         labels=Labels(
             gp_min_threshold=float(labels_cfg.get("gp_min_threshold", 0.0)),
             denylist_skus_csv=(Path(labels_cfg["denylist_skus_csv"]).resolve() if labels_cfg.get("denylist_skus_csv") else None),
+        ),
+        features=Features(
+            windows_months=list(feat_cfg.get("windows_months", [3, 6, 12, 24])),
+            gp_winsor_p=float(feat_cfg.get("gp_winsor_p", 0.99)),
+            add_missingness_flags=bool(feat_cfg.get("add_missingness_flags", True)),
+            use_eb_smoothing=bool(feat_cfg.get("use_eb_smoothing", True)),
+            use_market_basket=bool(feat_cfg.get("use_market_basket", True)),
+            use_als_embeddings=bool(feat_cfg.get("use_als_embeddings", False)),
+            use_item2vec=bool(feat_cfg.get("use_item2vec", False)),
+            use_text_tags=bool(feat_cfg.get("use_text_tags", False)),
         ),
     )
 

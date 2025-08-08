@@ -21,5 +21,14 @@ logging:
 labels:
   gp_min_threshold: 0.0
   denylist_skus_csv: gosales/data/lookup/label_denylist_skus.csv
+features:
+  windows_months: [3, 6, 12, 24]
+  gp_winsor_p: 0.99
+  add_missingness_flags: true
+  use_eb_smoothing: true
+  use_market_basket: true
+  use_als_embeddings: false
+  use_item2vec: false
+  use_text_tags: false
 
 
