@@ -32,7 +32,7 @@ def build_star_schema(engine):
     4.  "Unpivots" the wide `sales_log` table into a tidy `fact_transactions` table,
         where each row represents a single product line item within a transaction.
     5.  Cleans and standardizes data types for key columns.
-    
+
     Args:
         engine (sqlalchemy.engine.base.Engine): The database engine.
     """
@@ -42,6 +42,49 @@ def build_star_schema(engine):
     logger.info("Reading sales_log table...")
     try:
         sales_log_pd = pd.read_sql("SELECT * FROM sales_log", engine)
+
+        # --- Normalize schema to canonical wide format ---
+        def normalize_sales_log_schema(df: pd.DataFrame) -> pd.DataFrame:
+            df = df.copy()
+            # Trim column names
+            df.columns = [str(c).strip() for c in df.columns]
+
+            # Ensure identifying columns exist
+            for col in ["CustomerId", "Rec Date", "Division", "Customer"]:
+                if col not in df.columns:
+                    df[col] = None
+
+            # Alias common synonyms to our canonical GP/Qty columns
+            alias_pairs = [
+                ("PDM", "EPDM_CAD_Editor"),
+                ("PDM_Qty", "EPDM_CAD_Editor_Qty"),
+                ("Supplies", "Consumables"),
+            ]
+            for target, source in alias_pairs:
+                if target not in df.columns and source in df.columns:
+                    df[target] = df[source]
+
+            # Ensure all mapped GP/Qty columns exist
+            mapping_local = get_sku_mapping()
+            for gp_col, meta in mapping_local.items():
+                qty_col = meta["qty_col"]
+                if gp_col not in df.columns:
+                    df[gp_col] = 0
+                if qty_col not in df.columns:
+                    df[qty_col] = 0
+
+            # Keep only rows with valid identifiers
+            def _is_filled(x: pd.Series) -> pd.Series:
+                return (~x.isna()) & (x.astype(str).str.strip() != "")
+
+            df = df[_is_filled(df["CustomerId"]) & _is_filled(df["Rec Date"])].copy()
+
+            # Drop exact duplicate PKs (keep first)
+            df = df.drop_duplicates(subset=["CustomerId", "Rec Date"], keep="first")
+            return df
+
+        sales_log_pd = normalize_sales_log_schema(sales_log_pd)
+
         # Data contracts: required columns and PK/null checks
         OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
         contracts_dir = OUTPUTS_DIR / "contracts"
@@ -188,7 +231,7 @@ def build_star_schema(engine):
             .drop(["industry_fallback", "industry_sub_fallback", "web_address_fallback", "cleaned_customer_name_fallback", "industry_reasoning_fallback"])
             .collect()
         )
-
+        
         # C) Optional fuzzy-match fallback for remaining unmatched names
         try:
             if FUZZY_AVAILABLE:
