@@ -27,7 +27,7 @@
 
 - Guardrails
   - Degenerate classifier check (std(p) < 0.01) abort. DONE
-  - Overfit/early stop guard; seed determinism. PARTIAL (seed set)
+  - Overfit/early stop guard; seed determinism. DONE (LGBM deterministic, early stopping + overfit gap guard)
 
 - Tests
   - Determinism test (same config/seed ⇒ same metrics/hash). DONE (synthetic determinism of calibrated LR)

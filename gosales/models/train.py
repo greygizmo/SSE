@@ -149,6 +149,8 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
                             for bagging_fraction in grid.get('bagging_fraction', [0.9]):
                                 clf = LGBMClassifier(
                                     random_state=cfg.modeling.seed,
+                                    deterministic=True,
+                                    n_jobs=1,
                                     n_estimators=400,
                                     learning_rate=learning_rate,
                                     num_leaves=num_leaves,
@@ -160,6 +162,34 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
                                 clf.fit(X_train, y_train, eval_set=[(X_valid, y_valid)], eval_metric='auc', verbose=False, early_stopping_rounds=100)
                                 p = clf.predict_proba(X_valid)[:,1]
                                 auc_lgbm = roc_auc_score(y_valid, p)
+                                # Overfit guard: compare train vs valid AUC; if large gap, try stronger regularization once
+                                try:
+                                    p_tr = clf.predict_proba(X_train)[:,1]
+                                    auc_tr = roc_auc_score(y_train, p_tr)
+                                    gap = float(auc_tr - auc_lgbm)
+                                except Exception:
+                                    gap = 0.0
+                                if gap > 0.05:
+                                    reg_clf = LGBMClassifier(
+                                        random_state=cfg.modeling.seed,
+                                        deterministic=True,
+                                        n_jobs=1,
+                                        n_estimators=400,
+                                        learning_rate=learning_rate,
+                                        num_leaves=max(15, int(num_leaves * 0.8)),
+                                        min_data_in_leaf=int(min_data_in_leaf * 2),
+                                        feature_fraction=max(0.5, feature_fraction * 0.9),
+                                        bagging_fraction=max(0.5, bagging_fraction * 0.9),
+                                        scale_pos_weight=min(spw, 10.0),
+                                    )
+                                    reg_clf.fit(X_train, y_train, eval_set=[(X_valid, y_valid)], eval_metric='auc', verbose=False, early_stopping_rounds=100)
+                                    p_reg = reg_clf.predict_proba(X_valid)[:,1]
+                                    auc_reg = roc_auc_score(y_valid, p_reg)
+                                    if auc_reg >= auc_lgbm - 0.002:  # accept similar or better valid AUC with stronger regularization
+                                        clf = reg_clf
+                                        p = p_reg
+                                        auc_lgbm = auc_reg
+                                        logger.info(f"Overfit guard applied: gap={gap:.3f} → using regularized params for LGBM")
                                 if auc_lgbm > best_auc:
                                     best_auc = auc_lgbm
                                     best_lgbm = clf
@@ -205,7 +235,7 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
         model = cal
         feature_names = list(X_final.columns)
     else:
-        clf = LGBMClassifier(random_state=cfg.modeling.seed, n_estimators=400, learning_rate=0.05)
+        clf = LGBMClassifier(random_state=cfg.modeling.seed, n_estimators=400, learning_rate=0.05, deterministic=True, n_jobs=1)
         clf.fit(X_final, y_final)
         cal = CalibratedClassifierCV(clf, method='sigmoid', cv=3).fit(X_final, y_final)
         model = cal
