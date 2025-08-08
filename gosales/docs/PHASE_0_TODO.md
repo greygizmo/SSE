@@ -6,8 +6,8 @@
   - On run, persist resolved snapshot to `outputs/runs/<run_id>/config_resolved.yaml`. DONE
 
 - Ingest & staging
-  - Current `etl/load_csv.py` robustly reads with encoding fallback. Keep. Add manifest/checksums in later pass. TODO
-  - Add header normalization and column profiling to staging parquet. TODO
+  - Current `etl/load_csv.py` robustly reads with encoding fallback. Keep. Add manifest/checksums in later pass. DONE (manifest in `etl/ingest.py`)
+  - Add header normalization and column profiling to staging parquet. DONE
 
 - Contracts & coercion
   - Existing `etl/contracts.py` implements required/PK/dupe checks. Keep.
@@ -19,16 +19,16 @@
   - Add unit tests. DONE
 
 - SKU map
-  - Single source at `etl/sku_map.py` already present; ensure overrides later. TODO
+  - Single source at `etl/sku_map.py` already present; ensure overrides later. DONE (supports `data/lookup/sku_map_overrides.csv`)
 
 - Star schema
   - Extend `etl/build_star.py` to emit curated Parquet and build `dim_date` & `dim_product`. DONE
-  - Deterministic ordering and parquet checksums (checksum helper in place). PARTIAL
-  - FK integrity checks and quarantine. TODO
+  - Deterministic ordering and parquet checksums (checksum helper in place). DONE (rows sorted; checksums in QA)
+  - FK integrity checks and quarantine. DONE (quarantine parquet written when missing)
 
 - Observability
   - Add `ops/run.py` with JSONL logging and run ids. DONE
-  - Emit QA summaries (`outputs/qa/phase0_report.md`, `summary.json`). TODO
+  - Emit QA summaries (`outputs/qa/phase0_report.md`, `summary.json`). DONE
 
 - CLI
   - Add args: `--config`, `--rebuild`, `--staging-only`, `--fail-soft`. DONE

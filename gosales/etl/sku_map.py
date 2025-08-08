@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from typing import Dict, Iterable, Tuple
+from pathlib import Path
+import csv
+from gosales.utils.paths import ROOT_DIR
 
 
 def get_sku_mapping() -> Dict[str, Dict[str, str]]:
@@ -9,7 +12,7 @@ def get_sku_mapping() -> Dict[str, Dict[str, str]]:
     The keys are GP columns in the raw `sales_log`, values include the paired
     quantity column and the canonical division name.
     """
-    return {
+    base = {
         "SWX_Core": {"qty_col": "SWX_Core_Qty", "division": "Solidworks"},
         "SWX_Pro_Prem": {
             "qty_col": "SWX_Pro_Prem_Qty",
@@ -34,6 +37,23 @@ def get_sku_mapping() -> Dict[str, Dict[str, str]]:
         # Assuming supplies = consumables
         "Supplies": {"qty_col": "Consumables_Qty", "division": "Hardware"},
     }
+    # Apply optional overrides
+    try:
+        overrides_path = ROOT_DIR / "data" / "lookup" / "sku_map_overrides.csv"
+        if overrides_path.exists():
+            with open(overrides_path, "r", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    gp_col = (row.get("gp_col") or row.get("gp") or row.get("sku") or "").strip()
+                    qty_col = (row.get("qty_col") or row.get("qty") or "").strip()
+                    division = (row.get("division") or row.get("product_division") or "").strip()
+                    if not gp_col or not qty_col or not division:
+                        continue
+                    base[gp_col] = {"qty_col": qty_col, "division": division}
+    except Exception:
+        # Non-fatal if overrides unreadable
+        pass
+    return base
 
 
 def iter_required_columns() -> Iterable[str]:
@@ -51,7 +71,20 @@ def iter_required_columns() -> Iterable[str]:
 
 def get_required_columns() -> Tuple[str, ...]:
     """Return the required columns as an ordered tuple for contracts."""
-    return tuple(dict.fromkeys(iter_required_columns()).keys())
+    # Preserve order and uniqueness
+    return tuple(dict.fromkeys(list(iter_required_columns())))
+
+
+def division_set() -> Tuple[str, ...]:
+    mapping = get_sku_mapping()
+    return tuple(sorted({meta["division"] for meta in mapping.values()}))
+
+
+def sku_to_division(sku: str) -> str:
+    m = get_sku_mapping()
+    if sku in m:
+        return m[sku]["division"]
+    return "UNKNOWN"
 
 
 

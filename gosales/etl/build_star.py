@@ -135,11 +135,24 @@ def build_star_schema(engine, config_path: str | Path | None = None, rebuild: bo
         with open(contracts_dir / "schema.json", "w", encoding="utf-8") as f:
             json.dump(schema_json, f, indent=2)
 
-        # Write normalized staging parquet
+        # Write normalized staging parquet (lower snake case headers for a clean copy)
         staging_dir = Path(cfg.paths.staging)
         staging_dir.mkdir(parents=True, exist_ok=True)
         try:
-            pl.from_pandas(sales_log_pd).write_parquet(staging_dir / "sales_log_normalized.parquet")
+            norm_cols = [
+                (
+                    str(c)
+                    .strip()
+                    .lower()
+                    .replace(" ", "_")
+                    .replace("/", "_")
+                    .replace("__", "_")
+                )
+                for c in sales_log_pd.columns
+            ]
+            sales_log_pd_norm = sales_log_pd.copy()
+            sales_log_pd_norm.columns = norm_cols
+            pl.from_pandas(sales_log_pd_norm).write_parquet(staging_dir / "sales_log_normalized.parquet")
         except Exception as e:
             logger.warning(f"Failed to write staging parquet: {e}")
 
@@ -468,6 +481,11 @@ def build_star_schema(engine, config_path: str | Path | None = None, rebuild: bo
         'customer_id', 'order_date', 'product_sku', 'product_division', 'gross_profit', 'quantity'
     ]].sort_values(by=['customer_id', 'order_date', 'product_sku'], kind='mergesort').reset_index(drop=True)
     
+    # Round monetary and quantities for idempotency
+    if not fact_transactions_pd.empty:
+        fact_transactions_pd['gross_profit'] = fact_transactions_pd['gross_profit'].round(2)
+        fact_transactions_pd['quantity'] = fact_transactions_pd['quantity'].round(0)
+
     # Convert back to polars
     fact_transactions = pl.from_pandas(fact_transactions_pd)
 
@@ -525,6 +543,30 @@ def build_star_schema(engine, config_path: str | Path | None = None, rebuild: bo
     except Exception:
         pass
     
+    # --- FK integrity (fact → dim_customer, dim_product, dim_date) ---
+    try:
+        # Prepare keys
+        dim_c = dim_customer.select([pl.col("customer_id")]).unique().with_columns(pl.col("customer_id").cast(pl.Int64, strict=False))
+        fact_ck = fact_transactions.select([pl.col("customer_id")]).with_columns(pl.col("customer_id").cast(pl.Int64, strict=False))
+        # Left anti joins to find missing
+        missing_customer = fact_ck.join(dim_c, on="customer_id", how="anti")
+        # Product and date integrity (best effort)
+        dim_p = fact_transactions.select(["product_sku", "product_division"]).unique()
+        missing_product = fact_transactions.select(["product_sku", "product_division"]).join(dim_p, on=["product_sku", "product_division"], how="anti")
+        # Date: ensure not null
+        missing_date = fact_transactions.filter(pl.col("order_date").is_null())
+
+        quarantine_dir = curated_dir / "fact" / "quarantine"
+        quarantine_dir.mkdir(parents=True, exist_ok=True)
+        if len(missing_customer) > 0:
+            missing_customer.write_parquet(quarantine_dir / "missing_customer.parquet")
+        if len(missing_product) > 0:
+            missing_product.write_parquet(quarantine_dir / "missing_product.parquet")
+        if len(missing_date) > 0:
+            missing_date.write_parquet(quarantine_dir / "missing_date.parquet")
+    except Exception as e:
+        logger.warning(f"FK integrity/quarantine step failed: {e}")
+
     # --- dim_date and dim_product (minimal) ---
     try:
         logger.info("Building dim_date and dim_product")
