@@ -6,18 +6,18 @@
 
 - Candidates & eligibility
   - Build candidate set per `(customer, division, cutoff)` excluding divisions already owned pre‑cutoff (or last N months, configurable). PARTIAL (derived from div-scope tx_n/recency if present)
-  - Enforce region/territory allow‑list, DNC/legal/compliance holds, and open‑deal exclusion; log counts per rule. TODO
+  - Enforce region/territory allow‑list, DNC/legal/compliance holds, and open‑deal exclusion; log counts per rule. PARTIAL (per-rule counts captured if columns present)
   - Deterministic customer/division ordering for reproducible IDs. TODO
 
 - Signals
   - p_icp (primary): load Phase‑3 calibrated model per division; score candidates; compute per‑division percentile `p_icp_pct`. PARTIAL (model scoring + pct wired)
   - Affinity lift: pre‑cutoff market‑basket rules; compute `lift_max`, `lift_mean` per candidate; normalize (percentile/z) → `lift_norm`. PARTIAL (consumes engineered affinity or placeholders)
   - ALS similarity: reuse Phase‑2 embeddings; compute similarity to target division; quantile‑normalize → `als_norm`; if unavailable, set 0 and flag coverage. PARTIAL (consumes placeholder columns if present)
-  - Expected value proxy (EV): segment medians (industry/size/region) blended with global; cap at p95; normalize → `EV_norm`. PARTIAL (cap + percentile using GP proxy)
+  - Expected value proxy (EV): segment medians (industry/size/region) blended with global; cap at p95; normalize → `EV_norm`. PARTIAL (segment blend + cap + normalization)
 
 - Normalization & comparability
   - Implement per‑division percentile normalization (default) with option for pooled recalibration; verify approx. uniform per division. TODO
-  - Graceful degradation: if a signal missing (e.g., ALS), set to 0, reduce weight if below coverage threshold; log weight adjustments. TODO
+  - Graceful degradation: if a signal missing (e.g., ALS), set to 0, reduce weight if below coverage threshold; log weight adjustments. DONE (dynamic weight scaling by coverage, renormalized)
 
 - Scoring & ranking
   - Champion blend (static): `score = w1*p_icp_pct + w2*lift_norm + w3*als_norm + w4*EV_norm` with defaults 0.60/0.20/0.10/0.10 and per‑division overrides. DONE (configurable weights)
@@ -25,7 +25,7 @@
   - Optional challengers: meta‑learner or pairwise LTR on [p_icp, lift, als, EV] (behind flag). TODO
 
 - Business‑rule gating & capacity
-  - Apply gating AFTER scoring; log rule counts (kept/removed). PARTIAL (eligibility filter; needs per-rule counts)
+  - Apply gating AFTER scoring; log rule counts (kept/removed). PARTIAL (per-rule counts aggregated when columns available)
   - Capacity slicing modes: top‑N%, per‑rep capacity, hybrid with diversification; configurable and logged. PARTIAL (top_percent implemented; bias share check)
   - Cooldown logic: de‑emphasize accounts surfaced recently without action. TODO
 
@@ -36,7 +36,7 @@
 - Artifacts
   - `whitespace_{cutoff}.csv` with: `customer_id, division, score, p_icp, p_icp_pct, lift_norm, als_norm, EV_norm, nba_reason`. PARTIAL (core columns written)
   - `whitespace_explanations_{cutoff}.csv` with expanded fields if needed. DONE
-  - `whitespace_metrics_{cutoff}.json` (capture@K, diversity by division/segment, stability vs prior run). PARTIAL (rows, checksum, division shares; add capture/stability)
+  - `whitespace_metrics_{cutoff}.json` (capture@K, diversity by division/segment, stability vs prior run). PARTIAL (rows, checksum, weights, coverage, per-division eligibility counts, division shares; add capture/stability)
   - `thresholds_whitespace_{cutoff}.csv` (capacity/threshold grid). DONE (top_percent)
   - Deterministic checksum for ranked CSV. DONE
 
@@ -45,9 +45,9 @@
   - Wire to existing Phase‑2/3 artifacts (features for EV segments; models for p_icp; ALS if enabled). PARTIAL (features + model scoring wired)
 
 - Guardrails
-  - Cross‑division bias: if one division > X% of top‑N, warn; optional diversification slice. TODO
+  - Cross‑division bias: if one division > X% of top‑N, warn; optional diversification slice. PARTIAL (warn on share > threshold)
   - EV outliers capped at p95; log number capped. TODO
-  - ALS sparse coverage (< threshold): auto‑reduce weight and log. TODO
+  - ALS sparse coverage (< threshold): auto‑reduce weight and log. DONE (weight scaling; coverage emitted)
   - Affinity lift requires min support/confidence; otherwise set `lift_norm=0` and log. TODO
   - Full determinism: stable sort + checksum; seed any randomness. TODO
 
@@ -61,7 +61,7 @@
 
 - Performance & logging
   - Batched scoring I/O; vectorized normalization; memory‑safe joins. TODO
-  - Structured logs with rule counts, weight adjustments, capacity outcomes. TODO
+  - Structured logs with rule counts, weight adjustments, capacity outcomes. PARTIAL (elig counts, coverage, final weights in metrics)
 
 - Documentation
   - Update README: Phase 4 overview, CLI usage, artifacts list, glossary entries. TODO

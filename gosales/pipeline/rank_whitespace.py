@@ -63,6 +63,42 @@ def _compute_expected_value(df: pd.DataFrame, cfg) -> pd.Series:
     return ev_norm
 
 
+def _compute_ev_norm_by_segment(df: pd.DataFrame, cfg) -> pd.Series:
+    # Prefer segment medians if segment columns present; fallback to global proxy
+    seg_cols = []
+    for c in ["industry", "industry_sub", "region", "territory"]:
+        if c in df.columns:
+            seg_cols.append(c)
+    # Raw EV signal as before
+    col = None
+    for c in ["rfm__all__gp_sum__12m", "rfm__all__gp_sum__24m", "total_gp_all_time"]:
+        if c in df.columns:
+            col = c
+            break
+    if col is None:
+        return _compute_expected_value(df, cfg)
+    base = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+    # Segment medians blended with global median (simple average for now)
+    if seg_cols:
+        med = []
+        for c in seg_cols:
+            try:
+                seg_med = df.groupby(c)[col].transform(lambda s: pd.to_numeric(s, errors='coerce').median())
+                med.append(seg_med)
+            except Exception:
+                continue
+        if med:
+            seg_est = sum(med) / len(med)
+            raw_ev = 0.5 * base + 0.5 * seg_est.fillna(base)
+        else:
+            raw_ev = base
+    else:
+        raw_ev = base
+    cap = raw_ev.quantile(cfg.whitespace.ev_cap_percentile)
+    ev_capped = raw_ev.clip(upper=cap)
+    return _percentile_normalize(ev_capped).rename("EV_norm")
+
+
 def _compute_affinity_lift(df: pd.DataFrame) -> pd.Series:
     # Prefer engineered affinity feature; else placeholders if present
     for c in [
@@ -86,21 +122,37 @@ def _compute_als_norm(df: pd.DataFrame, cfg) -> pd.Series:
     return pd.Series(0.0, index=df.index, name="als_norm")
 
 
-def _apply_eligibility(df: pd.DataFrame, cfg) -> pd.DataFrame:
+def _apply_eligibility(df: pd.DataFrame, cfg) -> tuple[pd.DataFrame, dict]:
     # Assume df has columns indicating current ownership, region, open deals, recent contacts as available
     mask = pd.Series(True, index=df.index)
     elig = cfg.whitespace.eligibility
+    counts = {
+        'start_rows': int(len(df)),
+        'owned_excluded': 0,
+        'recent_contact_excluded': 0,
+        'open_deal_excluded': 0,
+        'region_mismatch_excluded': 0,
+    }
     if elig.exclude_if_owned_ever and 'owned_division_pre_cutoff' in df.columns:
-        mask &= ~df['owned_division_pre_cutoff'].astype(bool)
+        owned_mask = df['owned_division_pre_cutoff'].astype(bool)
+        counts['owned_excluded'] = int(owned_mask.sum())
+        mask &= ~owned_mask
     if elig.exclude_if_recent_contact_days and 'days_since_last_contact' in df.columns:
-        mask &= (pd.to_numeric(df['days_since_last_contact'], errors='coerce').fillna(1e9) > int(elig.exclude_if_recent_contact_days))
+        cond = (pd.to_numeric(df['days_since_last_contact'], errors='coerce').fillna(1e9) <= int(elig.exclude_if_recent_contact_days))
+        counts['recent_contact_excluded'] = int(cond.sum())
+        mask &= ~cond
     if elig.exclude_if_open_deal and 'has_open_deal' in df.columns:
-        mask &= ~df['has_open_deal'].astype(bool)
+        od = df['has_open_deal'].astype(bool)
+        counts['open_deal_excluded'] = int(od.sum())
+        mask &= ~od
     if elig.require_region_match and 'region_match' in df.columns:
-        mask &= df['region_match'].astype(bool)
+        rm = df['region_match'].astype(bool)
+        counts['region_mismatch_excluded'] = int((~rm).sum())
+        mask &= rm
     out = df.loc[mask].copy()
-    out['_eligibility_kept'] = mask.sum()
-    return out
+    counts['kept_rows'] = int(len(out))
+    out['_eligibility_kept'] = counts['kept_rows']
+    return out, counts
 
 
 def _explain(row: pd.Series) -> str:
@@ -154,6 +206,7 @@ def main(cutoff: str, window_months: int, division: str | None, weights: str | N
             w = cfg.whitespace.weights
 
     rows = []
+    metrics_div: list[dict] = []
     for div in divisions:
         # For now, reuse the latest features parquet for the cutoff
         feat_path = OUTPUTS_DIR / f"features_{div.lower()}_{cutoff}.parquet"
@@ -174,7 +227,7 @@ def main(cutoff: str, window_months: int, division: str | None, weights: str | N
                 df['owned_division_pre_cutoff'] = False
 
         # Eligibility
-        df = _apply_eligibility(df, cfg)
+        df, elig_counts = _apply_eligibility(df, cfg)
         if df.empty:
             continue
 
@@ -182,7 +235,28 @@ def main(cutoff: str, window_months: int, division: str | None, weights: str | N
         p_icp, p_icp_pct = _score_p_icp(df.drop(columns=['customer_id', 'bought_in_division'], errors='ignore'), div)
         lift_norm = _compute_affinity_lift(df)
         als_norm = _compute_als_norm(df, cfg)
-        ev_norm = _compute_expected_value(df, cfg)
+        ev_norm = _compute_ev_norm_by_segment(df, cfg)
+
+        # Weight degradation if coverage is sparse
+        w_div = list(w)
+        adjustments = {}
+        try:
+            als_cov = float((als_norm > 0).mean())
+            aff_cov = float((lift_norm > 0).mean())
+            thr = float(cfg.whitespace.als_coverage_threshold)
+            if als_cov < thr and w_div[2] > 0:
+                factor = als_cov / max(1e-9, thr)
+                adjustments['als_weight_factor'] = round(factor, 3)
+                w_div[2] *= factor
+            if aff_cov < thr and w_div[1] > 0:
+                factor = aff_cov / max(1e-9, thr)
+                adjustments['aff_weight_factor'] = round(factor, 3)
+                w_div[1] *= factor
+            s = sum(w_div)
+            if s > 0:
+                w_div = [x / s for x in w_div]
+        except Exception:
+            pass
 
         tmp = pd.DataFrame({
             'customer_id': df['customer_id'].values,
@@ -195,14 +269,24 @@ def main(cutoff: str, window_months: int, division: str | None, weights: str | N
         })
         # Blend
         tmp['score'] = (
-            w[0] * tmp['p_icp_pct'] +
-            w[1] * tmp['lift_norm'] +
-            w[2] * tmp['als_norm'] +
-            w[3] * tmp['EV_norm']
+            w_div[0] * tmp['p_icp_pct'] +
+            w_div[1] * tmp['lift_norm'] +
+            w_div[2] * tmp['als_norm'] +
+            w_div[3] * tmp['EV_norm']
         )
         # Explanations
         tmp['nba_reason'] = tmp.apply(_explain, axis=1)
         rows.append(tmp)
+        metrics_div.append({
+            'division': div,
+            'eligibility_counts': elig_counts,
+            'coverage': {
+                'als': float((als_norm > 0).mean()),
+                'affinity': float((lift_norm > 0).mean()),
+            },
+            'weights_final': w_div,
+            'adjustments': adjustments,
+        })
 
     if not rows:
         logger.warning("No ranked rows produced")
@@ -237,11 +321,13 @@ def main(cutoff: str, window_months: int, division: str | None, weights: str | N
     metrics = {
         'cutoff': cutoff,
         'weights': w,
+        'normalize': normalize or cfg.whitespace.normalize,
         'rows': int(len(out)),
         'checksum': int(checksum),
         'capacity_mode': cap_mode,
         'selected_rows': int(len(selected)),
         'division_shares_topN': share_map,
+        'by_division': metrics_div,
     }
     out_path = OUTPUTS_DIR / f"whitespace_{cutoff}.csv"
     out.to_csv(out_path, index=False)
