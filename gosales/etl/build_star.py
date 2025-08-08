@@ -21,6 +21,7 @@ from gosales.etl.contracts import (
     check_primary_key_not_null,
     check_no_duplicate_pk,
     violations_to_dataframe,
+    check_date_parse_and_bounds,
 )
 
 logger = get_logger(__name__)
@@ -184,6 +185,13 @@ def build_star_schema(engine, config_path: str | Path | None = None, rebuild: bo
         # Duplicate check only if both cols available (best-effort)
         if len(pk_cols) >= 2:
             violations += check_no_duplicate_pk(sales_log_pd, "sales_log", pk_cols)
+        # Date bounds
+        try:
+            from pandas import Timestamp
+            maxd = pd.to_datetime(cfg.run.cutoff_date, errors="coerce") if cfg.run.cutoff_date else None
+            violations += check_date_parse_and_bounds(sales_log_pd, "sales_log", "Rec Date", maxd)
+        except Exception:
+            pass
 
         vdf = violations_to_dataframe(violations)
         vdf.to_csv(contracts_dir / "violations.csv", index=False)

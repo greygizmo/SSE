@@ -81,6 +81,49 @@ def violations_to_dataframe(violations: List[ContractViolation]) -> pd.DataFrame
     return pd.DataFrame([v.__dict__ for v in violations])
 
 
+def check_date_parse_and_bounds(
+    df: pd.DataFrame,
+    table_name: str,
+    date_column: str,
+    max_date: pd.Timestamp | None = None,
+) -> List[ContractViolation]:
+    violations: List[ContractViolation] = []
+    if date_column not in df.columns:
+        violations.append(
+            ContractViolation(
+                table_name=table_name,
+                column_name=date_column,
+                violation_type="missing_column",
+                details=f"Date column '{date_column}' not found in {table_name}",
+            )
+        )
+        return violations
+    ser = df[date_column]
+    parsed = pd.to_datetime(ser, errors="coerce")
+    invalid_count = int(((parsed.isna()) & ser.notna()).sum())
+    if invalid_count > 0:
+        violations.append(
+            ContractViolation(
+                table_name=table_name,
+                column_name=date_column,
+                violation_type="invalid_date",
+                details=f"{invalid_count} values could not be parsed as dates",
+            )
+        )
+    if max_date is None:
+        max_date = pd.Timestamp.today().normalize()
+    over_count = int((parsed.dropna() > max_date).sum())
+    if over_count > 0:
+        violations.append(
+            ContractViolation(
+                table_name=table_name,
+                column_name=date_column,
+                violation_type="date_after_max",
+                details=f"{over_count} dates are after allowed maximum {max_date.date()}",
+            )
+        )
+    return violations
+
 
 
 
