@@ -12,6 +12,7 @@ import numpy as np
 
 from gosales.utils.db import get_db_connection
 from gosales.etl.load_csv import load_csv_to_db
+from gosales.etl.cleaners import clean_currency_value
 from gosales.etl.build_star import build_star_schema
 from gosales.features.engine import create_feature_matrix
 from gosales.utils.logger import get_logger
@@ -66,13 +67,22 @@ def validate_against_holdout():
     # Build new fact_transactions with 2025 data included
     # We need to manually run the star schema build on the combined data
     combined_df = pd.read_sql("SELECT * FROM sales_log_combined", db_engine)
+    # Alias analytics-style columns to canonical ones (aligns with build_star normalization)
+    alias_pairs = [
+        ("PDM", "EPDM_CAD_Editor"),
+        ("PDM_Qty", "EPDM_CAD_Editor_Qty"),
+        ("Supplies", "Consumables"),
+    ]
+    for target, source in alias_pairs:
+        if target not in combined_df.columns and source in combined_df.columns:
+            combined_df[target] = combined_df[source]
     # Coerce all object/floating id/date fields to proper types to avoid Arrow errors
     for col in combined_df.columns:
         if col in ("CustomerId",):
             combined_df[col] = pd.to_numeric(combined_df[col], errors="coerce").astype("Int64")
         elif col in ("Rec Date",):
             combined_df[col] = pd.to_datetime(combined_df[col], errors="coerce")
-        elif isinstance(combined_df[col].dtype, object) and combined_df[col].dtype == object:
+        elif combined_df[col].dtype == object:
             # Ensure strings are proper str (no mixed float) for Arrow conversion
             combined_df[col] = combined_df[col].astype(str)
     sales_log_combined = pl.from_pandas(combined_df)
@@ -123,16 +133,8 @@ def validate_against_holdout():
         fact_transactions_pd['customer_id'] = pd.to_numeric(fact_transactions_pd['CustomerId'], errors='coerce')
         fact_transactions_pd['order_date'] = pd.to_datetime(fact_transactions_pd['Rec Date'])
         
-        def clean_currency(value):
-            if pd.isna(value):
-                return 0.0
-            if isinstance(value, str):
-                if '(' in value and ')' in value:
-                    value = '-' + value.replace('(', '').replace(')', '')
-                return float(value.replace('$', '').replace(',', ''))
-            return float(value)
-        
-        fact_transactions_pd['gross_profit'] = fact_transactions_pd['gross_profit'].apply(clean_currency)
+        # Robust currency cleaner reused from ETL
+        fact_transactions_pd['gross_profit'] = fact_transactions_pd['gross_profit'].apply(clean_currency_value)
         fact_transactions_pd['quantity'] = pd.to_numeric(fact_transactions_pd['quantity'], errors='coerce').fillna(0)
         
         # Filter meaningful transactions
