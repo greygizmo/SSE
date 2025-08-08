@@ -195,12 +195,80 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
         pass
     with open(out_dir / "feature_list.json", "w", encoding="utf-8") as f:
         json.dump(feature_names, f)
-    metrics = {
-        "selection": winner,
-        "aggregate": agg.to_dict(orient='records'),
-    }
-    with open(OUTPUTS_DIR / f"metrics_{division.lower()}.json", "w", encoding="utf-8") as f:
-        json.dump(metrics, f, indent=2)
+    # Final predictions and guardrails
+    try:
+        p_final = model.predict_proba(X_final)[:,1]
+        if float(np.std(p_final)) < 0.01:
+            logger.warning("Degenerate classifier (std(p) < 0.01). Aborting artifact write.")
+            return
+    except Exception:
+        p_final = None
+
+    # Metrics & artifacts
+    try:
+        auc_val = roc_auc_score(y_final, p_final) if p_final is not None else None
+        pr_prec, pr_rec, _ = precision_recall_curve(y_final, p_final) if p_final is not None else (None, None, None)
+        pr_auc = auc(pr_rec, pr_prec) if pr_prec is not None else None
+        brier = brier_score_loss(y_final, p_final) if p_final is not None else None
+        lifts = {f"lift@{k}": _lift_at_k(y_final, p_final, k) for k in cfg.modeling.top_k_percents} if p_final is not None else {}
+
+        # Gains (deciles)
+        gains_df = pd.DataFrame({"y": y_final, "p": p_final})
+        gains_df = gains_df.sort_values("p", ascending=False).reset_index(drop=True)
+        gains_df["decile"] = (np.floor((gains_df.index / max(1, len(gains_df)-1)) * 10) + 1).clip(1, 10).astype(int)
+        gains = gains_df.groupby("decile").agg(bought_in_division_mean=("y","mean"), count=("y","size"), p_mean=("p","mean")).reset_index()
+        gains.to_csv(OUTPUTS_DIR / f"gains_{division.lower()}.csv", index=False)
+
+        # Calibration bins (quantile bins)
+        try:
+            bins = pd.qcut(gains_df["p"], q=10, duplicates="drop")
+            calib = gains_df.assign(bin=bins).groupby("bin").agg(mean_predicted=("p","mean"), fraction_positives=("y","mean"), count=("y","size")).reset_index()
+            calib.to_csv(OUTPUTS_DIR / f"calibration_{division.lower()}.csv", index=False)
+        except Exception:
+            pass
+
+        # Thresholds for top-K percents
+        thr_rows = []
+        for k in cfg.modeling.top_k_percents:
+            if p_final is None or len(p_final) == 0:
+                continue
+            cutoff_idx = max(1, int(len(p_final) * (k/100.0)))
+            thr = float(np.sort(p_final)[-cutoff_idx])
+            thr_rows.append({"k_percent": k, "threshold": thr, "count": cutoff_idx})
+        pd.DataFrame(thr_rows).to_csv(OUTPUTS_DIR / f"thresholds_{division.lower()}.csv", index=False)
+
+        # LR coefficients (if available)
+        try:
+            from sklearn.linear_model import LogisticRegression
+            base = getattr(model, "base_estimator", None)
+            if base is None and hasattr(model, "estimator"):
+                base = model.estimator
+            if isinstance(base, LogisticRegression) and hasattr(base, "coef_"):
+                coef = pd.DataFrame({"feature": feature_names, "coef": base.coef_.ravel().tolist()})
+                coef.to_csv(OUTPUTS_DIR / f"coef_{division.lower()}.csv", index=False)
+        except Exception:
+            pass
+
+        # Model card / metrics
+        metrics = {
+            "division": division,
+            "cutoffs": cut_list,
+            "selection": winner,
+            "aggregate": agg.to_dict(orient='records'),
+            "final": {
+                "auc": float(auc_val) if auc_val is not None else None,
+                "pr_auc": float(pr_auc) if pr_auc is not None else None,
+                "brier": float(brier) if brier is not None else None,
+                **lifts,
+            },
+            "seed": cfg.modeling.seed,
+            "window_months": int(window_months),
+        }
+        with open(OUTPUTS_DIR / f"metrics_{division.lower()}.json", "w", encoding="utf-8") as f:
+            json.dump(metrics, f, indent=2)
+    except Exception as e:
+        logger.warning(f"Failed writing Phase 3 artifacts: {e}")
+
     logger.info(f"Training complete for {division}")
 
 
