@@ -1,5 +1,6 @@
 import polars as pl
 import pandas as pd
+import numpy as np
 from datetime import datetime
 from gosales.utils.db import get_db_connection
 from gosales.utils.logger import get_logger
@@ -71,14 +72,14 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
 
     # --- 2. Create the Binary Target Variable ---
     # Target: 1 if the customer bought any product in the target division in the prediction window, 0 otherwise.
-        if cutoff_date:
-            # Use prediction window data for target labels
-            prediction_buyers_df = prediction_data[prediction_data['product_division'] == division_name]['customer_id'].unique()
-            division_buyers_pd = pd.DataFrame({'customer_id': prediction_buyers_df, 'bought_in_division': 1})
-            # Enforce integer customer_id for join compatibility
-            if 'customer_id' in division_buyers_pd.columns:
-                division_buyers_pd['customer_id'] = pd.to_numeric(division_buyers_pd['customer_id'], errors='coerce').astype('Int64')
-            division_buyers = pl.from_pandas(division_buyers_pd).with_columns(pl.col('customer_id').cast(pl.Int64, strict=False)).lazy()
+    if cutoff_date:
+        # Use prediction window data for target labels
+        prediction_buyers_df = prediction_data[prediction_data['product_division'] == division_name]['customer_id'].unique()
+        division_buyers_pd = pd.DataFrame({'customer_id': prediction_buyers_df, 'bought_in_division': 1})
+        # Enforce integer customer_id for join compatibility
+        if 'customer_id' in division_buyers_pd.columns:
+            division_buyers_pd['customer_id'] = pd.to_numeric(division_buyers_pd['customer_id'], errors='coerce').astype('Int64')
+        division_buyers = pl.from_pandas(division_buyers_pd).with_columns(pl.col('customer_id').cast(pl.Int64, strict=False)).lazy()
         logger.info(f"Target: {len(prediction_buyers_df)} customers bought {division_name} in prediction window")
     else:
         # Original behavior: ever bought in historical data
@@ -105,27 +106,28 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
             # Frequency Features
             pl.len().alias("total_transactions_all_time"),
             pl.col("order_date").filter(pl.col("order_date").dt.year().is_in([2023, 2024])).len().alias("transactions_last_2y"),
-
+            
             # Monetary Features
             pl.sum("gross_profit").alias("total_gp_all_time"),
             pl.col("gross_profit").filter(pl.col("order_date").dt.year().is_in([2023, 2024])).sum().alias("total_gp_last_2y"),
             pl.mean("gross_profit").alias("avg_transaction_gp"),
-
+            
             # Cross-division behavioral patterns (non-leaky features)
             pl.col("product_division").filter(pl.col("product_division") == "Services").len().alias("services_transaction_count"),
             pl.col("product_division").filter(pl.col("product_division") == "Simulation").len().alias("simulation_transaction_count"),
             pl.col("product_division").filter(pl.col("product_division") == "Hardware").len().alias("hardware_transaction_count"),
-
+            
             # Services engagement (proxy for technical sophistication)
             pl.col("gross_profit").filter(pl.col("product_division") == "Services").sum().alias("total_services_gp"),
             pl.col("gross_profit").filter(pl.col("product_sku") == "Training").sum().alias("total_training_gp"),
-
+            
             # Growth trajectory features
             pl.col("gross_profit").filter(pl.col("order_date").dt.year() == 2024).sum().alias("gp_2024"),
             pl.col("gross_profit").filter(pl.col("order_date").dt.year() == 2023).sum().alias("gp_2023"),
             
             # General engagement features
             pl.n_unique("product_division").alias("product_diversity_score"),
+            pl.n_unique("product_sku").alias("sku_diversity_score"),
         ])
         .collect()
     )
@@ -163,6 +165,237 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
     else:
         features_pd[f'days_since_last_{division_name}_order'] = 999  # Default for customers with no orders in division
     
+    # --- 3a. Windowed RFM and temporal dynamics (pandas) ---
+    try:
+        cutoff_dt = pd.to_datetime(cutoff_date) if cutoff_date else transactions_pd['order_date'].max()
+        fd = feature_data.copy()
+        fd['order_date'] = pd.to_datetime(fd['order_date'])
+        fd = fd.sort_values(['customer_id', 'order_date'])
+
+        window_months = [3, 6, 12, 24]
+        per_customer_frames = []
+        for w in window_months:
+            start_dt = cutoff_dt - pd.DateOffset(months=w)
+            mask = (fd['order_date'] > start_dt) & (fd['order_date'] <= cutoff_dt)
+            sub = fd.loc[mask, ['customer_id', 'order_date', 'gross_profit']]
+            agg = sub.groupby('customer_id').agg(
+                tx_count_last_w=('order_date', 'count'),
+                gp_sum_last_w=('gross_profit', 'sum'),
+            ).reset_index()
+            agg.rename(columns={
+                'tx_count_last_w': f'tx_count_last_{w}m',
+                'gp_sum_last_w': f'gp_sum_last_{w}m',
+            }, inplace=True)
+            agg[f'avg_gp_per_tx_last_{w}m'] = agg[f'gp_sum_last_{w}m'] / agg[f'tx_count_last_{w}m'].replace(0, np.nan)
+            agg[f'avg_gp_per_tx_last_{w}m'] = agg[f'avg_gp_per_tx_last_{w}m'].fillna(0.0)
+            per_customer_frames.append(agg)
+
+        # Monthly resample for slope/volatility over last 12 months
+        last12_mask = (fd['order_date'] > (cutoff_dt - pd.DateOffset(months=12))) & (fd['order_date'] <= cutoff_dt)
+        m = fd.loc[last12_mask, ['customer_id', 'order_date', 'gross_profit']].copy()
+        m['ym'] = m['order_date'].values.astype('datetime64[M]')
+        monthly = m.groupby(['customer_id', 'ym']).agg(month_gp=('gross_profit', 'sum'), month_tx=('gross_profit', 'count')).reset_index()
+
+        def _slope_std(df: pd.DataFrame, value_col: str):
+            # ensure 12 points by reindexing months
+            months = pd.date_range((cutoff_dt - pd.DateOffset(months=11)).to_period('M').to_timestamp(),
+                                   cutoff_dt.to_period('M').to_timestamp(), freq='MS')
+            tmp = df.set_index('ym').reindex(months).fillna(0.0)
+            y = tmp[value_col].values.astype(float)
+            x = np.arange(len(y))
+            if np.any(np.isfinite(y)) and len(y) >= 3:
+                slope = np.polyfit(x, y, 1)[0]
+            else:
+                slope = 0.0
+            stdv = float(np.std(y))
+            return pd.Series({'slope': slope, 'std': stdv})
+
+        gp_dynamics = monthly.groupby('customer_id').apply(lambda df: _slope_std(df, 'month_gp')).reset_index()
+        gp_dynamics.rename(columns={'slope': 'gp_monthly_slope_12m', 'std': 'gp_monthly_std_12m'}, inplace=True)
+        tx_dynamics = monthly.groupby('customer_id').apply(lambda df: _slope_std(df, 'month_tx')).reset_index()
+        tx_dynamics.rename(columns={'slope': 'tx_monthly_slope_12m', 'std': 'tx_monthly_std_12m'}, inplace=True)
+
+        # Tenure and interpurchase intervals
+        first_last = fd.groupby('customer_id').agg(first_order=('order_date', 'min'), last_order=('order_date', 'max')).reset_index()
+        first_last['tenure_days'] = (cutoff_dt - first_last['first_order']).dt.days
+        # Interpurchase intervals
+        def _intervals(g: pd.DataFrame):
+            dates = g['order_date'].sort_values().values
+            if len(dates) < 2:
+                return pd.Series({'ipi_median_days': 0.0, 'ipi_mean_days': 0.0, 'last_gap_days': float((cutoff_dt - g['order_date'].max()).days)})
+            diffs = np.diff(dates).astype('timedelta64[D]').astype(int)
+            return pd.Series({'ipi_median_days': float(np.median(diffs)), 'ipi_mean_days': float(np.mean(diffs)), 'last_gap_days': float((cutoff_dt - g['order_date'].max()).days)})
+
+        ipi = fd.groupby('customer_id').apply(_intervals).reset_index()
+
+        # Seasonality (Q1..Q4 proportions over last 24 months)
+        last24_mask = (fd['order_date'] > (cutoff_dt - pd.DateOffset(months=24))) & (fd['order_date'] <= cutoff_dt)
+        s = fd.loc[last24_mask, ['customer_id', 'order_date']].copy()
+        s['quarter'] = s['order_date'].dt.quarter
+        season_counts = s.groupby(['customer_id', 'quarter']).size().unstack(fill_value=0)
+        season_counts = season_counts.rename(columns={1: 'q1_count_24m', 2: 'q2_count_24m', 3: 'q3_count_24m', 4: 'q4_count_24m'})
+        season_counts['season_total_24m'] = season_counts.sum(axis=1)
+        for q in ['q1', 'q2', 'q3', 'q4']:
+            season_counts[f'{q}_share_24m'] = season_counts[f'{q}_count_24m'] / season_counts['season_total_24m'].replace(0, np.nan)
+            season_counts[f'{q}_share_24m'] = season_counts[f'{q}_share_24m'].fillna(0.0)
+        season_counts = season_counts.reset_index()[['customer_id', 'q1_share_24m', 'q2_share_24m', 'q3_share_24m', 'q4_share_24m']]
+
+        # Division-level features (last 12 months)
+        known_divisions = ['Solidworks', 'Services', 'Simulation', 'Hardware']
+        dl = fd.loc[last12_mask, ['customer_id', 'product_division', 'gross_profit']].copy()
+        div_gp = dl.groupby(['customer_id', 'product_division'])['gross_profit'].sum().unstack(fill_value=0.0)
+        div_gp = div_gp.reindex(columns=known_divisions, fill_value=0.0)
+        div_gp = div_gp.add_prefix('gp_12m_')
+        div_tx = dl.groupby(['customer_id', 'product_division']).size().unstack(fill_value=0)
+        div_tx = div_tx.reindex(columns=known_divisions, fill_value=0).add_prefix('tx_12m_')
+        div_df = div_gp.join(div_tx, how='outer').reset_index()
+        div_df['gp_12m_total'] = div_df[[f'gp_12m_{d}' for d in known_divisions]].sum(axis=1)
+        for d in known_divisions:
+            div_df[f'{d.lower()}_gp_share_12m'] = div_df[f'gp_12m_{d}'] / div_df['gp_12m_total'].replace(0, np.nan)
+            div_df[f'{d.lower()}_gp_share_12m'] = div_df[f'{d.lower()}_gp_share_12m'].fillna(0.0)
+
+        # Division recency (days since last division order)
+        rec_div_list = []
+        for d in known_divisions:
+            sub = fd.loc[fd['product_division'] == d, ['customer_id', 'order_date']]
+            last_d = sub.groupby('customer_id')['order_date'].max().reset_index()
+            last_d[f'days_since_last_{d.lower()}'] = (cutoff_dt - last_d['order_date']).dt.days
+            rec_div_list.append(last_d[['customer_id', f'days_since_last_{d.lower()}']])
+        rec_div = None
+        if rec_div_list:
+            rec_div = rec_div_list[0]
+            for extra in rec_div_list[1:]:
+                rec_div = rec_div.merge(extra, on='customer_id', how='outer')
+
+        # SKU-level features (last 12 months)
+        important_skus = ['SWX_Core', 'SWX_Pro_Prem', 'Core_New_UAP', 'Pro_Prem_New_UAP', 'PDM', 'Simulation', 'Services', 'Training', 'Success Plan GP', 'Supplies']
+        sl = fd.loc[last12_mask, ['customer_id', 'product_sku', 'gross_profit', 'quantity']].copy()
+        sku_gp = sl.groupby(['customer_id', 'product_sku'])['gross_profit'].sum().unstack(fill_value=0.0)
+        sku_gp = sku_gp.reindex(columns=important_skus, fill_value=0.0).add_prefix('sku_gp_12m_')
+        sku_qty = sl.groupby(['customer_id', 'product_sku'])['quantity'].sum().unstack(fill_value=0.0)
+        sku_qty = sku_qty.reindex(columns=important_skus, fill_value=0.0).add_prefix('sku_qty_12m_')
+        sku_df = sku_gp.join(sku_qty, how='outer').reset_index()
+        # GP per unit ratios
+        for s in important_skus:
+            gp_col = f'sku_gp_12m_{s}'
+            qty_col = f'sku_qty_12m_{s}'
+            ratio_col = f'sku_gp_per_unit_12m_{s}'
+            if gp_col in sku_df.columns and qty_col in sku_df.columns:
+                sku_df[ratio_col] = sku_df[gp_col] / sku_df[qty_col].replace(0, np.nan)
+                sku_df[ratio_col] = sku_df[ratio_col].fillna(0.0)
+
+        # Past Solidworks buyer flag (historical)
+        past_swx = fd.loc[fd['product_division'] == 'Solidworks', ['customer_id']].drop_duplicates()
+        past_swx['ever_bought_solidworks'] = 1
+
+        # Merge all extra frames to features_pd
+        extra = features_pd[['customer_id']].copy()
+        for df_merge in per_customer_frames + [gp_dynamics, tx_dynamics, first_last[['customer_id', 'tenure_days']], ipi, season_counts, div_df, sku_df, past_swx]:
+            if df_merge is None or len(df_merge) == 0:
+                continue
+            extra = extra.merge(df_merge, on='customer_id', how='left')
+
+        # Fill NaNs
+        for col in extra.columns:
+            if col == 'customer_id':
+                continue
+            extra[col] = extra[col].fillna(0)
+
+        # Attach to features_pd
+        features_pd = features_pd.merge(extra, on='customer_id', how='left')
+
+        # --- Region (Branch) and Rep features from sales_log (feature period only) ---
+        try:
+            sl = pd.read_sql("SELECT CustomerId, [Rec Date] AS rec_date, Branch, Rep FROM sales_log", engine)
+            sl['rec_date'] = pd.to_datetime(sl['rec_date'], errors='coerce')
+            sl['customer_id'] = pd.to_numeric(sl['CustomerId'], errors='coerce').astype('Int64')
+            sl = sl.dropna(subset=['customer_id'])
+            sl = sl[sl['rec_date'] <= cutoff_dt]
+            # Top branches and reps
+            top_branches = sl['Branch'].astype(str).str.strip().value_counts().head(30).index.tolist()
+            top_reps = sl['Rep'].astype(str).str.strip().value_counts().head(50).index.tolist()
+
+            import re
+            def sanitize_key(text: str) -> str:
+                if text is None:
+                    return "unknown"
+                key = str(text).lower().strip()
+                key = key.replace("&", " and ")
+                key = re.sub(r"[^0-9a-zA-Z]+", "_", key)
+                key = re.sub(r"_+", "_", key).strip("_")
+                if not key:
+                    key = "unknown"
+                return key
+
+            # Branch share features
+            b = sl[['customer_id', 'Branch']].copy()
+            b['Branch'] = b['Branch'].astype(str).str.strip()
+            b['count'] = 1
+            b_tot = b.groupby('customer_id')['count'].sum().rename('branch_tx_total')
+            b_top = b[b['Branch'].isin(top_branches)].groupby(['customer_id', 'Branch'])['count'].sum().unstack(fill_value=0)
+            # Normalize to shares
+            b_top = b_top.div(b_tot, axis=0).fillna(0.0)
+            b_top.columns = [f"branch_share_{sanitize_key(c)}" for c in b_top.columns]
+
+            # Rep share features
+            r = sl[['customer_id', 'Rep']].copy()
+            r['Rep'] = r['Rep'].astype(str).str.strip()
+            r['count'] = 1
+            r_tot = r.groupby('customer_id')['count'].sum().rename('rep_tx_total')
+            r_top = r[r['Rep'].isin(top_reps)].groupby(['customer_id', 'Rep'])['count'].sum().unstack(fill_value=0)
+            r_top = r_top.div(r_tot, axis=0).fillna(0.0)
+            r_top.columns = [f"rep_share_{sanitize_key(c)}" for c in r_top.columns]
+
+            br = b_top.join(r_top, how='outer').reset_index()
+            features_pd = features_pd.merge(br, on='customer_id', how='left')
+            for col in br.columns:
+                if col == 'customer_id':
+                    continue
+                features_pd[col] = features_pd[col].fillna(0.0)
+        except Exception as e:
+            logger.warning(f"Branch/Rep feature build failed: {e}")
+
+        # --- Basket lift / affinity ---
+        try:
+            # Compute presence by SKU in feature period per customer
+            fd_sku = fd[['customer_id', 'product_sku']].dropna().copy()
+            fd_sku['product_sku'] = fd_sku['product_sku'].astype(str)
+            # Global baseline: fraction of customers with Solidworks activity in feature period
+            fd_div = fd[['customer_id', 'product_division']].dropna().copy()
+            swx_customers = set(fd_div.loc[fd_div['product_division'] == 'Solidworks', 'customer_id'].unique().tolist())
+            all_customers = set(fd['customer_id'].unique().tolist())
+            baseline = (len(swx_customers) / max(1, len(all_customers)))
+
+            # For selected SKUs, compute lift = P(SWX | SKU) / P(SWX)
+            sku_list = ['SWX_Core', 'SWX_Pro_Prem', 'Core_New_UAP', 'Pro_Prem_New_UAP', 'PDM', 'Simulation', 'Services', 'Training', 'Success Plan GP', 'Supplies']
+            sku_to_customers = {s: set(fd_sku.loc[fd_sku['product_sku'] == s, 'customer_id'].unique().tolist()) for s in sku_list}
+            lift_weights = {}
+            for s, custs in sku_to_customers.items():
+                if not custs:
+                    lift_weights[s] = 0.0
+                    continue
+                inter = len(swx_customers.intersection(custs))
+                p_cond = inter / max(1, len(custs))
+                lift = (p_cond / baseline) if baseline > 0 else 0.0
+                lift_weights[s] = float(lift)
+
+            # Per-customer affinity: sum of lift weights for SKUs present (binary presence in feature period)
+            has_sku = fd_sku.drop_duplicates().assign(flag=1).pivot_table(index='customer_id', columns='product_sku', values='flag', fill_value=0)
+            # Align to sku_list columns
+            for s in sku_list:
+                if s not in has_sku.columns:
+                    has_sku[s] = 0
+            affinity = sum(has_sku[s] * lift_weights.get(s, 0.0) for s in sku_list)
+            affinity = affinity.rename('basket_affinity_score')
+            affinity_df = affinity.reset_index()
+            features_pd = features_pd.merge(affinity_df, on='customer_id', how='left')
+            features_pd['basket_affinity_score'] = features_pd['basket_affinity_score'].fillna(0.0)
+        except Exception as e:
+            logger.warning(f"Basket lift computation failed: {e}")
+    except Exception as e:
+        # Non-fatal; proceed with base features if advanced features fail
+        logger.warning(f"Advanced temporal features failed: {e}")
+
     # Convert back to polars
     features = pl.from_pandas(features_pd)
 
@@ -298,7 +531,6 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
     # Emit feature catalog artifact for auditing
     try:
         from gosales.utils.paths import OUTPUTS_DIR
-        import numpy as np
         OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
         fm_pd = feature_matrix.to_pandas()
         catalog = []

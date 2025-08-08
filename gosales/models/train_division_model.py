@@ -3,6 +3,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.linear_model import LogisticRegression
 from lightgbm import LGBMClassifier
 from sklearn.metrics import roc_auc_score
+from sklearn.calibration import CalibratedClassifierCV, calibration_curve
 import shap
 import pandas as pd
 from gosales.utils.paths import OUTPUTS_DIR
@@ -64,12 +65,27 @@ def train_division_model(engine, division_name: str, cutoff_date: str = "2024-12
         X, y, test_size=0.2, random_state=42, stratify=y
     )
 
-    # Train Logistic Regression model
-    lr = LogisticRegression(max_iter=1000, solver='liblinear')
+    # Compute class weights
+    positive_count = int((y == 1).sum())
+    negative_count = int((y == 0).sum())
+    scale_pos_weight = (negative_count / positive_count) if positive_count > 0 else 1.0
+
+    # Train Logistic Regression model (with class weights)
+    lr = LogisticRegression(max_iter=1000, solver='liblinear', class_weight='balanced')
     lr.fit(X_train, y_train)
 
-    # Train LightGBM model
-    lgbm = LGBMClassifier(random_state=42)
+    # Train LightGBM model with light class imbalance handling
+    lgbm = LGBMClassifier(
+        random_state=42,
+        n_estimators=400,
+        learning_rate=0.05,
+        num_leaves=31,
+        max_depth=-1,
+        subsample=0.9,
+        colsample_bytree=0.9,
+        min_child_samples=20,
+        scale_pos_weight=scale_pos_weight,
+    )
     lgbm.fit(X_train, y_train)
 
     # Compare models using AUC score
@@ -83,6 +99,23 @@ def train_division_model(engine, division_name: str, cutoff_date: str = "2024-12
     best_model = lr if lr_auc > lgbm_auc else lgbm
     best_model_name = "Logistic Regression" if lr_auc > lgbm_auc else "LightGBM"
     best_auc = max(lr_auc, lgbm_auc)
+
+    # --- Probability calibration ---
+    calibration_method = "isotonic" if positive_examples >= 1000 else "sigmoid"
+    try:
+        calibrator = CalibratedClassifierCV(base_estimator=best_model, method=calibration_method, cv=3)
+        calibrator.fit(X_train, y_train)
+        # Replace best_model with calibrated version
+        best_model = calibrator
+        # Recompute AUC on test set with calibrated probabilities
+        try:
+            calibrated_auc = roc_auc_score(y_test, best_model.predict_proba(X_test)[:, 1])
+            best_auc = float(calibrated_auc)
+        except Exception:
+            pass
+    except Exception as e:
+        logger.warning(f"Calibration failed ({calibration_method}); proceeding without calibration: {e}")
+        calibration_method = "none"
 
     # Save a simple model card CSV
     try:
@@ -145,12 +178,33 @@ def train_division_model(engine, division_name: str, cutoff_date: str = "2024-12
             "trained_at": datetime.utcnow().isoformat() + "Z",
             "best_model": best_model_name,
             "best_auc": float(best_auc),
+            "calibration_method": calibration_method,
+            "class_balance": {
+                "positives": positive_count,
+                "negatives": negative_count,
+                "scale_pos_weight": float(scale_pos_weight),
+            },
         }
         with open(model_path / "metadata.json", "w", encoding="utf-8") as f:
             json.dump(metadata, f, indent=2)
         logger.info("Saved model feature metadata for scoring alignment.")
     except Exception as e:
         logger.warning(f"Failed to write model metadata: {e}")
+
+    # --- Export calibration curve on test split ---
+    try:
+        prob_pos = best_model.predict_proba(X_test)[:, 1]
+        frac_pos, mean_pred = calibration_curve(y_test, prob_pos, n_bins=10, strategy='quantile')
+        calib_df = pd.DataFrame({
+            'bin': list(range(1, len(frac_pos) + 1)),
+            'mean_predicted': mean_pred,
+            'fraction_positives': frac_pos,
+        })
+        OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+        calib_df.to_csv(OUTPUTS_DIR / f"calibration_{division_name.lower()}.csv", index=False)
+        logger.info("Exported calibration curve CSV.")
+    except Exception as e:
+        logger.warning(f"Failed to export calibration curve: {e}")
 
 @click.command()
 @click.option('--division', default='Solidworks', help='The division to train a model for.')

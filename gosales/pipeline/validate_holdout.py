@@ -17,6 +17,7 @@ from gosales.etl.build_star import build_star_schema
 from gosales.features.engine import create_feature_matrix
 from gosales.utils.logger import get_logger
 from gosales.utils.paths import DATA_DIR, MODELS_DIR, OUTPUTS_DIR
+from dateutil.relativedelta import relativedelta
 
 logger = get_logger(__name__)
 
@@ -178,8 +179,71 @@ def validate_against_holdout():
     
     # Prepare features for prediction
     feature_matrix_pd = feature_matrix.to_pandas()
+
+    # Recompute true labels directly from raw combined sales log to avoid dependence on SKU unpivot
+    try:
+        # Derive labels from holdout table directly to avoid schema misalignment from UNION ALL
+        raw_combined = pd.read_sql("SELECT * FROM sales_log_2025_ytd", db_engine)
+        # Parse dates and define the validation window (6 months after 2024-12-31)
+        raw_combined["Rec Date"] = pd.to_datetime(raw_combined.get("Rec Date"), errors="coerce")
+        cutoff_dt = pd.to_datetime("2024-12-31")
+        window_end = cutoff_dt + relativedelta(months=6)
+
+        mask_window = (raw_combined["Rec Date"] > cutoff_dt) & (raw_combined["Rec Date"] <= window_end)
+        mask_division = raw_combined.get("Division").astype(str).str.strip().str.casefold() == "solidworks"
+        buyers_series = pd.to_numeric(
+            raw_combined.loc[mask_window & mask_division, "CustomerId"], errors="coerce"
+        ).dropna().astype("Int64").unique()
+        logger.info(f"Holdout label derivation: found {len(buyers_series)} Solidworks buyers in 2025 H1 window.")
+        labels_df = pd.DataFrame({"customer_id": buyers_series, "bought_in_division": 1})
+
+        # Replace existing target with holdout-derived labels
+        if "bought_in_division" in feature_matrix_pd.columns:
+            feature_matrix_pd.drop(columns=["bought_in_division"], inplace=True)
+        # Ensure compatible key dtype for merge
+        feature_matrix_pd["customer_id"] = pd.to_numeric(feature_matrix_pd["customer_id"], errors="coerce").astype("Int64")
+        feature_matrix_pd = feature_matrix_pd.merge(labels_df, on="customer_id", how="left")
+        feature_matrix_pd["bought_in_division"] = feature_matrix_pd["bought_in_division"].fillna(0).astype(int)
+    except Exception as e:
+        logger.warning(f"Failed to recompute holdout labels from raw data; falling back to feature matrix labels: {e}")
+
     X = feature_matrix_pd.drop(["customer_id", "bought_in_division"], axis=1)
-    y_true = feature_matrix_pd["bought_in_division"]
+    y_true = feature_matrix_pd["bought_in_division"].astype(int)
+    cust_ids = feature_matrix_pd["customer_id"].astype("Int64")
+
+    # If some positive-label customers are missing from the feature matrix (new 2025 logos),
+    # append zero-imputed rows so metrics reflect true prevalence
+    try:
+        if 'labels_df' in locals() and not labels_df.empty:
+            labels_df["customer_id"] = pd.to_numeric(labels_df["customer_id"], errors="coerce").astype("Int64")
+            present = set(cust_ids.dropna().tolist())
+            missing_buyers = [cid for cid in labels_df["customer_id"].dropna().unique().tolist() if cid not in present]
+            if missing_buyers:
+                zeros = pd.DataFrame(0, index=range(len(missing_buyers)), columns=X.columns)
+                X = pd.concat([X, zeros], ignore_index=True)
+                y_true = pd.concat([y_true, pd.Series([1]*len(missing_buyers), name='bought_in_division')], ignore_index=True)
+                cust_ids = pd.concat([cust_ids, pd.Series(missing_buyers, name='customer_id')], ignore_index=True)
+                logger.info(f"Added {len(missing_buyers)} missing positive customers to evaluation set with zero-imputed features.")
+    except Exception as e:
+        logger.warning(f"Failed to append missing buyers to evaluation set: {e}")
+
+    # Align evaluation features to training feature set using model metadata
+    try:
+        import json
+        meta_path = model_path / "metadata.json"
+        if meta_path.exists():
+            with open(meta_path, 'r', encoding='utf-8') as f:
+                meta = json.load(f)
+            train_cols = meta.get('feature_names', [])
+            if train_cols:
+                for col in train_cols:
+                    if col not in X.columns:
+                        X[col] = 0
+                # Drop any extra columns and enforce order
+                X = X[train_cols]
+                logger.info(f"Aligned evaluation features to {len(train_cols)} training columns.")
+    except Exception as e:
+        logger.warning(f"Failed to align evaluation features to training metadata: {e}")
     
     # Generate predictions
     y_pred_proba = model.predict_proba(X)[:, 1]  # Probability of class 1
@@ -204,10 +268,14 @@ def validate_against_holdout():
     logger.info(f"False Negatives: {cm[1,0]}, True Positives: {cm[1,1]}")
     
     # Calculate conversion rates by score deciles
-    feature_matrix_pd['prediction_score'] = y_pred_proba
-    feature_matrix_pd['decile'] = pd.qcut(y_pred_proba, 10, labels=False, duplicates='drop') + 1
+    results_df = pd.DataFrame({
+        'customer_id': cust_ids,
+        'bought_in_division': y_true,
+        'prediction_score': y_pred_proba,
+    })
+    results_df['decile'] = pd.qcut(results_df['prediction_score'], 10, labels=False, duplicates='drop') + 1
     
-    decile_analysis = feature_matrix_pd.groupby('decile').agg({
+    decile_analysis = results_df.groupby('decile').agg({
         'bought_in_division': ['count', 'sum', 'mean'],
         'prediction_score': ['min', 'max', 'mean']
     }).round(4)
@@ -219,11 +287,19 @@ def validate_against_holdout():
     logger.info("--- Phase 5: Saving validation results ---")
     
     # Save detailed predictions
-    validation_results = feature_matrix_pd[['customer_id', 'bought_in_division', 'prediction_score', 'decile']].copy()
+    validation_results = results_df[['customer_id', 'bought_in_division', 'prediction_score', 'decile']].copy()
     validation_results_path = OUTPUTS_DIR / "validation_results_2025.csv"
     validation_results.to_csv(validation_results_path, index=False)
     logger.info(f"Saved validation results to {validation_results_path}")
     
+    # Save gains/deciles table
+    try:
+        gains_path = OUTPUTS_DIR / "validation_gains_2025.csv"
+        decile_analysis.to_csv(gains_path)
+        logger.info(f"Saved validation gains table to {gains_path}")
+    except Exception as e:
+        logger.warning(f"Failed to save validation gains table: {e}")
+
     # Save metrics summary
     metrics_summary = {
         'validation_date': pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S'),

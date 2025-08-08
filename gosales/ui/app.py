@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import json
 import sys
 from pathlib import Path
 
@@ -22,17 +23,38 @@ page = st.sidebar.radio("Go to", [
     "Overview",
     "ETL & Coverage",
     "Features & Explainability",
+    "Modeling & Validation",
     "Scores & Whitespace",
 ])
 
 if page == "Overview":
     st.markdown("""
-    This portal documents each step of the pipeline:
-    - ETL: raw CSVs → star schema; industry enrichment joins
-    - Feature Engineering: time-aware features, industry dummies, interactions
-    - Modeling: time-split training; AUC; SHAP explanations
-    - Outputs: scores, whitespace, coverage reports
+    This portal documents each step of the GoSales ICP & Whitespace pipeline with full transparency.
+    
+    1) ETL (Extract → Transform → Load)
+    - Ingests raw wide `Sales_Log.csv` and converts to a tidy `fact_transactions` table (one SKU per row), plus `dim_customer` with industry enrichment.
+    - Hybrid enrichment strategy: exact name, numeric prefix, then (optional) fuzzy matching audit.
+    
+    2) Leakage-safe Feature Engineering
+    - A `cutoff_date` strictly separates historical feature data (≤ cutoff) from future labels (> cutoff).
+    - Feature families: RFM, windowed aggregates (3/6/12/24m), temporal dynamics (slopes/volatility), cadence (tenure & gaps), seasonality, division mix, SKU micro-signals, branch/rep shares, basket lift, industry plus interactions.
+    
+    3) Modeling
+    - Logistic Regression baseline and LightGBM for accuracy. Class imbalance handled; calibration curves exported.
+    
+    4) Validation (Future Data / Holdout)
+    - 2025 YTD holdout with labels derived directly from `Division == 'Solidworks'` (Jan–Jun 2025).
+    - Gains table and summary metrics saved.
+    
+    5) Scoring & Whitespace
+    - Per-customer ICP probability and opportunities for divisions not yet purchased.
     """)
+    with st.expander("Algorithm explainer (data-leakage guardrails)"):
+        st.markdown("""
+        - Features only use transactions on or before the `cutoff_date`.
+        - Labels are defined by purchases occurring strictly after the cutoff and within the future window.
+        - We do not include any future-derived features (e.g., post-cutoff totals or explicit targets) to avoid leakage.
+        """)
 
 elif page == "ETL & Coverage":
     st.subheader("Industry Coverage")
@@ -72,6 +94,29 @@ elif page == "ETL & Coverage":
         st.dataframe(fuzz.head(500), use_container_width=True)
     except Exception:
         st.info("No fuzzy matches captured or file not present")
+
+    st.subheader("Data Contracts & Row Counts")
+    c3, c4 = st.columns(2)
+    try:
+        rc = pd.read_csv(OUTPUTS_DIR / 'contracts' / 'row_counts.csv')
+        c3.caption("Table row counts after ETL")
+        c3.dataframe(rc, use_container_width=True)
+    except Exception:
+        c3.info("Row counts not available")
+    try:
+        viol = pd.read_csv(OUTPUTS_DIR / 'contracts' / 'violations.csv')
+        c4.caption("Contract violations (missing columns, nulls in PKs, duplicates)")
+        c4.dataframe(viol.head(200), use_container_width=True)
+    except Exception:
+        c4.info("No violations file found (or empty)")
+
+    st.subheader("Label Audit (prevalence & window)")
+    try:
+        la = pd.read_csv(OUTPUTS_DIR / 'labels_summary.csv')
+        st.dataframe(la, use_container_width=True)
+        st.caption("Window start/end, total customers, positives and prevalence for the target division.")
+    except Exception:
+        st.info("Label summary not available yet.")
 
 elif page == "Features & Explainability":
     st.subheader("SHAP Values (per-customer)")
@@ -120,7 +165,29 @@ elif page == "Features & Explainability":
         except Exception as e:
             st.warning(f"Could not merge SHAP with scores for top-100 view: {e}")
         # Feature glossary
-        st.subheader("Feature Glossary")
+        st.subheader("Feature Library & Glossary")
+        # Feature catalog
+        try:
+            fc = pd.read_csv(OUTPUTS_DIR / 'feature_catalog_solidworks.csv')
+            with st.expander("Feature catalog (names, dtypes, coverage)"):
+                st.dataframe(fc, use_container_width=True, height=300)
+                st.download_button("Download feature catalog", data=fc.to_csv(index=False), file_name='feature_catalog_solidworks.csv')
+        except Exception:
+            st.info("Feature catalog not found. Run the pipeline to emit it.")
+
+        st.markdown("""
+        Families implemented:
+        - Core RFM and diversity (product & SKU)
+        - Windowed aggregates (3/6/12/24 months): transactions, GP, average GP/tx
+        - Temporal dynamics (12 months): monthly GP/TX slope & volatility
+        - Cadence: tenure_days, interpurchase intervals, last_gap_days
+        - Seasonality: quarter shares over 24 months
+        - Division mix (12 months): per-division totals, GP shares, days_since_last_{division}
+        - SKU micro-signals (12 months): GP, qty, GP-per-unit for key SKUs
+        - Branch/Rep shares: top-branches and top-reps share of transactions (feature period)
+        - Basket lift: weighted SKU presence-affinity vs Solidworks baseline
+        - Industry join and selected interactions with engagement and growth
+        """)
         def _describe_feature(name: str) -> str:
             base = {
                 'total_transactions_all_time': 'Total number of historical transactions.',
@@ -167,12 +234,62 @@ elif page == "Features & Explainability":
     else:
         st.warning("SHAP file not found. Train the model to generate explainability outputs.")
 
+elif page == "Modeling & Validation":
+    st.subheader("Training Metrics & Calibration")
+    # Model card
+    try:
+        mc = pd.read_csv(OUTPUTS_DIR / 'model_card_solidworks.csv')
+        st.caption("Model selection and AUC on the internal train/test split.")
+        st.dataframe(mc, use_container_width=True)
+    except Exception:
+        st.info("Model card not available.")
+
+    # Calibration curve
+    try:
+        calib = pd.read_csv(OUTPUTS_DIR / 'calibration_solidworks.csv')
+        st.caption("Probability calibration: mean predicted vs fraction positives in quantile bins (train split).")
+        st.line_chart(calib.set_index('bin')[['mean_predicted','fraction_positives']])
+        st.download_button("Download calibration CSV", data=calib.to_csv(index=False), file_name='calibration_solidworks.csv')
+    except Exception:
+        st.info("Calibration CSV not found.")
+
+    st.subheader("Holdout Validation (2025 YTD)")
+    cols = st.columns(2)
+    try:
+        with open(OUTPUTS_DIR / 'validation_metrics_2025.json', 'r') as f:
+            vm = json.load(f)
+        cols[0].metric("AUC", f"{vm.get('auc_score', 0):.4f}")
+        cols[0].metric("Precision", f"{vm.get('precision', 0):.4f}")
+        cols[0].metric("Recall", f"{vm.get('recall', 0):.4f}")
+        cols[0].metric("F1", f"{vm.get('f1_score', 0):.4f}")
+        cols[1].metric("Total Customers", f"{vm.get('total_customers', 0):,}")
+        cols[1].metric("Actual Buyers", f"{vm.get('actual_buyers', 0):,}")
+        cols[1].metric("Conversion Rate", f"{vm.get('conversion_rate', 0):.4f}")
+    except Exception:
+        st.info("Validation metrics not found.")
+
+    try:
+        gains = pd.read_csv(OUTPUTS_DIR / 'validation_gains_2025.csv', header=[0,1])
+        st.caption("Decile analysis (higher deciles = higher predicted probability)")
+        st.dataframe(gains, use_container_width=True)
+        st.download_button("Download gains CSV", data=gains.to_csv(index=False), file_name='validation_gains_2025.csv')
+    except Exception:
+        st.info("Gains table not found.")
+
 elif page == "Scores & Whitespace":
     st.subheader("ICP Scores")
     st.caption("Predicted likelihood that a customer will purchase in the Solidworks division within the prediction window.")
     try:
         icp_scores = pd.read_csv(OUTPUTS_DIR / "icp_scores.csv")
-        st.dataframe(icp_scores, use_container_width=True)
+        # Simple filters
+        min_score = st.slider("Min ICP score", 0.0, 1.0, 0.0, 0.01)
+        search = st.text_input("Search customer name contains", "")
+        df = icp_scores.copy()
+        df = df[df['icp_score'] >= min_score]
+        if search:
+            df = df[df['customer_name'].astype(str).str.contains(search, case=False, na=False)]
+        st.dataframe(df, use_container_width=True, height=500)
+        st.download_button("Download filtered scores", data=df.to_csv(index=False), file_name='icp_scores_filtered.csv')
     except FileNotFoundError:
         st.warning("ICP scores not available.")
 
@@ -180,6 +297,7 @@ elif page == "Scores & Whitespace":
     st.caption("Products not yet purchased by a customer where model and behavioral signals suggest potential demand.")
     try:
         whitespace = pd.read_csv(OUTPUTS_DIR / "whitespace.csv")
-        st.dataframe(whitespace, use_container_width=True)
+        st.dataframe(whitespace, use_container_width=True, height=500)
+        st.download_button("Download whitespace", data=whitespace.to_csv(index=False), file_name='whitespace.csv')
     except FileNotFoundError:
         st.warning("Whitespace opportunities not available.")

@@ -41,7 +41,8 @@ def score_all():
 
     # --- 3. Label Audit (Phase 2) ---
     logger.info("--- Phase 2: Label audit (leakage-safe targets) ---")
-    cutoff_date = "2024-09-30"
+    # Training cutoff chosen so the 6-month target window is within training data (Jul–Dec 2024)
+    cutoff_date = "2024-06-30"
     prediction_window_months = 6
     compute_label_audit(db_engine, target_division, cutoff_date, prediction_window_months)
     logger.info("--- Label audit complete ---")

@@ -21,14 +21,7 @@ def load_csv_to_db(file_path: str, table_name: str, engine):
     
     for encoding in encodings:
         try:
-            # Tolerant CSV parse: handle irregular quoting/commas, read as strings
-            df = pd.read_csv(
-                file_path,
-                encoding=encoding,
-                engine="python",
-                dtype=str,
-                on_bad_lines="skip",
-            )
+            df = pd.read_csv(file_path, encoding=encoding)
             logger.info(f"Successfully read {file_path} with encoding: {encoding}")
             break
         except UnicodeDecodeError:

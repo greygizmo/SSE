@@ -1,0 +1,43 @@
+---
+description: PowerShell terminal execution rules for Windows (GoSales Engine)
+alwaysApply: true
+---
+
+- Default shell is Windows PowerShell. Generate commands using PowerShell syntax.
+- Never run shell commands inside an interactive interpreter. If the last terminal output shows a Python REPL (prefix '>>>' or 'In ['), assume a fresh shell and send normal PowerShell commands, not Python statements.
+- Before executing any Python module/script, set PYTHONPATH to the project root on the same line:
+  - $env:PYTHONPATH = "$PWD"; python <command>
+- Command chaining: use ';' in PowerShell. Do NOT use '&&'.
+- File I/O:
+  - Read: Get-Content <path>
+  - Avoid piping to 'cat'. If paging is a concern, use | Out-Host.
+- Paths with spaces must be quoted: "D:\OneDrive - ...\GoSales Engine".
+- Git:
+  - git add <paths>; git commit -m "<message>"; git push
+- Python execution patterns:
+  - Script: python gosales/pipeline/score_all.py
+  - Module: python -m gosales.models.train_division_model --division Solidworks
+- Long-running or non-interactive:
+  - Prefer non-interactive flags; do not prompt the user.
+  - If background is required, use Start-Process or Start-Job with appropriate arguments.
+- Safety checks and retries:
+  - If a command fails due to shell syntax, automatically translate to PowerShell semantics (replace '&&' with ';', replace 'cat' with 'Get-Content') and retry once.
+  - If REPL context is detected, do not send shell commands; send a fresh PowerShell command line instead.
+
+Examples (PowerShell):
+
+```
+# Full pipeline
+$env:PYTHONPATH = "$PWD"; python gosales/pipeline/score_all.py
+
+# Holdout validation
+$env:PYTHONPATH = "$PWD"; python gosales/pipeline/validate_holdout.py
+
+# Inspect outputs
+Get-Content gosales/outputs/model_card_solidworks.csv
+Get-Content gosales/outputs/validation_metrics_2025.json
+
+# Git
+git add gosales/features/engine.py; git commit -m "fix: label target window"; git push
+```
+

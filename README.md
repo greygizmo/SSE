@@ -51,6 +51,34 @@ python gosales/pipeline/validate_holdout.py
 
 ---
 
+## 6. Modeling & Validation Notes
+
+- Class imbalance is handled via class weights (LR) and `scale_pos_weight` (LightGBM).
+- Probability calibration curves are exported to `gosales/outputs/calibration_<division>.csv`.
+- Holdout labels for 2025 are derived directly from `gosales/data/holdout/Sales Log 2025 YTD.csv` using `Division == 'Solidworks'` and dates in Jan–Jun 2025.
+
+## 7. Feature Library (Phase 2 expansion)
+
+The feature set includes and extends:
+- Core: recency, frequency, monetary; product and SKU diversity.
+- Windowed (3/6/12/24m): transaction counts, GP sums, average GP per transaction.
+- Temporal dynamics (12m): monthly GP/TX slope and volatility.
+- Cadence: tenure_days, interpurchase intervals (median/mean), last_gap_days.
+- Seasonality (24m): quarter shares (q1..q4).
+- Division mix (12m): per-division GP/TX totals, GP shares, days_since_last_{division}.
+- SKU micro-signals (12m): sku_gp, sku_qty, gp_per_unit for key SKUs.
+- Industry join and selected interaction terms.
+
+Artifacts: `gosales/outputs/feature_catalog_<division>.csv` lists all feature names and coverage.
+
+## 8. Changelog
+
+- feat(features): Phase 2 expansion — windowed RFM, temporal dynamics, cadence, seasonality, division mix, SKU micro-signals.
+- feat(validate): derive holdout labels directly from 2025 YTD CSV; append zero-imputed rows for missing buyers in evaluation set.
+- feat(modeling): class weighting and probability calibration; export calibration curves.
+
+---
+
 ## 3. Data Flow
 
 The new data flow is designed to prevent leakage by strictly separating past and future data.
