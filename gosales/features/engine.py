@@ -177,6 +177,7 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
 
         window_months = cfg.features.windows_months or [3, 6, 12, 24]
         per_customer_frames = []
+        per_customer_frames_div = []
         for w in window_months:
             start_dt = cutoff_dt - pd.DateOffset(months=w)
             mask = (fd['order_date'] > start_dt) & (fd['order_date'] <= cutoff_dt)
@@ -195,6 +196,14 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
             agg[f'avg_gp_per_tx_last_{w}m'] = agg[f'gp_sum_last_{w}m'] / agg[f'tx_count_last_{w}m'].replace(0, np.nan)
             agg[f'avg_gp_per_tx_last_{w}m'] = agg[f'avg_gp_per_tx_last_{w}m'].fillna(0.0)
             per_customer_frames.append(agg)
+
+            # Division-specific aggregates
+            sub_div = fd.loc[mask & (fd['product_division'] == division_name), ['customer_id', 'order_date', 'gross_profit']]
+            tx_n_div = sub_div.groupby('customer_id')['order_date'].count().rename(f'rfm__div__tx_n__{w}m').reset_index()
+            gp_sum_div = sub_div.groupby('customer_id')['gross_profit'].sum().rename(f'rfm__div__gp_sum__{w}m').reset_index()
+            gp_mean_div = sub_div.groupby('customer_id')['gross_profit'].mean().rename(f'rfm__div__gp_mean__{w}m').reset_index()
+            agg_div = tx_n_div.merge(gp_sum_div, on='customer_id', how='outer').merge(gp_mean_div, on='customer_id', how='outer')
+            per_customer_frames_div.append(agg_div)
 
         # Monthly resample for slope/volatility over last 12 months
         last12_mask = (fd['order_date'] > (cutoff_dt - pd.DateOffset(months=12))) & (fd['order_date'] <= cutoff_dt)
@@ -234,6 +243,14 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
 
         ipi = fd.groupby('customer_id').apply(_intervals).reset_index()
 
+        # Active months over last 24 months
+        last24 = fd[(fd['order_date'] > (cutoff_dt - pd.DateOffset(months=24))) & (fd['order_date'] <= cutoff_dt)].copy()
+        if not last24.empty:
+            last24['ym'] = last24['order_date'].values.astype('datetime64[M]')
+            active = last24.groupby('customer_id')['ym'].nunique().rename('lifecycle__all__active_months__24m').reset_index()
+        else:
+            active = pd.DataFrame(columns=['customer_id','lifecycle__all__active_months__24m'])
+
         # Seasonality (Q1..Q4 proportions over last 24 months)
         last24_mask = (fd['order_date'] > (cutoff_dt - pd.DateOffset(months=24))) & (fd['order_date'] <= cutoff_dt)
         s = fd.loc[last24_mask, ['customer_id', 'order_date']].copy()
@@ -259,6 +276,19 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
         for d in known_divisions:
             div_df[f'{d.lower()}_gp_share_12m'] = div_df[f'gp_12m_{d}'] / div_df['gp_12m_total'].replace(0, np.nan)
             div_df[f'{d.lower()}_gp_share_12m'] = div_df[f'{d.lower()}_gp_share_12m'].fillna(0.0)
+
+        # EB smoothing for target division share (optional)
+        try:
+            if cfg.features.use_eb_smoothing:
+                target_col = f'{division_name.lower()}_gp_share_12m'
+                if target_col in div_df.columns:
+                    prior = float(div_df[target_col].mean())
+                    alpha = 5.0
+                    num = div_df[f'gp_12m_{division_name}'] + alpha * prior
+                    den = div_df['gp_12m_total'] + alpha
+                    div_df['xdiv__div__gp_share__12m'] = (num / den).fillna(0.0)
+        except Exception:
+            pass
 
         # Division recency (days since last division order)
         rec_div_list = []
@@ -296,7 +326,7 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
 
         # Merge all extra frames to features_pd
         extra = features_pd[['customer_id']].copy()
-        for df_merge in per_customer_frames + [gp_dynamics, tx_dynamics, first_last[['customer_id', 'tenure_days']], ipi, season_counts, div_df, sku_df, past_swx]:
+        for df_merge in per_customer_frames + per_customer_frames_div + [gp_dynamics, tx_dynamics, first_last[['customer_id', 'tenure_days']], ipi, active, season_counts, div_df, sku_df, past_swx]:
             if df_merge is None or len(df_merge) == 0:
                 continue
             extra = extra.merge(df_merge, on='customer_id', how='left')
@@ -363,39 +393,41 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
 
         # --- Basket lift / affinity ---
         try:
-            # Compute presence by SKU in feature period per customer
-            fd_sku = fd[['customer_id', 'product_sku']].dropna().copy()
-            fd_sku['product_sku'] = fd_sku['product_sku'].astype(str)
-            # Global baseline: fraction of customers with Solidworks activity in feature period
-            fd_div = fd[['customer_id', 'product_division']].dropna().copy()
-            swx_customers = set(fd_div.loc[fd_div['product_division'] == 'Solidworks', 'customer_id'].unique().tolist())
-            all_customers = set(fd['customer_id'].unique().tolist())
-            baseline = (len(swx_customers) / max(1, len(all_customers)))
+            cfg = load_config()
+            if cfg.features.use_market_basket:
+                # Compute presence by SKU in feature period per customer
+                fd_sku = fd[['customer_id', 'product_sku']].dropna().copy()
+                fd_sku['product_sku'] = fd_sku['product_sku'].astype(str)
+                # Global baseline: fraction of customers with Solidworks activity in feature period
+                fd_div = fd[['customer_id', 'product_division']].dropna().copy()
+                swx_customers = set(fd_div.loc[fd_div['product_division'] == 'Solidworks', 'customer_id'].unique().tolist())
+                all_customers = set(fd['customer_id'].unique().tolist())
+                baseline = (len(swx_customers) / max(1, len(all_customers)))
 
-            # For selected SKUs, compute lift = P(SWX | SKU) / P(SWX)
-            sku_list = ['SWX_Core', 'SWX_Pro_Prem', 'Core_New_UAP', 'Pro_Prem_New_UAP', 'PDM', 'Simulation', 'Services', 'Training', 'Success Plan GP', 'Supplies']
-            sku_to_customers = {s: set(fd_sku.loc[fd_sku['product_sku'] == s, 'customer_id'].unique().tolist()) for s in sku_list}
-            lift_weights = {}
-            for s, custs in sku_to_customers.items():
-                if not custs:
-                    lift_weights[s] = 0.0
-                    continue
-                inter = len(swx_customers.intersection(custs))
-                p_cond = inter / max(1, len(custs))
-                lift = (p_cond / baseline) if baseline > 0 else 0.0
-                lift_weights[s] = float(lift)
+                # For selected SKUs, compute lift = P(SWX | SKU) / P(SWX)
+                sku_list = ['SWX_Core', 'SWX_Pro_Prem', 'Core_New_UAP', 'Pro_Prem_New_UAP', 'PDM', 'Simulation', 'Services', 'Training', 'Success Plan GP', 'Supplies']
+                sku_to_customers = {s: set(fd_sku.loc[fd_sku['product_sku'] == s, 'customer_id'].unique().tolist()) for s in sku_list}
+                lift_weights = {}
+                for s, custs in sku_to_customers.items():
+                    if not custs:
+                        lift_weights[s] = 0.0
+                        continue
+                    inter = len(swx_customers.intersection(custs))
+                    p_cond = inter / max(1, len(custs))
+                    lift = (p_cond / baseline) if baseline > 0 else 0.0
+                    lift_weights[s] = float(lift)
 
-            # Per-customer affinity: sum of lift weights for SKUs present (binary presence in feature period)
-            has_sku = fd_sku.drop_duplicates().assign(flag=1).pivot_table(index='customer_id', columns='product_sku', values='flag', fill_value=0)
-            # Align to sku_list columns
-            for s in sku_list:
-                if s not in has_sku.columns:
-                    has_sku[s] = 0
-            affinity = sum(has_sku[s] * lift_weights.get(s, 0.0) for s in sku_list)
-            affinity = affinity.rename('basket_affinity_score')
-            affinity_df = affinity.reset_index()
-            features_pd = features_pd.merge(affinity_df, on='customer_id', how='left')
-            features_pd['basket_affinity_score'] = features_pd['basket_affinity_score'].fillna(0.0)
+                # Per-customer affinity: sum of lift weights for SKUs present (binary presence in feature period)
+                has_sku = fd_sku.drop_duplicates().assign(flag=1).pivot_table(index='customer_id', columns='product_sku', values='flag', fill_value=0)
+                # Align to sku_list columns
+                for s in sku_list:
+                    if s not in has_sku.columns:
+                        has_sku[s] = 0
+                affinity = sum(has_sku[s] * lift_weights.get(s, 0.0) for s in sku_list)
+                affinity = affinity.rename('affinity__div__lift_topk__12m')
+                affinity_df = affinity.reset_index()
+                features_pd = features_pd.merge(affinity_df, on='customer_id', how='left')
+                features_pd['affinity__div__lift_topk__12m'] = features_pd['affinity__div__lift_topk__12m'].fillna(0.0)
         except Exception as e:
             logger.warning(f"Basket lift computation failed: {e}")
     except Exception as e:
@@ -430,6 +462,76 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
     
     # Fill nulls and ensure proper data types
     feature_matrix_pd = feature_matrix_pd.fillna(0)
+    # Map to naming scheme for key features
+    # Recency
+    if 'days_since_last_order' in feature_matrix_pd.columns:
+        feature_matrix_pd['rfm__all__recency_days__life'] = feature_matrix_pd['days_since_last_order']
+    div_rec_col = f'days_since_last_{division_name}_order'
+    if div_rec_col in feature_matrix_pd.columns:
+        feature_matrix_pd['rfm__div__recency_days__life'] = feature_matrix_pd[div_rec_col]
+    # RFM windows (all scope)
+    for w in window_months:
+        if f'tx_count_last_{w}m' in feature_matrix_pd.columns:
+            feature_matrix_pd[f'rfm__all__tx_n__{w}m'] = feature_matrix_pd[f'tx_count_last_{w}m']
+        if f'gp_sum_last_{w}m' in feature_matrix_pd.columns:
+            feature_matrix_pd[f'rfm__all__gp_sum__{w}m'] = feature_matrix_pd[f'gp_sum_last_{w}m']
+        if f'gp_mean_last_{w}m' in feature_matrix_pd.columns:
+            feature_matrix_pd[f'rfm__all__gp_mean__{w}m'] = feature_matrix_pd[f'gp_mean_last_{w}m']
+        # Division scope
+        if f'rfm__div__tx_n__{w}m' not in feature_matrix_pd.columns and f'rfm__div__tx_n__{w}m' in feature_matrix_pd.columns:
+            pass
+    # Lifecycle naming
+    if 'tenure_days' in feature_matrix_pd.columns:
+        feature_matrix_pd['lifecycle__all__tenure_days__life'] = feature_matrix_pd['tenure_days']
+    if 'last_gap_days' in feature_matrix_pd.columns:
+        feature_matrix_pd['lifecycle__all__gap_days__life'] = feature_matrix_pd['last_gap_days']
+    # Diversity/division counts
+    try:
+        last12_mask = (fd['order_date'] > (cutoff_dt - pd.DateOffset(months=12))) & (fd['order_date'] <= cutoff_dt)
+        dl = fd.loc[last12_mask, ['customer_id', 'product_division', 'product_sku']].copy()
+        div_n = dl.groupby('customer_id')['product_division'].nunique().rename('xdiv__all__division_nunique__12m').reset_index()
+        sku_all = dl.groupby('customer_id')['product_sku'].nunique().rename('diversity__all__sku_nunique__12m').reset_index()
+        sku_div = dl.loc[dl['product_division'] == division_name].groupby('customer_id')['product_sku'].nunique().rename('diversity__div__sku_nunique__12m').reset_index()
+        feature_matrix_pd = feature_matrix_pd.merge(div_n, on='customer_id', how='left').merge(sku_all, on='customer_id', how='left').merge(sku_div, on='customer_id', how='left')
+        for col in ['xdiv__all__division_nunique__12m','diversity__all__sku_nunique__12m','diversity__div__sku_nunique__12m']:
+            feature_matrix_pd[col] = feature_matrix_pd[col].fillna(0)
+    except Exception:
+        pass
+    # Seasonality renames
+    for q in ['q1','q2','q3','q4']:
+        col = f'{q}_share_24m'
+        if col in feature_matrix_pd.columns:
+            feature_matrix_pd[f'season__all__{q}_share__24m'] = feature_matrix_pd[col]
+
+    # Returns features (12m, target division)
+    try:
+        last12_mask = (fd['order_date'] > (cutoff_dt - pd.DateOffset(months=12))) & (fd['order_date'] <= cutoff_dt)
+        sub12 = fd.loc[last12_mask & (fd['product_division'] == division_name), ['customer_id', 'gross_profit']].copy()
+        sub12['is_return'] = (pd.to_numeric(sub12['gross_profit'], errors='coerce') < 0).astype(int)
+        ret_counts = sub12.groupby('customer_id')['is_return'].sum().rename('returns__div__return_tx_n__12m').reset_index()
+        tx_counts = sub12.groupby('customer_id')['is_return'].count().rename('tx_n_12m_div').reset_index()
+        ret = ret_counts.merge(tx_counts, on='customer_id', how='left')
+        ret['returns__div__return_rate__12m'] = ret['returns__div__return_tx_n__12m'] / ret['tx_n_12m_div'].replace(0, np.nan)
+        ret['returns__div__return_rate__12m'] = ret['returns__div__return_rate__12m'].fillna(0.0)
+        feature_matrix_pd = feature_matrix_pd.merge(ret[['customer_id','returns__div__return_tx_n__12m','returns__div__return_rate__12m']], on='customer_id', how='left')
+        feature_matrix_pd['returns__div__return_tx_n__12m'] = feature_matrix_pd['returns__div__return_tx_n__12m'].fillna(0)
+        feature_matrix_pd['returns__div__return_rate__12m'] = feature_matrix_pd['returns__div__return_rate__12m'].fillna(0.0)
+    except Exception:
+        pass
+
+    # Winsorize monetary gp_sum features based on config
+    try:
+        p = load_config().features.gp_winsor_p
+        for w in window_months:
+            for scope in ['all','div']:
+                col = f'rfm__{scope}__gp_sum__{w}m'
+                if col in feature_matrix_pd.columns:
+                    s = feature_matrix_pd[col]
+                    lower = s.quantile(0.0)
+                    upper = s.quantile(p)
+                    feature_matrix_pd[col] = s.clip(lower=lower, upper=upper)
+    except Exception:
+        pass
     # Add missingness flags if configured
     try:
         if load_config().features.add_missingness_flags:

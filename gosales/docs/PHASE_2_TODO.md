@@ -30,7 +30,7 @@
   - Add `gosales/features/build.py` with flags: `--division`, `--cutoff`, `--windows`, `--config`, toggles. DONE
 
 - Caching
-  - Emit `customer_month_{cutoff}.parquet` for monthly gp_sum/tx_n aggregates. TODO
+  - Emit `customer_month_{cutoff}.parquet` for monthly gp_sum/tx_n aggregates. DONE (builder in features/cache.py)
 
 - Tests
   - Golden rows for windows; winsorization; determinism (checksum stable). TODO
