@@ -65,7 +65,17 @@ def validate_against_holdout():
     
     # Build new fact_transactions with 2025 data included
     # We need to manually run the star schema build on the combined data
-    sales_log_combined = pl.from_pandas(pd.read_sql("SELECT * FROM sales_log_combined", db_engine))
+    combined_df = pd.read_sql("SELECT * FROM sales_log_combined", db_engine)
+    # Coerce all object/floating id/date fields to proper types to avoid Arrow errors
+    for col in combined_df.columns:
+        if col in ("CustomerId",):
+            combined_df[col] = pd.to_numeric(combined_df[col], errors="coerce").astype("Int64")
+        elif col in ("Rec Date",):
+            combined_df[col] = pd.to_datetime(combined_df[col], errors="coerce")
+        elif isinstance(combined_df[col].dtype, object) and combined_df[col].dtype == object:
+            # Ensure strings are proper str (no mixed float) for Arrow conversion
+            combined_df[col] = combined_df[col].astype(str)
+    sales_log_combined = pl.from_pandas(combined_df)
     
     # Use the same unpivot logic from build_star.py but on combined data
     logger.info("Unpivoting combined sales data...")
