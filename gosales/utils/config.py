@@ -72,6 +72,19 @@ class Config:
     logging: Logging = field(default_factory=Logging)
     labels: Labels = field(default_factory=Labels)
     features: Features = field(default_factory=Features)
+    # Modeling configuration for Phase 3
+    @dataclass
+    class Modeling:
+        seed: int = 42
+        folds: int = 3
+        models: list[str] = field(default_factory=lambda: ["logreg", "lgbm"])  # allowed: logreg, lgbm
+        lr_grid: Dict[str, Any] = field(default_factory=lambda: {"l1_ratio": [0.0, 0.2, 0.5], "C": [0.1, 1.0, 10.0]})
+        lgbm_grid: Dict[str, Any] = field(default_factory=lambda: {"num_leaves": [31, 63], "min_data_in_leaf": [50, 100], "learning_rate": [0.05, 0.1], "feature_fraction": [0.7, 0.9], "bagging_fraction": [0.7, 0.9]})
+        calibration_methods: list[str] = field(default_factory=lambda: ["platt", "isotonic"])  # platt|isotonic
+        top_k_percents: list[int] = field(default_factory=lambda: [5, 10, 20])
+        capacity_percent: int = 10
+
+    modeling: 'Config.Modeling' = field(default_factory=Modeling)
 
     def to_dict(self) -> Dict[str, Any]:
         def _convert(obj: Any) -> Any:
@@ -90,6 +103,7 @@ class Config:
             "logging": _convert(self.logging),
             "labels": _convert(self.labels),
             "features": _convert(self.features),
+            "modeling": _convert(self.modeling),
         }
 
 
@@ -158,6 +172,7 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
     log_cfg = cfg_dict.get("logging", {})
     labels_cfg = cfg_dict.get("labels", {})
     feat_cfg = cfg_dict.get("features", {})
+    mdl_cfg = cfg_dict.get("modeling", {})
 
     cfg = Config(
         paths=_paths_from_dict(paths_dict),
@@ -193,6 +208,16 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
             use_als_embeddings=bool(feat_cfg.get("use_als_embeddings", False)),
             use_item2vec=bool(feat_cfg.get("use_item2vec", False)),
             use_text_tags=bool(feat_cfg.get("use_text_tags", False)),
+        ),
+        modeling=Config.Modeling(
+            seed=int(mdl_cfg.get("seed", 42)),
+            folds=int(mdl_cfg.get("folds", 3)),
+            models=list(mdl_cfg.get("models", ["logreg", "lgbm"])),
+            lr_grid=dict(mdl_cfg.get("lr_grid", {"l1_ratio": [0.0, 0.2, 0.5], "C": [0.1, 1.0, 10.0]})),
+            lgbm_grid=dict(mdl_cfg.get("lgbm_grid", {"num_leaves": [31, 63], "min_data_in_leaf": [50, 100], "learning_rate": [0.05, 0.1], "feature_fraction": [0.7, 0.9], "bagging_fraction": [0.7, 0.9]})),
+            calibration_methods=list(mdl_cfg.get("calibration_methods", ["platt", "isotonic"])),
+            top_k_percents=list(mdl_cfg.get("top_k_percents", [5, 10, 20])),
+            capacity_percent=int(mdl_cfg.get("capacity_percent", 10)),
         ),
     )
 
