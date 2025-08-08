@@ -11,9 +11,9 @@
   - RFM (div/all): recency_days__life, tx_n/gp_sum/gp_mean__{3m,6m,12m,24m}. PARTIAL (added several, needs full coverage)
   - Trajectory: monthly gp_sum & tx_n slope/std over 12m. DONE
   - Cross-division: division_nunique__12m, gp_share__12m, recency_days__life per division. PARTIAL (share EB for target div)
-  - Diversity: sku_nunique__{3m,6m,12m,24m}. PARTIAL (12m implemented)
-  - Lifecycle: tenure_days__life, gap_days__life, active_months__24m. PARTIAL (tenure/gap implemented)
-  - Margin & returns: gp_pct__{W}, return_rate__12m, return_tx_n__12m. TODO
+  - Diversity: sku_nunique__{3m,6m,12m,24m}. DONE (all windows)
+  - Lifecycle: tenure_days__life, gap_days__life, active_months__24m. DONE
+  - Margin & returns: gp_pct__{W}, return_rate__12m, return_tx_n__12m. PARTIAL (returns implemented; margin proxy added)
   - Seasonality: quarter shares or sin/cos. DONE (quarter shares)
 
 - Optional blocks (toggled)

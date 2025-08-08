@@ -197,12 +197,15 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
             agg[f'avg_gp_per_tx_last_{w}m'] = agg[f'avg_gp_per_tx_last_{w}m'].fillna(0.0)
             per_customer_frames.append(agg)
 
-            # Division-specific aggregates
+        # Division-specific aggregates + margin (gp_pct) proxy over window
             sub_div = fd.loc[mask & (fd['product_division'] == division_name), ['customer_id', 'order_date', 'gross_profit']]
             tx_n_div = sub_div.groupby('customer_id')['order_date'].count().rename(f'rfm__div__tx_n__{w}m').reset_index()
             gp_sum_div = sub_div.groupby('customer_id')['gross_profit'].sum().rename(f'rfm__div__gp_sum__{w}m').reset_index()
             gp_mean_div = sub_div.groupby('customer_id')['gross_profit'].mean().rename(f'rfm__div__gp_mean__{w}m').reset_index()
-            agg_div = tx_n_div.merge(gp_sum_div, on='customer_id', how='outer').merge(gp_mean_div, on='customer_id', how='outer')
+        # Margin proxy: gp_pct = gp_sum / |gp_sum| + epsilon (since we do not have revenue available here)
+        agg_div = tx_n_div.merge(gp_sum_div, on='customer_id', how='outer').merge(gp_mean_div, on='customer_id', how='outer')
+        col_gp = f'rfm__div__gp_sum__{w}m'
+        agg_div[f'margin__div__gp_pct__{w}m'] = agg_div[col_gp].astype(float) / (agg_div[col_gp].abs().astype(float) + 1e-9)
             per_customer_frames_div.append(agg_div)
 
         # Monthly resample for slope/volatility over last 12 months

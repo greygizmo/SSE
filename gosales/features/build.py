@@ -12,6 +12,7 @@ from gosales.utils.paths import OUTPUTS_DIR
 from gosales.utils.logger import get_logger
 from gosales.features.engine import create_feature_matrix
 from gosales.features.utils import compute_sha256
+from gosales.utils.config import load_config
 
 
 logger = get_logger(__name__)
@@ -41,7 +42,7 @@ def main(division: str, cutoff: str, windows: str, config: str, with_eb: bool, w
         base = f"{division.lower()}_{cut}"
         # Deterministic sort
         fm = fm.sort(["customer_id"])
-        # Stats JSON (coverage)
+        # Stats JSON (coverage + winsor caps if applicable)
         fm_pd = fm.to_pandas()
         stats = {
             "columns": {
@@ -53,6 +54,21 @@ def main(division: str, cutoff: str, windows: str, config: str, with_eb: bool, w
                 for col in fm_pd.columns
             }
         }
+        # Winsor caps for gp_sum features per config
+        try:
+            cfg = load_config()
+            p = float(cfg.features.gp_winsor_p)
+            winsor_caps = {}
+            for col in fm_pd.columns:
+                if col.endswith("gp_sum__3m") or col.endswith("gp_sum__6m") or col.endswith("gp_sum__12m") or col.endswith("gp_sum__24m"):
+                    s = pd.to_numeric(fm_pd[col], errors="coerce")
+                    lower = float(s.quantile(0.0))
+                    upper = float(s.quantile(p))
+                    winsor_caps[col] = {"lower": lower, "upper": upper}
+            if winsor_caps:
+                stats["winsor_caps"] = winsor_caps
+        except Exception:
+            pass
         feat_path = OUTPUTS_DIR / f"features_{base}.parquet"
         fm.write_parquet(feat_path)
         pd.DataFrame(
