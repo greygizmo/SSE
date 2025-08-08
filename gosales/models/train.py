@@ -34,7 +34,23 @@ def _lift_at_k(y_true: np.ndarray, y_score: np.ndarray, k_percent: int) -> float
 
 
 def _train_test_split_time_aware(X: pd.DataFrame, y: pd.Series, seed: int) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
-    # Simple stratified split for now; can be upgraded to time-aware using order_date if available
+    # Prefer time-aware split using recency if feature present; else fall back to stratified split
+    recency_col = 'rfm__all__recency_days__life'
+    if recency_col in X.columns:
+        df = X.copy()
+        df['_y'] = y
+        # Smaller recency_days = more recent → assign those to validation
+        df = df.sort_values(recency_col, ascending=True)
+        n = len(df)
+        n_valid = max(1, int(0.2 * n))
+        valid = df.iloc[:n_valid]
+        train = df.iloc[n_valid:]
+        X_train = train.drop(columns=['_y'])
+        y_train = train['_y']
+        X_valid = valid.drop(columns=['_y'])
+        y_valid = valid['_y']
+        return X_train, X_valid, y_train, y_valid
+    # Fallback stratified
     return train_test_split(X, y, test_size=0.2, random_state=seed, stratify=y)
 
 
