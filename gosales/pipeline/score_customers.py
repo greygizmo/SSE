@@ -92,6 +92,11 @@ def generate_whitespace_opportunities(engine):
     try:
         transactions = pl.from_pandas(pd.read_sql("SELECT * FROM fact_transactions", engine))
         customers = pl.from_pandas(pd.read_sql("SELECT * FROM dim_customer", engine))
+        # Align join key dtypes
+        if "customer_id" in transactions.columns:
+            transactions = transactions.with_columns(pl.col("customer_id").cast(pl.Int64, strict=False))
+        if "customer_id" in customers.columns:
+            customers = customers.with_columns(pl.col("customer_id").cast(pl.Int64, strict=False))
         
         customer_summary = (
             transactions
@@ -122,7 +127,8 @@ def generate_whitespace_opportunities(engine):
         if not opportunities:
             return pl.DataFrame()
 
-        whitespace_df = pl.DataFrame(opportunities).join(customers, on="customer_id", how="left")
+        whitespace_df = pl.DataFrame(opportunities).with_columns(pl.col("customer_id").cast(pl.Int64, strict=False))\
+            .join(customers, on="customer_id", how="left")
         logger.info(f"Generated {len(whitespace_df)} whitespace opportunities")
         return whitespace_df
 
