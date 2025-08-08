@@ -309,8 +309,8 @@ elif page == "Modeling & Validation":
 elif page == "Scores & Whitespace":
     st.subheader("ICP Scores")
     st.caption("Predicted likelihood that a customer will purchase in the Solidworks division within the prediction window.")
-try:
-    icp_scores = pd.read_csv(OUTPUTS_DIR / "icp_scores.csv")
+    try:
+        icp_scores = pd.read_csv(OUTPUTS_DIR / "icp_scores.csv")
         # Simple filters
         min_score = st.slider("Min ICP score", 0.0, 1.0, 0.0, 0.01)
         search = st.text_input("Search customer name contains", "")
@@ -320,14 +320,15 @@ try:
             df = df[df['customer_name'].astype(str).str.contains(search, case=False, na=False)]
         st.dataframe(df, use_container_width=True, height=500)
         st.download_button("Download filtered scores", data=df.to_csv(index=False), file_name='icp_scores_filtered.csv')
-except FileNotFoundError:
-    st.warning("ICP scores not available.")
+    except FileNotFoundError:
+        st.warning("ICP scores not available.")
 
     st.subheader("Whitespace Opportunities")
     st.caption("Products not yet purchased by a customer where model and behavioral signals suggest potential demand.")
-try:
-    whitespace = pd.read_csv(OUTPUTS_DIR / "whitespace.csv")
+    try:
+        whitespace = pd.read_csv(OUTPUTS_DIR / "whitespace.csv")
         st.dataframe(whitespace, use_container_width=True, height=500)
         st.download_button("Download whitespace", data=whitespace.to_csv(index=False), file_name='whitespace.csv')
-except FileNotFoundError:
-    st.warning("Whitespace opportunities not available.")
+    except FileNotFoundError:
+        st.warning("Whitespace opportunities not available.")
+
