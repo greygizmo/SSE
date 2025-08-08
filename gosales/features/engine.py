@@ -288,6 +288,31 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
     positive_cases = feature_matrix.filter(pl.col('bought_in_division') == 1).height
     logger.info(f"Customers who bought in {division_name}: {positive_cases}")
     
+    # Emit feature catalog artifact for auditing
+    try:
+        from gosales.utils.paths import OUTPUTS_DIR
+        import numpy as np
+        OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+        fm_pd = feature_matrix.to_pandas()
+        catalog = []
+        for col in fm_pd.columns:
+            dtype = str(fm_pd[col].dtype)
+            non_null = int(fm_pd[col].notna().sum())
+            coverage = round(non_null / len(fm_pd), 6) if len(fm_pd) else 0.0
+            if col == "customer_id":
+                desc = "Primary key for customer"
+            elif col == "bought_in_division":
+                desc = f"Target: bought in {division_name} during prediction window"
+            else:
+                desc = "feature"
+            catalog.append({"name": col, "dtype": dtype, "coverage": coverage, "description": desc})
+        pd.DataFrame(catalog).to_csv(
+            OUTPUTS_DIR / f"feature_catalog_{division_name.lower()}.csv", index=False
+        )
+        logger.info("Wrote feature catalog to outputs directory.")
+    except Exception:
+        pass
+
     return feature_matrix
 
 

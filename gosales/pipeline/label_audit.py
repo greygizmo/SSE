@@ -52,15 +52,43 @@ def compute_label_audit(
     window_tx = tx[(tx["order_date"] > cutoff_dt) & (tx["order_date"] <= window_end)].copy()
 
     # Buyers in prediction window for target division
-    buyers = (
-        window_tx[window_tx["product_division"] == division_name]["customer_id"].dropna().unique()
-    )
+    window_div = window_tx[window_tx["product_division"] == division_name].copy()
+    buyers = window_div["customer_id"].dropna().unique()
     total_customers = int(dim["customer_id"].nunique())
     positives = int(len(buyers))
     prevalence = round(positives / total_customers, 6) if total_customers else 0.0
 
     # Customers with any feature-period activity (cohort)
     cohort_customers = int(feature_tx["customer_id"].nunique())
+
+    # Cohort flags for positives
+    feature_any = set(feature_tx["customer_id"].dropna().astype("int64").tolist())
+    pre_div_buyers = set(
+        feature_tx.loc[feature_tx["product_division"] == division_name, "customer_id"].dropna().astype("int64").tolist()
+    )
+    positive_rows = []
+    for cid in buyers:
+        try:
+            cid_int = int(cid)
+        except Exception:
+            continue
+        is_new_logo = int(cid_int not in feature_any)
+        had_pre_div = cid_int in pre_div_buyers
+        is_renewal_like = int((not is_new_logo) and had_pre_div)
+        is_expansion = int((not is_new_logo) and (not had_pre_div))
+        positive_rows.append(
+            {
+                "customer_id": cid_int,
+                "is_new_logo": is_new_logo,
+                "is_expansion": is_expansion,
+                "is_renewal_like": is_renewal_like,
+            }
+        )
+    cohorts_df = pd.DataFrame(positive_rows)
+    if not cohorts_df.empty:
+        cohorts_df.to_csv(OUTPUTS_DIR / f"labels_cohorts_{division_name.lower()}.csv", index=False)
+        cohort_counts = cohorts_df[["is_new_logo", "is_expansion", "is_renewal_like"]].sum().rename("count").to_frame()
+        cohort_counts.to_csv(OUTPUTS_DIR / f"labels_cohort_counts_{division_name.lower()}.csv")
 
     summary = pd.DataFrame(
         [

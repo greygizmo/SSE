@@ -46,12 +46,21 @@ def score_all():
     compute_label_audit(db_engine, target_division, cutoff_date, prediction_window_months)
     logger.info("--- Label audit complete ---")
 
-    # --- 4. Model Training Phase ---
+    # --- 4. Feature Library emission (catalog) ---
+    # Build a feature matrix once to emit the feature catalog before training
+    try:
+        from gosales.features.engine import create_feature_matrix
+        create_feature_matrix(db_engine, target_division, cutoff_date, prediction_window_months)
+        logger.info("--- Feature catalog emitted ---")
+    except Exception as e:
+        logger.warning(f"Feature catalog emission failed (non-blocking): {e}")
+
+    # --- 5. Model Training Phase ---
     logger.info(f"--- Phase 3: Training model for {target_division} division ---")
     train_division_model(db_engine, target_division, cutoff_date=cutoff_date, prediction_window_months=prediction_window_months)
     logger.info("--- Model Training Phase Complete ---")
 
-    # --- 5. Scoring Phase ---
+    # --- 6. Scoring Phase ---
     logger.info("--- Phase 4: Generating Scores and Whitespace ---")
     generate_scoring_outputs(db_engine)
     logger.info("--- Scoring Phase Complete ---")
