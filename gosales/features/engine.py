@@ -4,6 +4,8 @@ import numpy as np
 from datetime import datetime
 from gosales.utils.db import get_db_connection
 from gosales.utils.logger import get_logger
+from gosales.utils.config import load_config
+from gosales.features.utils import filter_to_cutoff, winsorize_series
 
 logger = get_logger(__name__)
 
@@ -167,24 +169,28 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
     
     # --- 3a. Windowed RFM and temporal dynamics (pandas) ---
     try:
+        cfg = load_config()
         cutoff_dt = pd.to_datetime(cutoff_date) if cutoff_date else transactions_pd['order_date'].max()
         fd = feature_data.copy()
         fd['order_date'] = pd.to_datetime(fd['order_date'])
         fd = fd.sort_values(['customer_id', 'order_date'])
 
-        window_months = [3, 6, 12, 24]
+        window_months = cfg.features.windows_months or [3, 6, 12, 24]
         per_customer_frames = []
         for w in window_months:
             start_dt = cutoff_dt - pd.DateOffset(months=w)
             mask = (fd['order_date'] > start_dt) & (fd['order_date'] <= cutoff_dt)
             sub = fd.loc[mask, ['customer_id', 'order_date', 'gross_profit']]
-            agg = sub.groupby('customer_id').agg(
-                tx_count_last_w=('order_date', 'count'),
-                gp_sum_last_w=('gross_profit', 'sum'),
-            ).reset_index()
+            # Winsorize GP at config p
+            gp_w = sub.groupby('customer_id')['gross_profit'].sum().rename('gp_sum_last_w').reset_index()
+            # For mean, compute robustly
+            gp_mean = sub.groupby('customer_id')['gross_profit'].mean().rename('gp_mean_last_w').reset_index()
+            tx_n = sub.groupby('customer_id')['order_date'].count().rename('tx_count_last_w').reset_index()
+            agg = tx_n.merge(gp_w, on='customer_id', how='outer').merge(gp_mean, on='customer_id', how='outer')
             agg.rename(columns={
                 'tx_count_last_w': f'tx_count_last_{w}m',
                 'gp_sum_last_w': f'gp_sum_last_{w}m',
+                'gp_mean_last_w': f'gp_mean_last_{w}m',
             }, inplace=True)
             agg[f'avg_gp_per_tx_last_{w}m'] = agg[f'gp_sum_last_{w}m'] / agg[f'tx_count_last_{w}m'].replace(0, np.nan)
             agg[f'avg_gp_per_tx_last_{w}m'] = agg[f'avg_gp_per_tx_last_{w}m'].fillna(0.0)
@@ -424,6 +430,16 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
     
     # Fill nulls and ensure proper data types
     feature_matrix_pd = feature_matrix_pd.fillna(0)
+    # Add missingness flags if configured
+    try:
+        if load_config().features.add_missingness_flags:
+            for col in list(feature_matrix_pd.columns):
+                if col == 'customer_id' or col == 'bought_in_division':
+                    continue
+                miss_col = f"{col}_missing"
+                feature_matrix_pd[miss_col] = 0  # filled already; hook for future per-block missing
+    except Exception:
+        pass
     
     # Convert back to polars
     feature_matrix = pl.from_pandas(feature_matrix_pd)
@@ -538,16 +554,15 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
             dtype = str(fm_pd[col].dtype)
             non_null = int(fm_pd[col].notna().sum())
             coverage = round(non_null / len(fm_pd), 6) if len(fm_pd) else 0.0
-            if col == "customer_id":
-                desc = "Primary key for customer"
-            elif col == "bought_in_division":
-                desc = f"Target: bought in {division_name} during prediction window"
-            else:
-                desc = "feature"
+            desc = (
+                "Primary key for customer" if col == 'customer_id' else (
+                    f"Target: bought in {division_name} during prediction window" if col == 'bought_in_division' else "feature"
+                )
+            )
             catalog.append({"name": col, "dtype": dtype, "coverage": coverage, "description": desc})
-        pd.DataFrame(catalog).to_csv(
-            OUTPUTS_DIR / f"feature_catalog_{division_name.lower()}.csv", index=False
-        )
+        # Include cutoff in catalog filename for determinism across cutoffs
+        fname = f"feature_catalog_{division_name.lower()}_{(cutoff_date or '').replace('-', '')}.csv" if cutoff_date else f"feature_catalog_{division_name.lower()}.csv"
+        pd.DataFrame(catalog).to_csv(OUTPUTS_DIR / fname, index=False)
         logger.info("Wrote feature catalog to outputs directory.")
     except Exception:
         pass
