@@ -11,6 +11,7 @@ from gosales.utils.db import get_db_connection
 from gosales.utils.paths import OUTPUTS_DIR
 from gosales.utils.logger import get_logger
 from gosales.features.engine import create_feature_matrix
+from gosales.features.utils import compute_sha256
 
 
 logger = get_logger(__name__)
@@ -52,10 +53,12 @@ def main(division: str, cutoff: str, windows: str, config: str, with_eb: bool, w
                 for col in fm_pd.columns
             }
         }
-        fm.write_parquet(OUTPUTS_DIR / f"features_{base}.parquet")
+        feat_path = OUTPUTS_DIR / f"features_{base}.parquet"
+        fm.write_parquet(feat_path)
         pd.DataFrame(
             [{"name": col, "dtype": str(fm_pd[col].dtype), "coverage": float(round(fm_pd[col].notna().mean(), 6))} for col in fm_pd.columns]
         ).to_csv(OUTPUTS_DIR / f"feature_catalog_{base}.csv", index=False)
+        stats["checksum"] = compute_sha256(feat_path)
         with open(OUTPUTS_DIR / f"feature_stats_{base}.json", "w", encoding="utf-8") as f:
             json.dump(stats, f, indent=2)
         logger.info(f"Wrote features and stats for {division} @ {cut}")

@@ -23,8 +23,8 @@
 
 - Artifacts
   - Write `features_{division}_{cutoff}.parquet` and `feature_catalog_{division}_{cutoff}.csv`. DONE (CLI)
-  - Write `feature_stats_{division}_{cutoff}.json` (coverage, null %, winsor caps). DONE (coverage)
-  - Deterministic sort + checksum. PARTIAL (sort done; checksum TODO)
+  - Write `feature_stats_{division}_{cutoff}.json` (coverage, null %, winsor caps). DONE (coverage; checksum recorded)
+  - Deterministic sort + checksum. DONE
 
 - CLI
   - Add `gosales/features/build.py` with flags: `--division`, `--cutoff`, `--windows`, `--config`, toggles. DONE

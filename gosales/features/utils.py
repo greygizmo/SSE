@@ -3,6 +3,8 @@ from __future__ import annotations
 from typing import Tuple
 import pandas as pd
 import numpy as np
+import hashlib
+from pathlib import Path
 
 
 def filter_to_cutoff(df: pd.DataFrame, date_col: str, cutoff: pd.Timestamp) -> pd.DataFrame:
@@ -17,5 +19,13 @@ def winsorize_series(s: pd.Series, p: float) -> Tuple[pd.Series, float, float]:
     upper = float(s_num.quantile(p))
     capped = s_num.clip(lower=lower, upper=upper)
     return capped, lower, upper
+
+
+def compute_sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return "sha256:" + h.hexdigest()
 
 
