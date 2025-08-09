@@ -376,6 +376,20 @@ def main(division: str, cutoff: str, window_months: int, capacity_grid: str, acc
         },
     }
     (out_dir / 'metrics.json').write_text(pd.Series(metrics).to_json(indent=2), encoding='utf-8')
+    # Log top PSI-flagged features for quick visibility
+    try:
+        flagged = drift_highlights.get('psi_flagged_top', []) if isinstance(drift_highlights, dict) else []
+        thr = drift_highlights.get('psi_threshold', None) if isinstance(drift_highlights, dict) else None
+        if flagged:
+            preview = ', '.join([f"{item['feature']} ({float(item['psi']):.2f})" for item in flagged[:10]])
+            if thr is not None:
+                logger.info(f"Per-feature drift (PSI ≥ {thr}): {preview}")
+            else:
+                logger.info(f"Per-feature drift (PSI): {preview}")
+        else:
+            logger.info("No per-feature PSI flags above threshold")
+    except Exception:
+        pass
 
     # Segment performance stability
     try:
