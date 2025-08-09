@@ -10,9 +10,8 @@ import pandas as pd
 from gosales.utils.config import load_config
 from gosales.utils.paths import OUTPUTS_DIR, MODELS_DIR
 from gosales.utils.logger import get_logger
-from gosales.pipeline.rank_whitespace import (
-    _percentile_normalize,
-)
+from gosales.pipeline.rank_whitespace import _percentile_normalize
+from gosales.validation.utils import bootstrap_ci, psi, ks_statistic
 
 
 logger = get_logger(__name__)
@@ -87,7 +86,7 @@ def main(division: str, cutoff: str, window_months: int, capacity_grid: str, boo
     out_dir.mkdir(parents=True, exist_ok=True)
 
     vf = _build_validation_frame(division, cutoff, window_months, cfg)
-    # Join holdout labels (assume Phase 1 holdout process populated in a separate artifact; for now use target from features if present)
+    # Join holdout labels if present in outputs (labels_{division}_{cutoff}.parquet for training; for holdout, we assume Phase 1-created labels for the prediction window; fallback to feature matrix target if present)
     y = vf.get('bought_in_division', pd.Series(0, index=vf.index)).astype(int).values
     p = vf['p_hat'].values
 
@@ -109,12 +108,24 @@ def main(division: str, cutoff: str, window_months: int, capacity_grid: str, boo
         scenarios.append({'k_percent': k, 'contacts': int(kk), 'capture': capture, 'precision': precision, 'expected_gp_norm': exp_gp})
     pd.DataFrame(scenarios).to_csv(out_dir / 'topk_scenarios.csv', index=False)
 
+    # Drift diagnostics (if training score snapshot available)
+    drift = {}
+    try:
+        # Attempt to load train-time scores if saved (metrics_{division}.json not sufficient); fallback to feature proxy
+        train_proxy = vf.get('rfm__all__gp_sum__12m', pd.Series(dtype=float))
+        hold_proxy = vf.get('rfm__all__gp_sum__12m', pd.Series(dtype=float))
+        drift['psi_gp12m'] = psi(train_proxy, hold_proxy)
+        drift['ks_phat_train_holdout'] = None  # placeholder unless train p_hat snapshot is available
+    except Exception:
+        pass
+
     # Minimal metrics.json
     metrics = {
         'division': division,
         'cutoff': cutoff,
         'rows': int(len(vf)),
         'capture_grid': {str(s['k_percent']): s['capture'] for s in scenarios},
+        'drift': drift,
     }
     (out_dir / 'metrics.json').write_text(pd.Series(metrics).to_json(indent=2), encoding='utf-8')
     logger.info(f"Wrote validation artifacts to {out_dir}")

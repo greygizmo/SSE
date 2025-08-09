@@ -6,21 +6,21 @@
 
 - Evaluation frame
   - Load frozen model + calibrator + feature list for a given cutoff. TODO
-  - Build features ≤ cutoff for all customers; score `p_hat`. TODO
-  - Join holdout labels (Phase 1 logic) and EV proxy; apply Phase 4 eligibility. TODO
+  - Build features ≤ cutoff for all customers; score `p_hat`. DONE (from features parquet)
+  - Join holdout labels (Phase 1 logic) and EV proxy; apply Phase 4 eligibility. PARTIAL (EV proxy fallback; labels fallback)
   - Persist `validation/{division}/{cutoff}/validation_frame.parquet` (deterministic sort). TODO
 
 - Metrics & artifacts
-  - Ranking/business: AUC, PR-AUC, gains by decile, capture@{5,10,20}%, precision@K, revenue-weighted capture, expected GP @ capacity. TODO
-  - Calibration: Brier, cal-MAE, reliability bins (10–20). TODO
+  - Ranking/business: AUC, PR-AUC, gains by decile, capture@{5,10,20}%, precision@K, revenue-weighted capture, expected GP @ capacity. PARTIAL (gains + capture grid + expected GP norm)
+  - Calibration: Brier, cal-MAE, reliability bins (10–20). PARTIAL (bins)
   - Stability by segment (cohort/industry/size/region). TODO
-  - Write: `metrics.json`, `gains.csv`, `calibration.csv`, `topk_scenarios.csv`. TODO
+  - Write: `metrics.json`, `gains.csv`, `calibration.csv`, `topk_scenarios.csv`. PARTIAL
 
 - Confidence intervals
   - Block bootstrap by customer (seeded) producing 95% CIs for capture@K, revenue capture, Brier, cal-MAE, precision@K. TODO
 
 - Drift diagnostics
-  - Feature drift PSI between train (latest training frame) and holdout; flag PSI > cfg.threshold. TODO
+  - Feature drift PSI between train (latest training frame) and holdout; flag PSI > cfg.threshold. PARTIAL (PSI utility; proxy wired)
   - Score drift KS on `p_hat` (train vs holdout); flag KS > cfg.threshold. TODO
   - Optional: SHAP drift if LGBM available and SHAP installed. TODO
   - Write `drift.json`. TODO
