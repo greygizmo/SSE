@@ -35,6 +35,16 @@ A division-focused Ideal Customer Profile (ICP) & Whitespace engine. The pipelin
   - Gating: ownership, region, recent contact, open deal; cooldown de‑emphasis; structured JSONL logs
   - Artifacts: `whitespace_<cutoff>.csv`, `whitespace_explanations_<cutoff>.csv`, `thresholds_whitespace_<cutoff>.csv`, `whitespace_metrics_<cutoff>.json`, `whitespace_log_<cutoff>.jsonl`, `mb_rules_<division>_<cutoff>.csv`
 
+- **Phase 5 — Forward Validation / Holdout**
+  - CLI: `python -m gosales.validation.forward --division Solidworks --cutoff 2024-12-31 --window-months 6 --capacity-grid 5,10,20 --accounts-per-rep-grid 10,25`
+  - Artifacts per division/cutoff in `gosales/outputs/validation/<division>/<cutoff>/`:
+    - `validation_frame.parquet`, `gains.csv`, `calibration.csv`
+    - `topk_scenarios.csv` and `topk_scenarios_sorted.csv` (with 95% CIs)
+    - `segment_performance.csv` (capture/precision/rev_capture by segment)
+    - `metrics.json` (AUC, PR-AUC, Brier, cal-MAE)
+    - `drift.json` (per-feature PSI; KS on `p_hat` train vs holdout if snapshot exists)
+  - Phase 3 saves `train_scores_<division>_<cutoff>.csv` and `train_feature_sample_<division>_<cutoff>.parquet` to support Phase 5 drift
+
 ---
 
 ### Quick Start (Windows/PowerShell)

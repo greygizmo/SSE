@@ -269,6 +269,15 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
                 pd.DataFrame({"customer_id": df_final['customer_id'].values, "p_hat": p_final}).to_csv(
                     OUTPUTS_DIR / f"train_scores_{division.lower()}_{last_cut}.csv", index=False
                 )
+            # Persist train-time feature sample for Phase 5 PSI (sample to control size)
+            try:
+                num_cols = [c for c in feature_names if pd.api.types.is_numeric_dtype(df_final[c])]
+                sample_df = df_final[['customer_id'] + num_cols].copy()
+                if len(sample_df) > 5000:
+                    sample_df = sample_df.sample(n=5000, random_state=cfg.modeling.seed)
+                sample_df.to_parquet(OUTPUTS_DIR / f"train_feature_sample_{division.lower()}_{last_cut}.parquet", index=False)
+            except Exception:
+                pass
         except Exception:
             pass
 

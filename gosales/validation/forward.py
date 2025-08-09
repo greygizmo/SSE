@@ -374,17 +374,40 @@ def main(division: str, cutoff: str, window_months: int, capacity_grid: str, acc
     except Exception:
         pass
 
-    # Drift JSON: PSI (EV vs holdout GP) and KS(p_hat positives vs negatives)
+    # Drift JSON: per-feature PSI (train sample vs holdout), EV vs holdout GP PSI, KS(p_hat train vs holdout and pos vs neg)
     try:
         drift_report = {}
+        # EV vs holdout GP PSI
         ev_raw = vf.get('rfm__all__gp_sum__12m', pd.Series(dtype=float))
         hold_gp = vf.get('holdout_gp', pd.Series(dtype=float))
         drift_report['psi_ev_vs_holdout_gp'] = psi(ev_raw, hold_gp)
+        # p_hat separation KS (pos vs neg)
         if 'bought_in_division' in vf.columns:
             pos_p = pd.Series(p)[vf['bought_in_division'] == 1]
             neg_p = pd.Series(p)[vf['bought_in_division'] == 0]
             drift_report['ks_p_hat_pos_vs_neg'] = ks_statistic(pos_p, neg_p)
-        (out_dir / 'drift.json').write_text(pd.Series(drift_report).to_json(indent=2), encoding='utf-8')
+        # Train vs holdout KS on p_hat
+        train_scores_path = OUTPUTS_DIR / f"train_scores_{division.lower()}_{cutoff}.csv"
+        if train_scores_path.exists():
+            train_scores = pd.read_csv(train_scores_path)
+            merged = vf[['customer_id']].merge(train_scores, on='customer_id', how='left')
+            p_train = pd.to_numeric(merged['p_hat'], errors='coerce')
+            p_hold = pd.Series(p)
+            drift_report['ks_phat_train_holdout'] = ks_statistic(p_train, p_hold)
+        else:
+            drift_report['ks_phat_train_holdout'] = None
+        # Per-feature PSI using train feature sample snapshot
+        feat_sample_path = OUTPUTS_DIR / f"train_feature_sample_{division.lower()}_{cutoff}.parquet"
+        if feat_sample_path.exists():
+            train_feat = pd.read_parquet(feat_sample_path)
+            per_feature = {}
+            # Intersect numeric columns
+            num_cols = [c for c in vf.columns if pd.api.types.is_numeric_dtype(vf[c]) and c not in ('bought_in_division',)]
+            for c in num_cols:
+                if c in train_feat.columns:
+                    per_feature[c] = psi(train_feat[c], vf[c])
+            drift_report['psi_per_feature'] = per_feature
+        (out_dir / 'drift.json').write_text(json.dumps(drift_report, indent=2), encoding='utf-8')
     except Exception:
         pass
     logger.info(f"Wrote validation artifacts to {out_dir}")
