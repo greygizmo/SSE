@@ -88,9 +88,10 @@ def _calibration_mae(bins_df: pd.DataFrame) -> float:
 @click.option('--cutoff', required=True)
 @click.option('--window-months', default=6, type=int)
 @click.option('--capacity-grid', default='5,10,20')
+@click.option('--accounts-per-rep-grid', default='10,25')
 @click.option('--bootstrap', default=1000, type=int)
 @click.option('--config', default=str((Path(__file__).parents[1] / 'config.yaml').resolve()))
-def main(division: str, cutoff: str, window_months: int, capacity_grid: str, bootstrap: int, config: str) -> None:
+def main(division: str, cutoff: str, window_months: int, capacity_grid: str, accounts_per_rep_grid: str, bootstrap: int, config: str) -> None:
     cfg = load_config(config)
     out_dir = OUTPUTS_DIR / 'validation' / division.lower() / cutoff
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -181,6 +182,7 @@ def main(division: str, cutoff: str, window_months: int, capacity_grid: str, boo
 
     # Capture@K grid
     topks = [int(x) for x in capacity_grid.split(',') if x]
+    per_rep_ns = [int(x) for x in accounts_per_rep_grid.split(',') if x]
     scenarios = []
     total_realized_gp = float(vf.get('holdout_gp', pd.Series(0.0, index=vf.index)).sum())
     for k in topks:
@@ -191,7 +193,49 @@ def main(division: str, cutoff: str, window_months: int, capacity_grid: str, boo
         exp_gp = float((topk['EV_norm']).sum())
         realized_gp = float(topk.get('holdout_gp', pd.Series(0.0, index=topk.index)).sum())
         rev_capture = float(realized_gp / max(1e-9, total_realized_gp)) if total_realized_gp > 0 else None
-        scenarios.append({'k_percent': k, 'contacts': int(kk), 'capture': capture, 'precision': precision, 'expected_gp_norm': exp_gp, 'realized_gp': realized_gp, 'rev_capture': rev_capture})
+        scenarios.append({'mode': 'top_percent', 'k_percent': k, 'contacts': int(kk), 'capture': capture, 'precision': precision, 'expected_gp_norm': exp_gp, 'realized_gp': realized_gp, 'rev_capture': rev_capture})
+
+    # Per-rep scenarios (if 'rep' column exists)
+    if 'rep' in vf.columns and len(per_rep_ns) > 0:
+        for n in per_rep_ns:
+            sel = vf.sort_values(['rep','p_hat','EV_norm','customer_id'], ascending=[True, False, False, True])
+            sel = sel.groupby('rep', as_index=False).head(int(n))
+            contacts = int(len(sel))
+            capture = float(sel['bought_in_division'].sum() / max(1, vf['bought_in_division'].sum())) if 'bought_in_division' in vf.columns else None
+            precision = float(sel['bought_in_division'].mean()) if 'bought_in_division' in sel.columns else None
+            exp_gp = float(sel['EV_norm'].sum())
+            realized_gp = float(sel.get('holdout_gp', pd.Series(0.0, index=sel.index)).sum())
+            rev_capture = float(realized_gp / max(1e-9, total_realized_gp)) if total_realized_gp > 0 else None
+            scenarios.append({'mode': 'per_rep', 'accounts_per_rep': int(n), 'contacts': contacts, 'capture': capture, 'precision': precision, 'expected_gp_norm': exp_gp, 'realized_gp': realized_gp, 'rev_capture': rev_capture})
+
+    # Hybrid scenarios by segment (round-robin across first available segment column)
+    seg_col = next((c for c in getattr(cfg.validation, 'segment_columns', []) if c in vf.columns), None)
+    if seg_col:
+        for k in topks:
+            kk = max(1, int(len(vf) * (k / 100.0)))
+            # Prepare per-segment sorted lists
+            seg_lists = {s: df.sort_values(['p_hat','EV_norm','customer_id'], ascending=[False, False, True])
+                         for s, df in vf.groupby(seg_col)}
+            iters = {s: df.itertuples(index=False) for s, df in seg_lists.items()}
+            order = list(seg_lists.keys())
+            picked = []
+            idx = 0
+            while len(picked) < kk and order:
+                s = order[idx % len(order)]
+                try:
+                    picked.append(next(iters[s]))
+                except StopIteration:
+                    order.pop(idx % len(order))
+                    continue
+                idx += 1
+            sel = pd.DataFrame(picked, columns=vf.columns) if picked else vf.head(0)
+            contacts = int(len(sel))
+            capture = float(sel['bought_in_division'].sum() / max(1, vf['bought_in_division'].sum())) if 'bought_in_division' in vf.columns else None
+            precision = float(sel['bought_in_division'].mean()) if 'bought_in_division' in sel.columns else None
+            exp_gp = float(sel['EV_norm'].sum())
+            realized_gp = float(sel.get('holdout_gp', pd.Series(0.0, index=sel.index)).sum())
+            rev_capture = float(realized_gp / max(1e-9, total_realized_gp)) if total_realized_gp > 0 else None
+            scenarios.append({'mode': 'hybrid_segment', 'segment': seg_col, 'k_percent': k, 'contacts': contacts, 'capture': capture, 'precision': precision, 'expected_gp_norm': exp_gp, 'realized_gp': realized_gp, 'rev_capture': rev_capture})
     scen_df = pd.DataFrame(scenarios)
     # Bootstrap CIs for capture and precision
     try:
@@ -238,6 +282,31 @@ def main(division: str, cutoff: str, window_months: int, capacity_grid: str, boo
             scen_df.loc[i, 'rev_capture_ci_hi'] = hi_rc
             scen_df.loc[i, 'realized_gp_ci_lo'] = lo_rg
             scen_df.loc[i, 'realized_gp_ci_hi'] = hi_rg
+        # For per_rep rows, compute CIs with group selection logic
+        if 'mode' in scen_df.columns:
+            for i, row in scen_df.iterrows():
+                if row.get('mode') == 'per_rep':
+                    n_acc = int(row.get('accounts_per_rep', 0))
+                    def per_rep_metric(df_in: pd.DataFrame, metric: str) -> float:
+                        if df_in.empty or 'rep' not in df_in.columns:
+                            return 0.0
+                        sel = df_in.sort_values(['rep','p_hat','EV_norm','customer_id'], ascending=[True, False, False, True])
+                        sel = sel.groupby('rep', as_index=False).head(n_acc)
+                        if metric == 'capture':
+                            return float(sel['bought_in_division'].sum() / max(1, df_in['bought_in_division'].sum()))
+                        if metric == 'precision':
+                            return float(sel['bought_in_division'].mean())
+                        if metric == 'rev_capture':
+                            total_gp = float(df_in.get('holdout_gp', pd.Series(0.0, index=df_in.index)).sum())
+                            top_gp = float(sel.get('holdout_gp', pd.Series(0.0, index=sel.index)).sum())
+                            return float(top_gp / total_gp) if total_gp > 0 else 0.0
+                        if metric == 'realized_gp':
+                            return float(sel.get('holdout_gp', pd.Series(0.0, index=sel.index)).sum())
+                        return 0.0
+                    scen_df.loc[i, 'capture_ci_lo'], scen_df.loc[i, 'capture_ci_hi'] = bootstrap_ci(lambda dfi: per_rep_metric(dfi, 'capture'), vf, n=n_boot, seed=cfg.modeling.seed)
+                    scen_df.loc[i, 'precision_ci_lo'], scen_df.loc[i, 'precision_ci_hi'] = bootstrap_ci(lambda dfi: per_rep_metric(dfi, 'precision'), vf, n=n_boot, seed=cfg.modeling.seed)
+                    scen_df.loc[i, 'rev_capture_ci_lo'], scen_df.loc[i, 'rev_capture_ci_hi'] = bootstrap_ci(lambda dfi: per_rep_metric(dfi, 'rev_capture'), vf, n=n_boot, seed=cfg.modeling.seed)
+                    scen_df.loc[i, 'realized_gp_ci_lo'], scen_df.loc[i, 'realized_gp_ci_hi'] = bootstrap_ci(lambda dfi: per_rep_metric(dfi, 'realized_gp'), vf, n=n_boot, seed=cfg.modeling.seed)
     except Exception:
         pass
     scen_df.to_csv(out_dir / 'topk_scenarios.csv', index=False)
