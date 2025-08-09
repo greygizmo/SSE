@@ -13,8 +13,8 @@
 - Metrics & artifacts
   - Ranking/business: AUC, PR-AUC, gains by decile, capture@{5,10,20}%, precision@K, revenue-weighted capture, expected GP @ capacity. PARTIAL (AUC/PR-AUC/gains/capture grid/expected GP norm)
   - Calibration: Brier, cal-MAE, reliability bins (10–20). PARTIAL (bins + Brier + cal-MAE)
-  - Stability by segment (cohort/industry/size/region). TODO
-  - Write: `metrics.json`, `gains.csv`, `calibration.csv`, `topk_scenarios.csv`. PARTIAL
+  - Stability by segment (cohort/industry/size/region). PARTIAL (segment_performance.csv for first available segment)
+  - Write: `metrics.json`, `gains.csv`, `calibration.csv`, `topk_scenarios.csv`. PARTIAL (also writes sorted scenarios)
 
 - Confidence intervals
   - Block bootstrap by customer (seeded) producing 95% CIs for capture@K, revenue capture, Brier, cal-MAE, precision@K. TODO

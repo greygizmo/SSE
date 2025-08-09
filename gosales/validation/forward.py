@@ -309,7 +309,14 @@ def main(division: str, cutoff: str, window_months: int, capacity_grid: str, acc
                     scen_df.loc[i, 'realized_gp_ci_lo'], scen_df.loc[i, 'realized_gp_ci_hi'] = bootstrap_ci(lambda dfi: per_rep_metric(dfi, 'realized_gp'), vf, n=n_boot, seed=cfg.modeling.seed)
     except Exception:
         pass
-    scen_df.to_csv(out_dir / 'topk_scenarios.csv', index=False)
+    # Rank scenarios: if calibration MAE low, rank by expected GP; otherwise by capture
+    try:
+        rank_by = 'expected_gp_norm' if (not np.isnan(cal_mae) and cal_mae < 0.03) else 'capture'
+        scen_sorted = scen_df.sort_values(rank_by, ascending=False).reset_index(drop=True)
+        scen_sorted.to_csv(out_dir / 'topk_scenarios.csv', index=False)
+        scen_sorted.to_csv(out_dir / 'topk_scenarios_sorted.csv', index=False)
+    except Exception:
+        scen_df.to_csv(out_dir / 'topk_scenarios.csv', index=False)
 
     # Drift diagnostics (if training score snapshot available)
     drift = {}
@@ -337,6 +344,25 @@ def main(division: str, cutoff: str, window_months: int, capacity_grid: str, acc
         },
     }
     (out_dir / 'metrics.json').write_text(pd.Series(metrics).to_json(indent=2), encoding='utf-8')
+
+    # Segment performance stability
+    try:
+        seg_col = next((c for c in getattr(cfg.validation, 'segment_columns', []) if c in vf.columns), None)
+        if seg_col:
+            seg_rows = []
+            for seg_val, sub in vf.groupby(seg_col):
+                for k in topks:
+                    kk = max(1, int(len(sub) * (k / 100.0)))
+                    topk = sub.nlargest(kk, ['p_hat','EV_norm','customer_id'])
+                    capture = float(topk['bought_in_division'].sum() / max(1, sub['bought_in_division'].sum())) if 'bought_in_division' in sub.columns and sub['bought_in_division'].sum() > 0 else 0.0
+                    precision = float(topk['bought_in_division'].mean()) if 'bought_in_division' in sub.columns else 0.0
+                    realized_gp = float(topk.get('holdout_gp', pd.Series(0.0, index=topk.index)).sum())
+                    total_gp = float(sub.get('holdout_gp', pd.Series(0.0, index=sub.index)).sum())
+                    rev_capture = float(realized_gp / total_gp) if total_gp > 0 else 0.0
+                    seg_rows.append({'segment_col': seg_col, 'segment': seg_val, 'k_percent': k, 'capture': capture, 'precision': precision, 'rev_capture': rev_capture})
+            pd.DataFrame(seg_rows).to_csv(out_dir / 'segment_performance.csv', index=False)
+    except Exception:
+        pass
     logger.info(f"Wrote validation artifacts to {out_dir}")
 
 
