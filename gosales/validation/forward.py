@@ -7,6 +7,7 @@ import click
 import numpy as np
 import pandas as pd
 from sklearn.metrics import roc_auc_score, precision_recall_curve, auc, brier_score_loss
+import json
 
 from gosales.utils.config import load_config
 from gosales.utils.paths import OUTPUTS_DIR, MODELS_DIR
@@ -340,12 +341,33 @@ def main(division: str, cutoff: str, window_months: int, capacity_grid: str, acc
         pass
 
     # Minimal metrics.json
+    # Drift highlights for metrics.json (top PSI features over threshold)
+    drift_highlights = {}
+    try:
+        psi_map = drift_report.get('psi_per_feature', {}) if 'drift_report' in locals() else {}
+        thr = float(getattr(cfg.validation, 'psi_threshold', 0.25))
+        flagged = sorted(
+            (
+                {'feature': k, 'psi': float(v)}
+                for k, v in psi_map.items()
+                if isinstance(v, (int, float)) and float(v) >= thr
+            ),
+            key=lambda x: x['psi'], reverse=True
+        )[:20]
+        drift_highlights = {
+            'psi_threshold': thr,
+            'psi_flagged_top': flagged,
+        }
+    except Exception:
+        drift_highlights = {}
+
     metrics = {
         'division': division,
         'cutoff': cutoff,
         'rows': int(len(vf)),
         'capture_grid': {str(s['k_percent']): s['capture'] for s in scenarios},
         'drift': drift,
+        'drift_highlights': drift_highlights,
         'metrics': {
             'auc': auc_val,
             'pr_auc': pr_auc_val,
