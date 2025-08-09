@@ -263,6 +263,15 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
 
     # Metrics & artifacts
     try:
+        # Persist train-time p_hat snapshot for Phase 5 drift comparison
+        try:
+            if p_final is not None:
+                pd.DataFrame({"customer_id": df_final['customer_id'].values, "p_hat": p_final}).to_csv(
+                    OUTPUTS_DIR / f"train_scores_{division.lower()}_{last_cut}.csv", index=False
+                )
+        except Exception:
+            pass
+
         auc_val = roc_auc_score(y_final, p_final) if p_final is not None else None
         pr_prec, pr_rec, _ = precision_recall_curve(y_final, p_final) if p_final is not None else (None, None, None)
         pr_auc = auc(pr_rec, pr_prec) if pr_prec is not None else None

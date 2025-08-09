@@ -322,10 +322,20 @@ def main(division: str, cutoff: str, window_months: int, capacity_grid: str, acc
     drift = {}
     try:
         # Attempt to load train-time scores if saved (metrics_{division}.json not sufficient); fallback to feature proxy
+        train_scores_path = OUTPUTS_DIR / f"train_scores_{division.lower()}_{cutoff}.csv"
+        if train_scores_path.exists():
+            train_scores = pd.read_csv(train_scores_path)
+            # Align on customer_id
+            merged = vf[['customer_id']].merge(train_scores, on='customer_id', how='left')
+            p_train = pd.to_numeric(merged['p_hat'], errors='coerce')
+            p_hold = pd.Series(p)
+            drift['ks_phat_train_holdout'] = ks_statistic(p_train, p_hold)
+        else:
+            drift['ks_phat_train_holdout'] = None
+        # PSI proxy between EV and holdout GP
         train_proxy = vf.get('rfm__all__gp_sum__12m', pd.Series(dtype=float))
         hold_proxy = vf.get('rfm__all__gp_sum__12m', pd.Series(dtype=float))
         drift['psi_gp12m'] = psi(train_proxy, hold_proxy)
-        drift['ks_phat_train_holdout'] = None  # placeholder unless train p_hat snapshot is available
     except Exception:
         pass
 
