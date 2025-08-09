@@ -193,7 +193,17 @@ elif tab == "Explainability":
         cf = OUTPUTS_DIR / f"coef_{div.lower()}.csv"
         if sg.exists():
             st.subheader("SHAP Global")
-            st.dataframe(_read_csv(sg), use_container_width=True, height=320)
+            sg_df = _read_csv(sg)
+            st.dataframe(sg_df, use_container_width=True, height=320)
+            # Optional bar chart if aggregated column present
+            try:
+                import plotly.express as px
+                if 'feature' in sg_df.columns and 'mean_abs_shap' in sg_df.columns:
+                    topn = sg_df.sort_values('mean_abs_shap', ascending=False).head(20)
+                    fig = px.bar(topn, x='feature', y='mean_abs_shap')
+                    st.plotly_chart(fig, use_container_width=True)
+            except Exception:
+                pass
         if ss.exists():
             st.subheader("SHAP Sample")
             st.dataframe(_read_csv(ss).head(200), use_container_width=True, height=320)
@@ -251,7 +261,15 @@ elif tab == "Validation":
         st.info("No validation runs found.")
     else:
         labels = [f"{div} @ {cut}" for div, cut, _ in runs]
-        sel = st.selectbox("Pick run", options=list(range(len(runs))), format_func=lambda i: labels[i])
+        # Prefer selection from session state if provided by Runs page
+        default_index = 0
+        pref = st.session_state.get('preferred_validation')
+        if isinstance(pref, dict):
+            try:
+                default_index = next((i for i,(d,c,_) in enumerate(runs) if d == pref.get('division') and c == pref.get('cutoff')), 0)
+            except Exception:
+                default_index = 0
+        sel = st.selectbox("Pick run", options=list(range(len(runs))), index=default_index, format_func=lambda i: labels[i])
         _, _, path = runs[sel]
         thr = load_thresholds()
         # Badges
@@ -275,6 +293,10 @@ elif tab == "Validation":
         _badge(b1, 'Calibration MAE', badges['cal_mae'])
         _badge(b2, 'PSI(EV vs GP)', badges['psi_ev_vs_gp'])
         _badge(b3, 'KS(train vs holdout)', badges['ks_phat_train_holdout'])
+        with st.expander("What these badges mean"):
+            st.markdown("- Calibration MAE: average absolute gap between predicted probability and observed rate (lower is better).")
+            st.markdown("- PSI(EV vs GP): value-weighted distribution drift between expected value proxy and realized GP over deciles (lower is better).")
+            st.markdown("- KS(train vs holdout): max CDF gap between train and holdout score distributions (lower is better).")
 
         # Alerts
         alerts = load_alerts(path)
@@ -363,11 +385,21 @@ elif tab == "Runs":
                 st.caption("Manifest (planned/emitted artifacts)")
                 if man.exists():
                     st.code(_read_text(man))
+                    st.download_button("Download manifest.json", data=man.read_bytes(), file_name='manifest.json')
                 else:
                     st.info("manifest.json not found")
             with c2:
                 st.caption("Resolved Config Snapshot")
                 if cfg.exists():
                     st.code(_read_text(cfg))
+                    st.download_button("Download config_resolved.yaml", data=cfg.read_bytes(), file_name='config_resolved.yaml')
                 else:
                     st.info("config_resolved.yaml not found")
+            # Quick link to Validation page when applicable
+            phase = str(sel.get('phase',''))
+            division = sel.get('division')
+            cutoff = sel.get('cutoff')
+            if phase == 'phase5_validation' and division and cutoff:
+                if st.button("View this validation run"):
+                    st.session_state['preferred_validation'] = {'division': division, 'cutoff': cutoff}
+                    st.info("Open the Validation page to view this run.")
