@@ -6,7 +6,7 @@ Goal: Align the Streamlit UI with pipeline artifacts and UX introduced in Phases
 
 Foundations & Navigation
 - [x] Unify navigation: Overview, Metrics, Explainability, Whitespace, Validation, Runs (registry)
-- [ ] Global selectors: division/cutoff inputs where applicable; defaults to latest artifacts
+- [x] Global selectors: division/cutoff inputs where applicable; defaults to latest artifacts (latest whitespace cutoff; validation default via helper)
 - [ ] Config thresholds: load PSI/KS/cal-MAE thresholds once and expose in state
 - [ ] Robust artifact path resolution with clear empty/placeholder states and helpful messages
 - [ ] Consistent theming + branding (logo, colors, icons)

@@ -5,7 +5,7 @@ import pandas as pd
 import streamlit as st
 
 from gosales.utils.paths import OUTPUTS_DIR, MODELS_DIR
-from gosales.ui.utils import discover_validation_runs, compute_validation_badges, load_thresholds, load_alerts
+from gosales.ui.utils import discover_validation_runs, compute_validation_badges, load_thresholds, load_alerts, compute_default_validation_index
 
 
 st.set_page_config(page_title="GoSales Engine", layout="wide")
@@ -75,6 +75,15 @@ with st.sidebar:
     if colr2.button("Refresh", help="Clear cached artifacts and reload"):
         st.cache_data.clear()
     tab = st.radio("Page", ["Overview", "Metrics", "Explainability", "Whitespace", "Validation", "Runs"], index=0)
+    # Global divisions and default whitespace cutoff
+    st.session_state.setdefault('divisions', _discover_divisions())
+    # Preselect most recent whitespace cutoff
+    try:
+        wc = _discover_whitespace_cutoffs()
+        if wc:
+            st.session_state['latest_whitespace_cutoff'] = wc[0]
+    except Exception:
+        pass
 
 def list_validation_runs():
     base = OUTPUTS_DIR / 'validation'
@@ -234,7 +243,10 @@ elif tab == "Whitespace":
     if not cutoffs:
         st.info("No whitespace files found.")
     else:
-        sel_cut = st.selectbox("Cutoff", cutoffs)
+        # Use latest cutoff as default
+        latest = st.session_state.get('latest_whitespace_cutoff')
+        default_idx = cutoffs.index(latest) if latest in cutoffs else 0
+        sel_cut = st.selectbox("Cutoff", cutoffs, index=default_idx)
         ws = OUTPUTS_DIR / f"whitespace_{sel_cut}.csv"
         if ws.exists():
             # Filters
@@ -285,13 +297,7 @@ elif tab == "Validation":
     else:
         labels = [f"{div} @ {cut}" for div, cut, _ in runs]
         # Prefer selection from session state if provided by Runs page
-        default_index = 0
-        pref = st.session_state.get('preferred_validation')
-        if isinstance(pref, dict):
-            try:
-                default_index = next((i for i,(d,c,_) in enumerate(runs) if d == pref.get('division') and c == pref.get('cutoff')), 0)
-            except Exception:
-                default_index = 0
+        default_index = compute_default_validation_index(runs, st.session_state.get('preferred_validation'))
         sel = st.selectbox("Pick run", options=list(range(len(runs))), index=default_index, format_func=lambda i: labels[i])
         _, _, path = runs[sel]
         thr = load_thresholds()
