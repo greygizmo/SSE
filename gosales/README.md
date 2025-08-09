@@ -134,6 +134,51 @@ $env:PYTHONPATH = "$PWD"; python -m gosales.pipeline.rank_whitespace --cutoff "2
 
 ---
 
+### How to interpret whitespace metrics (for revenue teams)
+
+- **Capture@K**
+  - What it means: Of all the wins the model expects in this period, how many are covered if you work just the top K% of the ranked list.
+  - Why you care: Tells you “how concentrated the opportunity is.” A higher number means most wins are in a small slice at the top, so focusing there is efficient.
+  - Rule of thumb: If `capture@10% = 0.65`, then working the top 10% could capture ~65% of expected wins.
+
+- **Division shares in the selected list**
+  - What it means: Within your capacity slice (e.g., top 10% or per‑rep list), what fraction comes from each division.
+  - Why you care: Prevents over‑concentration (e.g., 90% Solidworks). If one division exceeds the configured share threshold, we warn and suggest using the hybrid capacity mode to diversify.
+
+- **Stability (Jaccard) vs last run**
+  - What it means: The overlap between this run’s top‑N and the previous run’s top‑N (0 to 1).
+  - Why you care: High stability (~0.7–0.9) = consistent targeting; low (~0.3) = shift due to seasonality, new data, or configuration change.
+  - Action: If stability drops unexpectedly, review data recency, config changes, and business events.
+
+- **Coverage and weight adjustments**
+  - What it shows: Coverage for ALS and market‑basket signals (what % of customers have these signals). If coverage is sparse, the system automatically down‑weights that signal and renormalizes.
+  - Why you care: Low coverage is not “bad” but indicates limited signal today. Over time, as data coverage improves, those signals will earn more weight.
+
+- **Thresholds & capacity**
+  - Top‑percent: Work the top X% across all divisions. The thresholds file lists the score cut line and counts.
+  - Per‑rep: Each rep gets roughly the top N in their book (requires a `rep` column in features). Encourages fair distribution.
+  - Hybrid: Round‑robin across divisions up to capacity to ensure diversification.
+
+- **Probability and value**
+  - `p_icp`: A calibrated probability (0–1) of a positive outcome in the prediction window. Higher is better.
+  - `EV_norm`: A normalized expected‑value proxy (based on segment medians and capped at a high percentile to avoid “whales” dominating).
+  - Why we cap EV: Protects against extreme outliers skewing the list; ensures we don’t ignore high‑probability, modest‑value wins that are easier to capture at scale.
+
+- **Explanations (`nba_reason`)**
+  - Short, human‑readable context such as “High p=0.78; strong affinity; high EV.”
+  - These are helpful hints, not full audit trails. For deeper model insights, use the Phase‑3 SHAP/coef artifacts.
+
+- **Recommended operating mode**
+  - For pilots: pick one capacity mode (e.g., top‑10% or per‑rep 25) and run for 4–6 weeks. Track conversion vs a comparable control group.
+  - Review weekly: capture@K, division shares, stability, and qualitative feedback from reps. Adjust capacity and weights if needed.
+
+- **Cautions**
+  - This is not a price quote or guarantee; it’s a ranked opportunity list.
+  - If gating (DNC/legal/open deals/region) removes many accounts, the selected list may shrink and division shares may shift—this is expected.
+  - Cooldowns reduce repeated surfacing of the same account that wasn’t actioned; adjust in config if needed.
+
+---
+
 ### Multi-division support
 
 Known divisions are sourced from `etl/sku_map.division_set()`; cross-division features adapt automatically. Scoring auto-discovers models in `models/*_model` and scores each division with an available model. To add a division, update `etl/sku_map.py` (or overrides CSV), rebuild star and features, then train with `--division <Name>`.
