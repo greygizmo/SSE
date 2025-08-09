@@ -428,39 +428,76 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
         try:
             cfgmod = cfg.load_config()
             if cfgmod.features.use_market_basket:
-                # Compute presence by SKU in feature period per customer
-                fd_sku = fd[['customer_id', 'product_sku']].dropna().copy()
-                fd_sku['product_sku'] = fd_sku['product_sku'].astype(str)
-                # Global baseline: fraction of customers with Solidworks activity in feature period
-                fd_div = fd[['customer_id', 'product_division']].dropna().copy()
-                swx_customers = set(fd_div.loc[fd_div['product_division'] == 'Solidworks', 'customer_id'].unique().tolist())
-                all_customers = set(fd['customer_id'].unique().tolist())
-                baseline = (len(swx_customers) / max(1, len(all_customers)))
+                # Limit to feature window (e.g., last 12 months) to avoid leakage
+                fd_win = fd.loc[last12_mask, ['customer_id', 'product_sku', 'product_division']].dropna().copy()
+                if not fd_win.empty:
+                    fd_win['product_sku'] = fd_win['product_sku'].astype(str)
+                    # Baseline: fraction of customers with target division activity in window
+                    all_customers = set(fd_win['customer_id'].unique().tolist())
+                    div_customers = set(fd_win.loc[fd_win['product_division'] == division_name, 'customer_id'].unique().tolist())
+                    baseline = (len(div_customers) / max(1, len(all_customers)))
+                    # Presence matrix per customer x SKU
+                    has_sku = fd_win.drop_duplicates().assign(flag=1).pivot_table(index='customer_id', columns='product_sku', values='flag', fill_value=0)
+                    # Compute lift per SKU with min support
+                    min_support = 10
+                    lift_weights = {}
+                    supports = {}
+                    # Use observed SKUs (cap to top-N by support to avoid blow-up)
+                    sku_counts = has_sku.sum(axis=0).sort_values(ascending=False)
+                    top_skus = sku_counts.index.tolist()
+                    for s in top_skus:
+                        supp = int(sku_counts.loc[s])
+                        supports[s] = supp
+                        if supp < min_support:
+                            continue
+                        custs = set(has_sku.index[has_sku[s] > 0].tolist())
+                        inter = len(div_customers.intersection(custs))
+                        p_cond = inter / max(1, supp)
+                        lift = (p_cond / baseline) if baseline > 0 else 0.0
+                        lift_weights[s] = float(lift)
 
-                # For selected SKUs, compute lift = P(SWX | SKU) / P(SWX)
-                sku_list = ['SWX_Core', 'SWX_Pro_Prem', 'Core_New_UAP', 'Pro_Prem_New_UAP', 'PDM', 'Simulation', 'Services', 'Training', 'Success Plan GP', 'Supplies']
-                sku_to_customers = {s: set(fd_sku.loc[fd_sku['product_sku'] == s, 'customer_id'].unique().tolist()) for s in sku_list}
-                lift_weights = {}
-                for s, custs in sku_to_customers.items():
-                    if not custs:
-                        lift_weights[s] = 0.0
-                        continue
-                    inter = len(swx_customers.intersection(custs))
-                    p_cond = inter / max(1, len(custs))
-                    lift = (p_cond / baseline) if baseline > 0 else 0.0
-                    lift_weights[s] = float(lift)
+                    # Aggregate to per-customer signals: max and mean lift of present SKUs
+                    if lift_weights:
+                        # Align DataFrame to lift columns only
+                        cols = [c for c in has_sku.columns if c in lift_weights]
+                        if cols:
+                            w = pd.Series({c: lift_weights.get(c, 0.0) for c in cols})
+                            present = has_sku[cols].astype(float)
+                            weighted = present.mul(w, axis=1)
+                            mb_lift_max = weighted.max(axis=1).rename('mb_lift_max')
+                            # mean over present SKUs (avoid dividing by zero)
+                            denom = present.sum(axis=1).replace(0.0, np.nan)
+                            mb_lift_mean = (weighted.sum(axis=1) / denom).fillna(0.0).rename('mb_lift_mean')
+                            mb_df = pd.concat([mb_lift_max, mb_lift_mean], axis=1).reset_index()
+                            features_pd = features_pd.merge(mb_df, on='customer_id', how='left')
+                            features_pd['mb_lift_max'] = features_pd['mb_lift_max'].fillna(0.0)
+                            features_pd['mb_lift_mean'] = features_pd['mb_lift_mean'].fillna(0.0)
 
-                # Per-customer affinity: sum of lift weights for SKUs present (binary presence in feature period)
-                has_sku = fd_sku.drop_duplicates().assign(flag=1).pivot_table(index='customer_id', columns='product_sku', values='flag', fill_value=0)
-                # Align to sku_list columns
-                for s in sku_list:
-                    if s not in has_sku.columns:
-                        has_sku[s] = 0
-                affinity = sum(has_sku[s] * lift_weights.get(s, 0.0) for s in sku_list)
-                affinity = affinity.rename('affinity__div__lift_topk__12m')
-                affinity_df = affinity.reset_index()
-                features_pd = features_pd.merge(affinity_df, on='customer_id', how='left')
-                features_pd['affinity__div__lift_topk__12m'] = features_pd['affinity__div__lift_topk__12m'].fillna(0.0)
+                        # Also export rule table for transparency
+                        try:
+                            rules = pd.DataFrame({
+                                'sku': list(lift_weights.keys()),
+                                'support': [supports.get(s, 0) for s in lift_weights.keys()],
+                                'baseline_division_rate': baseline,
+                                'lift': [lift_weights[s] for s in lift_weights.keys()],
+                            })
+                            rules.sort_values('lift', ascending=False).to_csv(
+                                OUTPUTS_DIR / f"mb_rules_{division_name.lower()}_{(cutoff_date or '').replace('-', '')}.csv",
+                                index=False
+                            )
+                        except Exception:
+                            pass
+
+                    # Backward-compatible aggregate affinity score
+                    try:
+                        if lift_weights and cols:
+                            # Sum of lifts for present SKUs
+                            affinity = weighted.sum(axis=1).rename('affinity__div__lift_topk__12m')
+                            affinity_df = affinity.reset_index()
+                            features_pd = features_pd.merge(affinity_df, on='customer_id', how='left')
+                            features_pd['affinity__div__lift_topk__12m'] = features_pd['affinity__div__lift_topk__12m'].fillna(0.0)
+                    except Exception:
+                        pass
         except Exception as e:
             logger.warning(f"Basket lift computation failed: {e}")
     except Exception as e:
