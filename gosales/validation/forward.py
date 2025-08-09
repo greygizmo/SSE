@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Tuple, Callable
 
 import click
 import numpy as np
@@ -86,7 +86,52 @@ def main(division: str, cutoff: str, window_months: int, capacity_grid: str, boo
     out_dir.mkdir(parents=True, exist_ok=True)
 
     vf = _build_validation_frame(division, cutoff, window_months, cfg)
-    # Join holdout labels if present in outputs (labels_{division}_{cutoff}.parquet for training; for holdout, we assume Phase 1-created labels for the prediction window; fallback to feature matrix target if present)
+    # Join holdout labels from holdout CSVs if available (data/holdout/*). Fallback to training labels in feature parquet
+    try:
+        from gosales.utils.paths import DATA_DIR
+        cutoff_dt = pd.to_datetime(cutoff)
+        window_end = cutoff_dt + pd.DateOffset(months=window_months)
+        holdout_dir = (DATA_DIR / 'holdout')
+        buyers = None
+        if holdout_dir.exists():
+            # Load and concatenate CSVs in holdout directory
+            parts = []
+            for pth in holdout_dir.glob('*.csv'):
+                try:
+                    parts.append(pd.read_csv(pth))
+                except Exception:
+                    continue
+            if parts:
+                ho = pd.concat(parts, ignore_index=True)
+                # Parse dates and filter by division and window
+                if 'Rec Date' in ho.columns:
+                    ho['Rec Date'] = pd.to_datetime(ho['Rec Date'], errors='coerce')
+                    mask_window = (ho['Rec Date'] > cutoff_dt) & (ho['Rec Date'] <= window_end)
+                else:
+                    mask_window = pd.Series(True, index=ho.index)
+                div_col = 'Division' if 'Division' in ho.columns else None
+                if div_col:
+                    mask_div = ho[div_col].astype(str).str.strip().str.casefold() == division.lower()
+                else:
+                    mask_div = pd.Series(True, index=ho.index)
+                cust_col = 'CustomerId' if 'CustomerId' in ho.columns else 'customer_id'
+                buyers = pd.to_numeric(ho.loc[mask_window & mask_div, cust_col], errors='coerce').dropna().astype('Int64').unique()
+        if buyers is not None:
+            labels_df = pd.DataFrame({'customer_id': buyers, 'holdout_bought': 1})
+            vf['customer_id'] = pd.to_numeric(vf['customer_id'], errors='coerce').astype('Int64')
+            vf = vf.merge(labels_df, on='customer_id', how='left')
+            vf['holdout_bought'] = vf['holdout_bought'].fillna(0).astype(int)
+            if 'bought_in_division' in vf.columns:
+                vf.drop(columns=['bought_in_division'], inplace=True)
+            vf.rename(columns={'holdout_bought': 'bought_in_division'}, inplace=True)
+    except Exception:
+        pass
+
+    # Persist validation frame parquet
+    out_dir = OUTPUTS_DIR / 'validation' / division.lower() / cutoff
+    out_dir.mkdir(parents=True, exist_ok=True)
+    vf.to_parquet(out_dir / 'validation_frame.parquet', index=False)
+
     y = vf.get('bought_in_division', pd.Series(0, index=vf.index)).astype(int).values
     p = vf['p_hat'].values
 
@@ -106,7 +151,33 @@ def main(division: str, cutoff: str, window_months: int, capacity_grid: str, boo
         precision = float(topk['bought_in_division'].mean()) if 'bought_in_division' in vf.columns else None
         exp_gp = float((topk['EV_norm']).sum())
         scenarios.append({'k_percent': k, 'contacts': int(kk), 'capture': capture, 'precision': precision, 'expected_gp_norm': exp_gp})
-    pd.DataFrame(scenarios).to_csv(out_dir / 'topk_scenarios.csv', index=False)
+    scen_df = pd.DataFrame(scenarios)
+    # Bootstrap CIs for capture and precision
+    try:
+        n_boot = int(getattr(cfg.validation, 'bootstrap_n', 1000))
+        def cap_at_k(df_in: pd.DataFrame, k: int) -> float:
+            if df_in.empty:
+                return 0.0
+            kk = max(1, int(len(df_in) * (k / 100.0)))
+            topk = df_in.nlargest(kk, ['p_hat','EV_norm','customer_id'])
+            return float(topk['bought_in_division'].sum() / max(1, df_in['bought_in_division'].sum()))
+        def prec_at_k(df_in: pd.DataFrame, k: int) -> float:
+            if df_in.empty:
+                return 0.0
+            kk = max(1, int(len(df_in) * (k / 100.0)))
+            topk = df_in.nlargest(kk, ['p_hat','EV_norm','customer_id'])
+            return float(topk['bought_in_division'].mean())
+        for i, row in scen_df.iterrows():
+            k = int(row['k_percent'])
+            lo_c, hi_c = bootstrap_ci(lambda df_in, kk=k: cap_at_k(df_in, kk), vf, n=n_boot, seed=cfg.modeling.seed)
+            lo_p, hi_p = bootstrap_ci(lambda df_in, kk=k: prec_at_k(df_in, kk), vf, n=n_boot, seed=cfg.modeling.seed)
+            scen_df.loc[i, 'capture_ci_lo'] = lo_c
+            scen_df.loc[i, 'capture_ci_hi'] = hi_c
+            scen_df.loc[i, 'precision_ci_lo'] = lo_p
+            scen_df.loc[i, 'precision_ci_hi'] = hi_p
+    except Exception:
+        pass
+    scen_df.to_csv(out_dir / 'topk_scenarios.csv', index=False)
 
     # Drift diagnostics (if training score snapshot available)
     drift = {}
