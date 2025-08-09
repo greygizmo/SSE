@@ -253,6 +253,14 @@ elif tab == "Whitespace":
             st.subheader("Log Preview")
             lines = _read_jsonl(wlog)
             st.code(json.dumps(lines[:50], indent=2))
+        # Market-basket rules (division-specific; match this cutoff)
+        mb_files = list(OUTPUTS_DIR.glob(f"mb_rules_*_{sel_cut}.csv"))
+        if mb_files:
+            st.subheader("Market-Basket Rules")
+            sel_mb = st.selectbox("Select rules file", mb_files, format_func=lambda p: p.name)
+            mb = _read_csv(sel_mb)
+            st.dataframe(mb.head(300), use_container_width=True)
+            st.download_button("Download rules CSV", data=mb.to_csv(index=False), file_name=sel_mb.name)
 
 elif tab == "Validation":
     st.header("Forward Validation (Phase 5)")
