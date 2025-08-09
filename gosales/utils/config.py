@@ -119,6 +119,7 @@ class Config:
         segment_columns: list[str] = field(default_factory=lambda: ["industry", "industry_sub", "region", "territory"]) 
         ks_threshold: float = 0.15
         psi_threshold: float = 0.25
+        cal_mae_threshold: float = 0.03
 
     validation: 'Config.Validation' = field(default_factory=Validation)
 
@@ -183,7 +184,14 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
     if config_path is None:
         config_path = ROOT_DIR / "config.yaml"
 
-    cfg_dict = _load_yaml(Path(config_path)) if Path(config_path).exists() else {}
+    cfg_path_obj = Path(config_path)
+    cfg_dict = _load_yaml(cfg_path_obj) if cfg_path_obj.exists() else {}
+
+    # Validate unknown top-level keys early
+    allowed_top = {"paths","database","run","etl","logging","labels","features","modeling","whitespace","validation"}
+    unknown_top = set(cfg_dict.keys()) - allowed_top
+    if unknown_top:
+        raise ValueError(f"Unknown top-level config keys: {sorted(unknown_top)}. Allowed: {sorted(allowed_top)}")
 
     # Environment overrides (flat small set for now)
     env_db_engine = os.getenv("GOSALES_DB_ENGINE")
@@ -286,6 +294,20 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
             psi_threshold=float(val_cfg.get("psi_threshold", 0.25)),
         ),
     )
+
+    # Sanity checks
+    # whitespace weights length and normalization
+    try:
+        if len(cfg.whitespace.weights) != 4:
+            raise ValueError("whitespace.weights must have 4 entries [p_icp_pct, lift_norm, als_norm, EV_norm]")
+        if str(cfg.whitespace.normalize).lower() not in {"percentile","pooled"}:
+            raise ValueError("whitespace.normalize must be 'percentile' or 'pooled'")
+        if any(k <= 0 or k > 100 for k in cfg.modeling.top_k_percents):
+            raise ValueError("modeling.top_k_percents must be integers in (0,100]")
+        if not (0.0 < cfg.validation.ev_cap_percentile <= 1.0):
+            raise ValueError("validation.ev_cap_percentile must be in (0,1]")
+    except Exception as e:
+        raise
 
     # Ensure directories exist (non-destructive)
     for p in [cfg.paths.raw, cfg.paths.staging, cfg.paths.curated, cfg.paths.outputs]:

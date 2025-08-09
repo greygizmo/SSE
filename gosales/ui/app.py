@@ -1,3 +1,98 @@
+import json
+from pathlib import Path
+
+import pandas as pd
+import streamlit as st
+
+from gosales.utils.paths import OUTPUTS_DIR
+
+
+st.set_page_config(page_title="GoSales Engine", layout="wide")
+st.title("GoSales Engine – Artifact Explorer")
+
+tab = st.sidebar.radio("Page", ["Metrics", "Explainability", "Whitespace", "Validation"], index=0)
+
+def list_validation_runs():
+    base = OUTPUTS_DIR / 'validation'
+    if not base.exists():
+        return []
+    rows = []
+    for div_dir in base.iterdir():
+        if not div_dir.is_dir():
+            continue
+        for cut_dir in div_dir.iterdir():
+            if cut_dir.is_dir():
+                rows.append((div_dir.name, cut_dir.name, cut_dir))
+    return rows
+
+if tab == "Metrics":
+    st.header("Metrics & Training Artifacts")
+    # Simple viewer for Phase 3 metrics
+    metrics_files = sorted(OUTPUTS_DIR.glob("metrics_*.json"))
+    if not metrics_files:
+        st.info("No training metrics found")
+    else:
+        sel = st.selectbox("Pick metrics file", metrics_files)
+        st.code((sel.read_text(encoding='utf-8')))  
+
+elif tab == "Explainability":
+    st.header("Explainability (Phase 3)")
+    shap_files = sorted(OUTPUTS_DIR.glob("shap_global_*.csv"))
+    if shap_files:
+        sel = st.selectbox("SHAP global file", shap_files)
+        st.dataframe(pd.read_csv(sel).head(50))
+    coef_files = sorted(OUTPUTS_DIR.glob("coef_*.csv"))
+    if coef_files:
+        sel2 = st.selectbox("LR coefficients file", coef_files)
+        st.dataframe(pd.read_csv(sel2))
+    if not shap_files and not coef_files:
+        st.info("No explainability artifacts found.")
+
+elif tab == "Whitespace":
+    st.header("Whitespace (Phase 4)")
+    ws_files = sorted(OUTPUTS_DIR.glob("whitespace_*.csv"))
+    if ws_files:
+        sel = st.selectbox("Whitespace ranked CSV", ws_files)
+        st.dataframe(pd.read_csv(sel).head(100))
+    else:
+        st.info("No whitespace files found.")
+
+elif tab == "Validation":
+    st.header("Forward Validation (Phase 5)")
+    runs = list_validation_runs()
+    if not runs:
+        st.info("No validation runs found.")
+    else:
+        labels = [f"{div} @ {cut}" for div, cut, _ in runs]
+        sel = st.selectbox("Pick run", options=list(range(len(runs))), format_func=lambda i: labels[i])
+        _, _, path = runs[sel]
+        col1, col2 = st.columns(2)
+        # Metrics
+        metrics_path = path / 'metrics.json'
+        if metrics_path.exists():
+            st.subheader("Metrics")
+            st.code(metrics_path.read_text(encoding='utf-8'))
+        # Drift
+        drift_path = path / 'drift.json'
+        if drift_path.exists():
+            st.subheader("Drift")
+            st.code(drift_path.read_text(encoding='utf-8'))
+        # Scenarios
+        scen_path = path / 'topk_scenarios_sorted.csv'
+        if scen_path.exists():
+            st.subheader("Scenarios (sorted)")
+            st.dataframe(pd.read_csv(scen_path))
+        # Segment performance
+        seg_path = path / 'segment_performance.csv'
+        if seg_path.exists():
+            st.subheader("Segment performance")
+            st.dataframe(pd.read_csv(seg_path))
+        # Downloads
+        st.subheader("Downloads")
+        for fname in ["validation_frame.parquet","gains.csv","calibration.csv","topk_scenarios.csv","topk_scenarios_sorted.csv","segment_performance.csv","metrics.json","drift.json"]:
+            fpath = path / fname
+            if fpath.exists():
+                st.download_button(label=f"Download {fname}", data=fpath.read_bytes(), file_name=fname)
 import streamlit as st
 import pandas as pd
 import json
