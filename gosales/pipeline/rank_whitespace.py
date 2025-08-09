@@ -48,7 +48,7 @@ def _score_p_icp(df: pd.DataFrame, division: str) -> Tuple[pd.Series, pd.Series]
     return p, p_pct
 
 
-def _compute_expected_value(df: pd.DataFrame, cfg) -> pd.Series:
+def _compute_expected_value(df: pd.DataFrame, cfg) -> Tuple[pd.Series, int]:
     # Simple proxy: use recent all-scope GP (e.g., 12m) if available; else 0
     col = None
     for c in ["rfm__all__gp_sum__12m", "rfm__all__gp_sum__24m", "total_gp_all_time"]:
@@ -58,12 +58,13 @@ def _compute_expected_value(df: pd.DataFrame, cfg) -> pd.Series:
     ev = pd.to_numeric(df[col], errors="coerce").fillna(0.0) if col else pd.Series(0.0, index=df.index)
     cap = ev.quantile(cfg.whitespace.ev_cap_percentile)
     ev_capped = ev.clip(upper=cap)
+    capped_count = int((ev > cap).sum())
     # Normalize
     ev_norm = _percentile_normalize(ev_capped).rename("EV_norm")
-    return ev_norm
+    return ev_norm, capped_count
 
 
-def _compute_ev_norm_by_segment(df: pd.DataFrame, cfg) -> pd.Series:
+def _compute_ev_norm_by_segment(df: pd.DataFrame, cfg) -> Tuple[pd.Series, int]:
     # Prefer segment medians if segment columns present; fallback to global proxy
     seg_cols = []
     for c in ["industry", "industry_sub", "region", "territory"]:
@@ -96,7 +97,32 @@ def _compute_ev_norm_by_segment(df: pd.DataFrame, cfg) -> pd.Series:
         raw_ev = base
     cap = raw_ev.quantile(cfg.whitespace.ev_cap_percentile)
     ev_capped = raw_ev.clip(upper=cap)
-    return _percentile_normalize(ev_capped).rename("EV_norm")
+    capped_count = int((raw_ev > cap).sum())
+    return _percentile_normalize(ev_capped).rename("EV_norm"), capped_count
+
+
+def _scale_weights_by_coverage(base_weights: List[float], als_norm: pd.Series, lift_norm: pd.Series, threshold: float) -> Tuple[List[float], dict]:
+    """Scale ALS and affinity weights based on coverage; renormalize and return adjustments."""
+    w_div = list(base_weights)
+    adjustments: dict = {}
+    try:
+        als_cov = float((als_norm > 0).mean())
+        aff_cov = float((lift_norm > 0).mean())
+        thr = float(threshold)
+        if als_cov < thr and w_div[2] > 0:
+            factor = als_cov / max(1e-9, thr)
+            adjustments['als_weight_factor'] = round(factor, 3)
+            w_div[2] *= factor
+        if aff_cov < thr and w_div[1] > 0:
+            factor = aff_cov / max(1e-9, thr)
+            adjustments['aff_weight_factor'] = round(factor, 3)
+            w_div[1] *= factor
+        s = sum(w_div)
+        if s > 0:
+            w_div = [x / s for x in w_div]
+    except Exception:
+        pass
+    return w_div, adjustments
 
 
 def _compute_affinity_lift(df: pd.DataFrame) -> pd.Series:
@@ -250,28 +276,10 @@ def main(cutoff: str, window_months: int, division: str | None, weights: str | N
         p_icp, p_icp_pct = _score_p_icp(df.drop(columns=['customer_id', 'bought_in_division'], errors='ignore'), div)
         lift_norm = _compute_affinity_lift(df)
         als_norm = _compute_als_norm(df, cfg)
-        ev_norm = _compute_ev_norm_by_segment(df, cfg)
+        ev_norm, ev_capped_count = _compute_ev_norm_by_segment(df, cfg)
 
         # Weight degradation if coverage is sparse
-        w_div = list(w)
-        adjustments = {}
-        try:
-            als_cov = float((als_norm > 0).mean())
-            aff_cov = float((lift_norm > 0).mean())
-            thr = float(cfg.whitespace.als_coverage_threshold)
-            if als_cov < thr and w_div[2] > 0:
-                factor = als_cov / max(1e-9, thr)
-                adjustments['als_weight_factor'] = round(factor, 3)
-                w_div[2] *= factor
-            if aff_cov < thr and w_div[1] > 0:
-                factor = aff_cov / max(1e-9, thr)
-                adjustments['aff_weight_factor'] = round(factor, 3)
-                w_div[1] *= factor
-            s = sum(w_div)
-            if s > 0:
-                w_div = [x / s for x in w_div]
-        except Exception:
-            pass
+        w_div, adjustments = _scale_weights_by_coverage(w, als_norm, lift_norm, cfg.whitespace.als_coverage_threshold)
 
         tmp = pd.DataFrame({
             'customer_id': df['customer_id'].values,
@@ -302,6 +310,7 @@ def main(cutoff: str, window_months: int, division: str | None, weights: str | N
             },
             'weights_final': w_div,
             'adjustments': adjustments,
+            'ev_capped_count': int(ev_capped_count),
         })
 
     if not rows:

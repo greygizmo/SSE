@@ -52,11 +52,11 @@
   - Full determinism: stable sort + checksum; seed any randomness. TODO
 
 - Tests
-  - Normalization: verify per‑division percentiles ~ uniform on synthetic data. TODO
+  - Normalization: verify per‑division percentiles ~ uniform on synthetic data. PARTIAL (percentile normalize sanity test)
   - Degradation: drop ALS/lift → scores still produced; explanations fallback present. TODO
-  - EV cap: inject outliers and assert capped; coverage of cap logged. TODO
+  - EV cap: inject outliers and assert capped; coverage of cap logged. PARTIAL (cap sanity test)
   - Bias/diversity: craft skewed distribution; assert warning and diversification option. TODO
-  - Explanation: length <150 chars; contains expected tokens; no sensitive terms. TODO
+  - Explanation: length <150 chars; contains expected tokens; no sensitive terms. PARTIAL (length/tokens test)
   - Determinism: same inputs/config → identical ranked order & checksum. TODO
 
 - Performance & logging
