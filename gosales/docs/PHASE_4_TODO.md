@@ -16,7 +16,7 @@
   - Expected value proxy (EV): segment medians (industry/size/region) blended with global; cap at p95; normalize → `EV_norm`. PARTIAL (segment blend + cap + normalization)
 
 - Normalization & comparability
-  - Implement per‑division percentile normalization (default) with option for pooled recalibration; verify approx. uniform per division. TODO
+  - Implement per‑division percentile normalization (default) with option for pooled recalibration; verify approx. uniform per division. PARTIAL (pooled mode added)
   - Graceful degradation: if a signal missing (e.g., ALS), set to 0, reduce weight if below coverage threshold; log weight adjustments. DONE (dynamic weight scaling by coverage, renormalized)
 
 - Scoring & ranking
@@ -26,7 +26,7 @@
 
 - Business‑rule gating & capacity
   - Apply gating AFTER scoring; log rule counts (kept/removed). PARTIAL (per-rule counts aggregated when columns available)
-  - Capacity slicing modes: top‑N%, per‑rep capacity, hybrid with diversification; configurable and logged. PARTIAL (top_percent + per_rep implemented; bias share check)
+  - Capacity slicing modes: top‑N%, per‑rep capacity, hybrid with diversification; configurable and logged. PARTIAL (top_percent + per_rep + hybrid interleave; bias share check)
   - Cooldown logic: de‑emphasize accounts surfaced recently without action. DONE (config + score scaling when `days_since_last_surfaced` present)
 
 - Explanations

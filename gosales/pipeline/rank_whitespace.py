@@ -309,6 +309,25 @@ def main(cutoff: str, window_months: int, division: str | None, weights: str | N
         return
 
     out = pd.concat(rows, ignore_index=True)
+
+    # Optional pooled normalization across all divisions
+    normalize_mode = normalize or cfg.whitespace.normalize
+    if str(normalize_mode).lower() == 'pooled':
+        try:
+            out['p_icp_pct'] = _percentile_normalize(pd.to_numeric(out['p_icp'], errors='coerce').fillna(0.0))
+            out['lift_norm'] = _percentile_normalize(pd.to_numeric(out['lift_norm'], errors='coerce').fillna(0.0))
+            out['als_norm'] = _percentile_normalize(pd.to_numeric(out['als_norm'], errors='coerce').fillna(0.0))
+            out['EV_norm'] = _percentile_normalize(pd.to_numeric(out['EV_norm'], errors='coerce').fillna(0.0))
+            # Recompute score using base weights
+            out['score'] = (
+                w[0] * out['p_icp_pct'] +
+                w[1] * out['lift_norm'] +
+                w[2] * out['als_norm'] +
+                w[3] * out['EV_norm']
+            )
+        except Exception:
+            pass
+
     # Tie-breakers: higher p_icp, higher EV, then customer_id asc
     out = out.sort_values(['score', 'p_icp', 'EV_norm', 'customer_id'], ascending=[False, False, False, True])
 
@@ -345,6 +364,32 @@ def main(cutoff: str, window_months: int, division: str | None, weights: str | N
             thr = float(np.sort(out['score'].values)[-k])
             selected = out[out['score'] >= thr]
             thresholds_rows.append({'mode': 'top_percent', 'k_percent': cap_percent, 'threshold': thr, 'count': int(len(selected))})
+    elif cap_mode == 'hybrid':
+        # Round-robin interleaving across divisions up to K
+        cap_percent = cfg.modeling.capacity_percent
+        k = max(1, int(len(out) * (cap_percent / 100.0)))
+        per_div_lists = {d: df.sort_values(['score','p_icp','EV_norm','customer_id'], ascending=[False, False, False, True])
+                           for d, df in out.groupby('division')}
+        # Initialize iterators
+        iters = {d: df.itertuples(index=False) for d, df in per_div_lists.items()}
+        picked_rows = []
+        order = list(per_div_lists.keys())
+        idx = 0
+        while len(picked_rows) < k and order:
+            d = order[idx % len(order)]
+            try:
+                row = next(iters[d])
+                picked_rows.append(row)
+            except StopIteration:
+                # Remove exhausted division from order
+                order.pop(idx % len(order))
+                continue
+            idx += 1
+        if picked_rows:
+            selected = pd.DataFrame(picked_rows, columns=out.columns)
+        else:
+            selected = out.head(0)
+        thresholds_rows.append({'mode': 'hybrid', 'k_percent': cap_percent, 'count': int(len(selected))})
 
     # Cross-division bias share at capacity
     shares = (
