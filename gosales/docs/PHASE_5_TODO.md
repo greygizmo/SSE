@@ -1,8 +1,8 @@
 ### Phase 5 To-Do (Forward Validation / Holdout vs playbook)
 
 - Frame & config
-  - Add `validation` section to `gosales/config.yaml`: bootstrap_n, top_k_percents (reuse), capacity_grid, ev_cap_percentile, segment_columns (industry/size/region), ks_threshold, psi_threshold. TODO
-  - Create `gosales/validation/` package with helpers and CLI. TODO
+  - Add `validation` section to `gosales/config.yaml`: bootstrap_n, top_k_percents (reuse), capacity_grid, ev_cap_percentile, segment_columns (industry/size/region), ks_threshold, psi_threshold. DONE
+  - Create `gosales/validation/` package with helpers and CLI. PARTIAL (package + forward CLI skeleton)
 
 - Evaluation frame
   - Load frozen model + calibrator + feature list for a given cutoff. TODO

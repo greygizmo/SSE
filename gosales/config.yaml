@@ -63,4 +63,13 @@ whitespace:
   cooldown_days: 30
   cooldown_factor: 0.75
 
+validation:
+  bootstrap_n: 1000
+  top_k_percents: [5, 10, 20]
+  capacity_grid: [5, 10, 20]
+  ev_cap_percentile: 0.95
+  segment_columns: [industry, industry_sub, region, territory]
+  ks_threshold: 0.15
+  psi_threshold: 0.25
+
 

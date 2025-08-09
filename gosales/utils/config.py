@@ -109,6 +109,19 @@ class Config:
 
     whitespace: 'Config.Whitespace' = field(default_factory=Whitespace)
 
+    # Phase 5 validation configuration
+    @dataclass
+    class Validation:
+        bootstrap_n: int = 1000
+        top_k_percents: list[int] = field(default_factory=lambda: [5, 10, 20])
+        capacity_grid: list[int] = field(default_factory=lambda: [5, 10, 20])
+        ev_cap_percentile: float = 0.95
+        segment_columns: list[str] = field(default_factory=lambda: ["industry", "industry_sub", "region", "territory"]) 
+        ks_threshold: float = 0.15
+        psi_threshold: float = 0.25
+
+    validation: 'Config.Validation' = field(default_factory=Validation)
+
     def to_dict(self) -> Dict[str, Any]:
         def _convert(obj: Any) -> Any:
             if isinstance(obj, Path):
@@ -128,6 +141,7 @@ class Config:
             "features": _convert(self.features),
             "modeling": _convert(self.modeling),
             "whitespace": _convert(self.whitespace),
+            "validation": _convert(self.validation),
         }
 
 
@@ -198,6 +212,7 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
     feat_cfg = cfg_dict.get("features", {})
     mdl_cfg = cfg_dict.get("modeling", {})
     ws_cfg = cfg_dict.get("whitespace", {})
+    val_cfg = cfg_dict.get("validation", {})
 
     cfg = Config(
         paths=_paths_from_dict(paths_dict),
@@ -260,6 +275,15 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
             bias_division_max_share_topN=float(ws_cfg.get("bias_division_max_share_topN", 0.6)),
             cooldown_days=int(ws_cfg.get("cooldown_days", 30)),
             cooldown_factor=float(ws_cfg.get("cooldown_factor", 0.75)),
+        ),
+        validation=Config.Validation(
+            bootstrap_n=int(val_cfg.get("bootstrap_n", 1000)),
+            top_k_percents=list(val_cfg.get("top_k_percents", [5, 10, 20])),
+            capacity_grid=list(val_cfg.get("capacity_grid", [5, 10, 20])),
+            ev_cap_percentile=float(val_cfg.get("ev_cap_percentile", 0.95)),
+            segment_columns=list(val_cfg.get("segment_columns", ["industry", "industry_sub", "region", "territory"])),
+            ks_threshold=float(val_cfg.get("ks_threshold", 0.15)),
+            psi_threshold=float(val_cfg.get("psi_threshold", 0.25)),
         ),
     )
 
