@@ -1,4 +1,4 @@
-## GoSales Engine — ICP & Whitespace (Phases 0–4)
+## GoSales Engine — ICP & Whitespace (Phases 0–6)
 
 A division-focused Ideal Customer Profile (ICP) & Whitespace engine. The pipeline ingests raw sales logs, builds a curated star schema, engineers leakage-safe features at a time cutoff, trains and calibrates per-division models, and produces scores and whitespace opportunities ready for a UI.
 
@@ -42,8 +42,20 @@ A division-focused Ideal Customer Profile (ICP) & Whitespace engine. The pipelin
     - `topk_scenarios.csv` and `topk_scenarios_sorted.csv` (with 95% CIs)
     - `segment_performance.csv` (capture/precision/rev_capture by segment)
     - `metrics.json` (AUC, PR-AUC, Brier, cal-MAE)
-    - `drift.json` (per-feature PSI; KS on `p_hat` train vs holdout if snapshot exists)
+    - `drift.json` (per-feature PSI; KS on `p_hat` train vs holdout if snapshot exists; weighted PSI of EV vs holdout GP)
   - Phase 3 saves `train_scores_<division>_<cutoff>.csv` and `train_feature_sample_<division>_<cutoff>.parquet` to support Phase 5 drift
+
+- **Phase 6 — Configuration, UX, Observability**
+  - Central config precedence (YAML → env → CLI) and stricter validation (unknown keys rejected; sanity checks for weights/thresholds)
+  - Run registry and manifests: every CLI wrapped in a run context that assigns a `run_id`, logs to `outputs/runs/<run_id>/logs.jsonl`, writes `config_resolved.yaml`, and emits a `manifest.json`; appends entries to `outputs/runs/runs.jsonl`
+  - Validation enhancements:
+    - Weighted PSI of EV vs holdout GP (EV deciles) in `drift.json`
+    - `metrics.json` includes `drift_highlights` (top per-feature PSI flags ≥ threshold)
+    - `alerts.json` is written when PSI/KS/calibration thresholds are breached (config‑driven)
+  - Streamlit UI (artifact‑driven):
+    - Metrics, Explainability, Whitespace, and Validation pages read CSV/JSON artifacts directly
+    - Validation shows quality badges (Calibration MAE, PSI(EV vs GP), KS train vs holdout) using thresholds from config and an Alerts section if `alerts.json` exists
+  - Tests: config validation checks, run registry tests, UI badge/alerts utilities, and Phase‑5 drift/calibration/scenario tests are green
 
 ---
 
@@ -73,6 +85,9 @@ $env:PYTHONPATH = "$PWD"; python -m gosales.pipeline.rank_whitespace --cutoff "2
 
 # 8) Phase 5 — Forward validation (example)
 $env:PYTHONPATH = "$PWD"; python -m gosales.validation.forward --division Solidworks --cutoff "2024-12-31" --window-months 6 --capacity-grid "5,10,20" --accounts-per-rep-grid "10,25" --bootstrap 1000 --config gosales/config.yaml
+
+# 9) Launch Streamlit UI (Phase 6)
+$env:PYTHONPATH = "$PWD"; streamlit run gosales/ui/app.py
 ```
 
 ---
@@ -110,6 +125,11 @@ $env:PYTHONPATH = "$PWD"; python -m gosales.validation.forward --division Solidw
 | `gosales/outputs/thresholds_whitespace_<cutoff>.csv` | Capacity thresholds (top‑percent/per‑rep/hybrid) | `gosales/pipeline/rank_whitespace.py`
 | `gosales/outputs/whitespace_metrics_<cutoff>.json` | Capture@K, division shares, stability, coverage, weights | `gosales/pipeline/rank_whitespace.py`
 | `gosales/outputs/whitespace_log_<cutoff>.jsonl` | Structured JSONL logs (division summaries, selection summary) | `gosales/pipeline/rank_whitespace.py`
+| `gosales/outputs/validation/<division>/<cutoff>/metrics.json` | AUC, PR-AUC, Brier, cal-MAE, capture grid, drift, drift_highlights | `gosales/validation/forward.py`
+| `gosales/outputs/validation/<division>/<cutoff>/drift.json` | Per‑feature PSI, KS(p_hat train vs holdout), weighted PSI(EV vs holdout GP), EV_norm PSI | `gosales/validation/forward.py`
+| `gosales/outputs/validation/<division>/<cutoff>/alerts.json` | Alerts when thresholds breached: type, value, threshold | `gosales/validation/forward.py`
+| `gosales/outputs/runs/<run_id>/manifest.json` | Files emitted during a run (paths) | Any CLI via `gosales/ops/run.py`
+| `gosales/outputs/runs/runs.jsonl` | Run registry with metadata and statuses | `gosales/ops/run.py`
 | `gosales/outputs/mb_rules_<division>_<cutoff>.csv` | Market‑basket rule table with SKU lift and support | `gosales/features/engine.py`
 | `gosales/outputs/features_<division>_<cutoff>.parquet` | Feature matrix snapshot | `gosales/features/build.py`
 | `gosales/outputs/feature_catalog_<division>_<cutoff>.csv` | Feature names and coverage | `gosales/features/build.py`
