@@ -88,6 +88,13 @@ $env:PYTHONPATH = "$PWD"; python -m gosales.validation.forward --division Solidw
 
 # 9) Launch Streamlit UI (Phase 6)
 $env:PYTHONPATH = "$PWD"; streamlit run gosales/ui/app.py
+
+# 10) Dry-run mode (Phase 6)
+# Skips heavy compute and records planned artifacts to the run manifest/registry
+$env:PYTHONPATH = "$PWD"; python -m gosales.features.build --division Solidworks --cutoff "2024-06-30" --dry-run
+$env:PYTHONPATH = "$PWD"; python -m gosales.models.train --division Solidworks --cutoffs "2023-12-31" --dry-run
+$env:PYTHONPATH = "$PWD"; python -m gosales.pipeline.rank_whitespace --cutoff "2024-06-30" --dry-run
+$env:PYTHONPATH = "$PWD"; python -m gosales.validation.forward --division Solidworks --cutoff "2024-12-31" --dry-run
 ```
 
 ---
