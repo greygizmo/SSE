@@ -6,6 +6,7 @@ from typing import List, Tuple, Callable
 import click
 import numpy as np
 import pandas as pd
+from sklearn.metrics import roc_auc_score, precision_recall_curve, auc, brier_score_loss
 
 from gosales.utils.config import load_config
 from gosales.utils.paths import OUTPUTS_DIR, MODELS_DIR
@@ -71,6 +72,14 @@ def _calibration_bins(y: np.ndarray, p: np.ndarray, n_bins: int = 10) -> pd.Data
     except Exception:
         bins = pd.cut(df['p'], bins=n_bins, include_lowest=True, duplicates='drop')
     return df.assign(bin=bins).groupby('bin').agg(mean_predicted=('p','mean'), fraction_positives=('y','mean'), count=('y','size')).reset_index(drop=True)
+
+
+def _calibration_mae(bins_df: pd.DataFrame) -> float:
+    if bins_df.empty:
+        return float('nan')
+    diff = (bins_df['mean_predicted'].astype(float) - bins_df['fraction_positives'].astype(float)).abs()
+    w = bins_df['count'].astype(float)
+    return float((diff * w).sum() / max(1e-9, w.sum()))
 
 
 @click.command()
@@ -140,6 +149,12 @@ def main(division: str, cutoff: str, window_months: int, capacity_grid: str, boo
     gains.to_csv(out_dir / 'gains.csv', index=False)
     calib = _calibration_bins(y, p, n_bins=10)
     calib.to_csv(out_dir / 'calibration.csv', index=False)
+    # Core metrics
+    auc_val = float(roc_auc_score(y, p)) if len(np.unique(y)) > 1 else float('nan')
+    pr_prec, pr_rec, _ = precision_recall_curve(y, p)
+    pr_auc_val = float(auc(pr_rec, pr_prec)) if pr_prec is not None else float('nan')
+    brier = float(brier_score_loss(y, p))
+    cal_mae = _calibration_mae(calib)
 
     # Capture@K grid
     topks = [int(x) for x in capacity_grid.split(',') if x]
@@ -197,6 +212,12 @@ def main(division: str, cutoff: str, window_months: int, capacity_grid: str, boo
         'rows': int(len(vf)),
         'capture_grid': {str(s['k_percent']): s['capture'] for s in scenarios},
         'drift': drift,
+        'metrics': {
+            'auc': auc_val,
+            'pr_auc': pr_auc_val,
+            'brier': brier,
+            'cal_mae': cal_mae,
+        },
     }
     (out_dir / 'metrics.json').write_text(pd.Series(metrics).to_json(indent=2), encoding='utf-8')
     logger.info(f"Wrote validation artifacts to {out_dir}")

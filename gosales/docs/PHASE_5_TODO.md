@@ -11,8 +11,8 @@
   - Persist `validation/{division}/{cutoff}/validation_frame.parquet` (deterministic sort). TODO
 
 - Metrics & artifacts
-  - Ranking/business: AUC, PR-AUC, gains by decile, capture@{5,10,20}%, precision@K, revenue-weighted capture, expected GP @ capacity. PARTIAL (gains + capture grid + expected GP norm)
-  - Calibration: Brier, cal-MAE, reliability bins (10–20). PARTIAL (bins)
+  - Ranking/business: AUC, PR-AUC, gains by decile, capture@{5,10,20}%, precision@K, revenue-weighted capture, expected GP @ capacity. PARTIAL (AUC/PR-AUC/gains/capture grid/expected GP norm)
+  - Calibration: Brier, cal-MAE, reliability bins (10–20). PARTIAL (bins + Brier + cal-MAE)
   - Stability by segment (cohort/industry/size/region). TODO
   - Write: `metrics.json`, `gains.csv`, `calibration.csv`, `topk_scenarios.csv`. PARTIAL
 
