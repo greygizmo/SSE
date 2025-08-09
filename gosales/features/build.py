@@ -48,6 +48,23 @@ def main(division: str, cutoff: str, windows: str, config: str, with_eb: bool, w
         base = f"{division.lower()}_{cut}"
         # Deterministic sort
         fm = fm.sort(["customer_id"])
+        # If ALS embeddings available and division centroid similarity needed for Phase 4, compute quick sim feature (optional)
+        try:
+            if cfg.features.use_als_embeddings:
+                # Compute centroid among pre-cutoff owners if possible
+                pdf = fm.to_pandas()
+                als_cols = [c for c in pdf.columns if str(c).startswith('als_f')]
+                if als_cols:
+                    # Approximate ownership with div-scope tx_n
+                    div_cols = [f'rfm__div__tx_n__{w}m' for w in cfg.features.windows_months]
+                    have_cols = [c for c in div_cols if c in pdf.columns]
+                    owned = (pdf[have_cols].sum(axis=1) > 0) if have_cols else pd.Series(False, index=pdf.index)
+                    centroid = pdf.loc[owned, als_cols].mean(axis=0).values if owned.any() else pdf[als_cols].mean(axis=0).values
+                    sim = pdf[als_cols].fillna(0.0).values.dot(centroid)
+                    pdf['als_sim_division'] = sim
+                    fm = pl.from_pandas(pdf)
+        except Exception:
+            pass
         # Stats JSON (coverage + winsor caps if applicable)
         fm_pd = fm.to_pandas()
         stats = {

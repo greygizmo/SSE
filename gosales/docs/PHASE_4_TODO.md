@@ -11,8 +11,8 @@
 
 - Signals
   - p_icp (primary): load Phase‑3 calibrated model per division; score candidates; compute per‑division percentile `p_icp_pct`. PARTIAL (model scoring + pct wired)
-  - Affinity lift: pre‑cutoff market‑basket rules; compute `lift_max`, `lift_mean` per candidate; normalize (percentile/z) → `lift_norm`. PARTIAL (consumes engineered affinity or placeholders)
-  - ALS similarity: reuse Phase‑2 embeddings; compute similarity to target division; quantile‑normalize → `als_norm`; if unavailable, set 0 and flag coverage. PARTIAL (consumes placeholder columns if present)
+  - Affinity lift: pre‑cutoff market‑basket rules; compute `lift_max`, `lift_mean` per candidate; normalize (percentile/z) → `lift_norm`. PARTIAL (engineered affinity wired)
+  - ALS similarity: reuse Phase‑2 embeddings; compute similarity to target division; quantile‑normalize → `als_norm`; if unavailable, set 0 and flag coverage. PARTIAL (ALS fallback via centroid or `als_sim_division` computed in features build)
   - Expected value proxy (EV): segment medians (industry/size/region) blended with global; cap at p95; normalize → `EV_norm`. PARTIAL (segment blend + cap + normalization)
 
 - Normalization & comparability
