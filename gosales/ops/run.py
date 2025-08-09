@@ -41,7 +41,13 @@ def run_context(phase: str) -> Iterator[Dict[str, str]]:
 
     t0 = time.time()
     try:
+        start_ts = datetime.now(timezone.utc).isoformat()
         log({"level": "INFO", "event": "start"})
+        # Append start entry to registry
+        try:
+            append_registry({"started_at": start_ts, "status": "running", "phase": phase, "artifacts_path": str(run_dir)})
+        except Exception:
+            pass
         # Write resolved config snapshot
         try:
             cfg = load_config()
@@ -54,11 +60,14 @@ def run_context(phase: str) -> Iterator[Dict[str, str]]:
         yield {"run_id": run_id, "run_dir": str(run_dir), "log": log, "write_manifest": write_manifest, "append_registry": append_registry}
         dt = int((time.time() - t0) * 1000)
         log({"level": "INFO", "event": "finish", "duration_ms": dt})
-        append_registry({"started_at": None, "finished_at": datetime.now(timezone.utc).isoformat(), "status": "finished", "artifacts_path": str(run_dir)})
+        append_registry({"started_at": start_ts, "finished_at": datetime.now(timezone.utc).isoformat(), "status": "finished", "phase": phase, "artifacts_path": str(run_dir)})
     except Exception as e:
         dt = int((time.time() - t0) * 1000)
         log({"level": "ERROR", "event": "exception", "err": str(e), "duration_ms": dt})
-        append_registry({"started_at": None, "finished_at": datetime.now(timezone.utc).isoformat(), "status": "error", "artifacts_path": str(run_dir), "error": str(e)})
+        try:
+            append_registry({"started_at": start_ts, "finished_at": datetime.now(timezone.utc).isoformat(), "status": "error", "phase": phase, "artifacts_path": str(run_dir), "error": str(e)})
+        except Exception:
+            pass
         raise
 
 
