@@ -13,6 +13,7 @@ from gosales.utils.paths import OUTPUTS_DIR, MODELS_DIR
 from gosales.utils.logger import get_logger
 from gosales.pipeline.rank_whitespace import _percentile_normalize
 from gosales.validation.utils import bootstrap_ci, psi, ks_statistic
+from gosales.etl.sku_map import get_sku_mapping
 
 
 logger = get_logger(__name__)
@@ -102,6 +103,7 @@ def main(division: str, cutoff: str, window_months: int, capacity_grid: str, boo
         window_end = cutoff_dt + pd.DateOffset(months=window_months)
         holdout_dir = (DATA_DIR / 'holdout')
         buyers = None
+        holdout_gp_map = None
         if holdout_dir.exists():
             # Load and concatenate CSVs in holdout directory
             parts = []
@@ -125,6 +127,23 @@ def main(division: str, cutoff: str, window_months: int, capacity_grid: str, boo
                     mask_div = pd.Series(True, index=ho.index)
                 cust_col = 'CustomerId' if 'CustomerId' in ho.columns else 'customer_id'
                 buyers = pd.to_numeric(ho.loc[mask_window & mask_div, cust_col], errors='coerce').dropna().astype('Int64').unique()
+
+                # Compute realized GP for target division using SKU mapping (sum of division GP columns)
+                try:
+                    mapping = get_sku_mapping()
+                    div_cols = [gp for gp, meta in mapping.items() if meta.get('division', '').strip().lower() == division.lower()]
+                    # Some datasets have missing GP columns; keep existing ones only
+                    div_cols = [c for c in div_cols if c in ho.columns]
+                    if div_cols:
+                        gp_df = ho.loc[mask_window, [cust_col] + div_cols].copy()
+                        # Coerce GP cols to numeric
+                        for c in div_cols:
+                            gp_df[c] = pd.to_numeric(gp_df[c], errors='coerce').fillna(0.0)
+                        gp_df['holdout_gp'] = gp_df[div_cols].sum(axis=1)
+                        holdout_gp_map = gp_df.groupby(cust_col)['holdout_gp'].sum().reset_index()
+                        holdout_gp_map[cust_col] = pd.to_numeric(holdout_gp_map[cust_col], errors='coerce').astype('Int64')
+                except Exception:
+                    holdout_gp_map = None
         if buyers is not None:
             labels_df = pd.DataFrame({'customer_id': buyers, 'holdout_bought': 1})
             vf['customer_id'] = pd.to_numeric(vf['customer_id'], errors='coerce').astype('Int64')
@@ -133,6 +152,10 @@ def main(division: str, cutoff: str, window_months: int, capacity_grid: str, boo
             if 'bought_in_division' in vf.columns:
                 vf.drop(columns=['bought_in_division'], inplace=True)
             vf.rename(columns={'holdout_bought': 'bought_in_division'}, inplace=True)
+            # Join realized GP if computed
+            if holdout_gp_map is not None:
+                vf = vf.merge(holdout_gp_map.rename(columns={cust_col: 'customer_id'}), on='customer_id', how='left')
+                vf['holdout_gp'] = vf['holdout_gp'].fillna(0.0)
     except Exception:
         pass
 
@@ -159,13 +182,16 @@ def main(division: str, cutoff: str, window_months: int, capacity_grid: str, boo
     # Capture@K grid
     topks = [int(x) for x in capacity_grid.split(',') if x]
     scenarios = []
+    total_realized_gp = float(vf.get('holdout_gp', pd.Series(0.0, index=vf.index)).sum())
     for k in topks:
         kk = max(1, int(len(vf) * (k / 100.0)))
         topk = vf.nlargest(kk, ['p_hat','EV_norm','customer_id'])
         capture = float(topk['bought_in_division'].sum() / max(1, vf['bought_in_division'].sum())) if 'bought_in_division' in vf.columns else None
         precision = float(topk['bought_in_division'].mean()) if 'bought_in_division' in vf.columns else None
         exp_gp = float((topk['EV_norm']).sum())
-        scenarios.append({'k_percent': k, 'contacts': int(kk), 'capture': capture, 'precision': precision, 'expected_gp_norm': exp_gp})
+        realized_gp = float(topk.get('holdout_gp', pd.Series(0.0, index=topk.index)).sum())
+        rev_capture = float(realized_gp / max(1e-9, total_realized_gp)) if total_realized_gp > 0 else None
+        scenarios.append({'k_percent': k, 'contacts': int(kk), 'capture': capture, 'precision': precision, 'expected_gp_norm': exp_gp, 'realized_gp': realized_gp, 'rev_capture': rev_capture})
     scen_df = pd.DataFrame(scenarios)
     # Bootstrap CIs for capture and precision
     try:
@@ -182,14 +208,36 @@ def main(division: str, cutoff: str, window_months: int, capacity_grid: str, boo
             kk = max(1, int(len(df_in) * (k / 100.0)))
             topk = df_in.nlargest(kk, ['p_hat','EV_norm','customer_id'])
             return float(topk['bought_in_division'].mean())
+        def rev_cap_at_k(df_in: pd.DataFrame, k: int) -> float:
+            if df_in.empty:
+                return 0.0
+            kk = max(1, int(len(df_in) * (k / 100.0)))
+            topk = df_in.nlargest(kk, ['p_hat','EV_norm','customer_id'])
+            total_gp = float(df_in.get('holdout_gp', pd.Series(0.0, index=df_in.index)).sum())
+            top_gp = float(topk.get('holdout_gp', pd.Series(0.0, index=topk.index)).sum())
+            if total_gp <= 0:
+                return 0.0
+            return float(top_gp / total_gp)
+        def realized_gp_at_k(df_in: pd.DataFrame, k: int) -> float:
+            if df_in.empty:
+                return 0.0
+            kk = max(1, int(len(df_in) * (k / 100.0)))
+            topk = df_in.nlargest(kk, ['p_hat','EV_norm','customer_id'])
+            return float(topk.get('holdout_gp', pd.Series(0.0, index=topk.index)).sum())
         for i, row in scen_df.iterrows():
             k = int(row['k_percent'])
             lo_c, hi_c = bootstrap_ci(lambda df_in, kk=k: cap_at_k(df_in, kk), vf, n=n_boot, seed=cfg.modeling.seed)
             lo_p, hi_p = bootstrap_ci(lambda df_in, kk=k: prec_at_k(df_in, kk), vf, n=n_boot, seed=cfg.modeling.seed)
+            lo_rc, hi_rc = bootstrap_ci(lambda df_in, kk=k: rev_cap_at_k(df_in, kk), vf, n=n_boot, seed=cfg.modeling.seed)
+            lo_rg, hi_rg = bootstrap_ci(lambda df_in, kk=k: realized_gp_at_k(df_in, kk), vf, n=n_boot, seed=cfg.modeling.seed)
             scen_df.loc[i, 'capture_ci_lo'] = lo_c
             scen_df.loc[i, 'capture_ci_hi'] = hi_c
             scen_df.loc[i, 'precision_ci_lo'] = lo_p
             scen_df.loc[i, 'precision_ci_hi'] = hi_p
+            scen_df.loc[i, 'rev_capture_ci_lo'] = lo_rc
+            scen_df.loc[i, 'rev_capture_ci_hi'] = hi_rc
+            scen_df.loc[i, 'realized_gp_ci_lo'] = lo_rg
+            scen_df.loc[i, 'realized_gp_ci_hi'] = hi_rg
     except Exception:
         pass
     scen_df.to_csv(out_dir / 'topk_scenarios.csv', index=False)

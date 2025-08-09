@@ -26,7 +26,7 @@
   - Write `drift.json`. TODO
 
 - Scenarios (capacity & thresholds)
-  - Grid over capacity modes (top-N% and per-rep) and percents; compute contacts, precision, recall (capture), expected_GP, realized_GP (historical), 95% CI. TODO
+  - Grid over capacity modes (top-N% and per-rep) and percents; compute contacts, precision, recall (capture), expected_GP, realized_GP (historical), 95% CI. PARTIAL (top-% mode; capture/precision/rev_capture/realized_GP with CIs)
   - Rank by expected GP if calibration is strong; otherwise by capture@K. TODO
 
 - CLI
