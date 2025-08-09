@@ -1,4 +1,4 @@
-## GoSales Engine — ICP & Whitespace (Phases 0–3)
+## GoSales Engine — ICP & Whitespace (Phases 0–4)
 
 A division-focused Ideal Customer Profile (ICP) & Whitespace engine. The pipeline ingests raw sales logs, builds a curated star schema, engineers leakage-safe features at a time cutoff, trains and calibrates per-division models, and produces scores and whitespace opportunities ready for a UI.
 
@@ -27,6 +27,14 @@ A division-focused Ideal Customer Profile (ICP) & Whitespace engine. The pipelin
   - Artifacts: `metrics.json`, `gains.csv`, `calibration.csv`, `thresholds.csv`, `model_card.json`, SHAP summaries (guarded if SHAP not installed)
   - Guardrails: degenerate classifier check, deterministic LGBM, early stopping, overfit-gap guard, capped `scale_pos_weight`
 
+- **Phase 4 — Whitespace Ranking / Next‑Best‑Action**
+  - Signals: calibrated probability (`p_icp` + per‑division percentile), market‑basket affinity (`mb_lift_max`, `mb_lift_mean`), ALS similarity (explicit or embedding‑centroid), expected value proxy (segment‑blended and capped)
+  - Normalization: per‑division percentile (default) or pooled across divisions
+  - Blending: configurable weights (default `0.60,0.20,0.10,0.10`) → single actionable score
+  - Capacity: top‑percent, per‑rep, or hybrid diversification (round‑robin interleave)
+  - Gating: ownership, region, recent contact, open deal; cooldown de‑emphasis; structured JSONL logs
+  - Artifacts: `whitespace_<cutoff>.csv`, `whitespace_explanations_<cutoff>.csv`, `thresholds_whitespace_<cutoff>.csv`, `whitespace_metrics_<cutoff>.json`, `whitespace_log_<cutoff>.jsonl`, `mb_rules_<division>_<cutoff>.csv`
+
 ---
 
 ### Quick Start (Windows/PowerShell)
@@ -49,6 +57,9 @@ $env:PYTHONPATH = "$PWD"; python -m gosales.models.train --division Solidworks -
 
 # 6) Score all available division models
 $env:PYTHONPATH = "$PWD"; python gosales/pipeline/score_all.py
+
+# 7) Phase 4 — Rank whitespace (example)
+$env:PYTHONPATH = "$PWD"; python -m gosales.pipeline.rank_whitespace --cutoff "2024-06-30" --window-months 6 --normalize percentile --capacity-mode top_percent --config gosales/config.yaml
 ```
 
 ---
@@ -81,6 +92,12 @@ $env:PYTHONPATH = "$PWD"; python gosales/pipeline/score_all.py
 | `gosales/models/<division>_model/model.pkl` | Pickled calibrated classifier | `gosales/models/train.py`
 | `gosales/models/<division>_model/feature_list.json` | Ordered list of features used | `gosales/models/train.py`
 | `gosales/outputs/coef_<division>.csv` | Logistic Regression coefficients (if LR selected) | `gosales/models/train.py`
+| `gosales/outputs/whitespace_<cutoff>.csv` | Ranked opportunities with `customer_id, division, score, p_icp, p_icp_pct, lift_norm, als_norm, EV_norm, nba_reason` | `gosales/pipeline/rank_whitespace.py`
+| `gosales/outputs/whitespace_explanations_<cutoff>.csv` | Explanations with key drivers for each candidate | `gosales/pipeline/rank_whitespace.py`
+| `gosales/outputs/thresholds_whitespace_<cutoff>.csv` | Capacity thresholds (top‑percent/per‑rep/hybrid) | `gosales/pipeline/rank_whitespace.py`
+| `gosales/outputs/whitespace_metrics_<cutoff>.json` | Capture@K, division shares, stability, coverage, weights | `gosales/pipeline/rank_whitespace.py`
+| `gosales/outputs/whitespace_log_<cutoff>.jsonl` | Structured JSONL logs (division summaries, selection summary) | `gosales/pipeline/rank_whitespace.py`
+| `gosales/outputs/mb_rules_<division>_<cutoff>.csv` | Market‑basket rule table with SKU lift and support | `gosales/features/engine.py`
 | `gosales/outputs/features_<division>_<cutoff>.parquet` | Feature matrix snapshot | `gosales/features/build.py`
 | `gosales/outputs/feature_catalog_<division>_<cutoff>.csv` | Feature names and coverage | `gosales/features/build.py`
 | `gosales/outputs/feature_stats_<division>_<cutoff>.json` | Coverage, winsor caps, checksum | `gosales/features/build.py`
@@ -108,6 +125,12 @@ $env:PYTHONPATH = "$PWD"; python gosales/pipeline/score_all.py
   - Calibration bins + weighted MAE sanity on synthetic logits
   - Determinism for calibrated LR with fixed seed
   - Leakage probe and guard (name- and AUC-based feature dropping)
+- Phase 4:
+  - Normalization sanity and pooled/per‑division behavior
+  - Weight scaling by coverage (ALS/affinity) and monotonic affinity
+  - ALS fallback similarity via embedding centroid
+  - Bias share computation and diversification capacity options
+  - Deterministic ranking order; Capture@K sanity
 
 ---
 
