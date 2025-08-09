@@ -5,12 +5,34 @@ import pandas as pd
 import streamlit as st
 
 from gosales.utils.paths import OUTPUTS_DIR
+from gosales.ui.utils import discover_validation_runs, compute_validation_badges, load_thresholds, load_alerts
 
 
 st.set_page_config(page_title="GoSales Engine", layout="wide")
 st.title("GoSales Engine – Artifact Explorer")
 
-tab = st.sidebar.radio("Page", ["Metrics", "Explainability", "Whitespace", "Validation"], index=0)
+# Simple cache helpers
+@st.cache_data(show_spinner=False)
+def _read_jsonl(path: Path) -> list[dict]:
+    try:
+        return [json.loads(line) for line in path.read_text(encoding='utf-8').splitlines() if line.strip()]
+    except Exception:
+        return []
+
+@st.cache_data(show_spinner=False)
+def _read_text(path: Path) -> str:
+    try:
+        return path.read_text(encoding='utf-8')
+    except Exception:
+        return ""
+
+# Sidebar controls
+with st.sidebar:
+    colr1, colr2 = st.columns([3,1])
+    colr1.write(":memo: Navigation")
+    if colr2.button("Refresh", help="Clear cached artifacts and reload"):
+        st.cache_data.clear()
+    tab = st.radio("Page", ["Metrics", "Explainability", "Whitespace", "Validation", "Runs"], index=0)
 
 def list_validation_runs():
     base = OUTPUTS_DIR / 'validation'
@@ -59,13 +81,42 @@ elif tab == "Whitespace":
 
 elif tab == "Validation":
     st.header("Forward Validation (Phase 5)")
-    runs = list_validation_runs()
+    runs = discover_validation_runs()
     if not runs:
         st.info("No validation runs found.")
     else:
         labels = [f"{div} @ {cut}" for div, cut, _ in runs]
         sel = st.selectbox("Pick run", options=list(range(len(runs))), format_func=lambda i: labels[i])
         _, _, path = runs[sel]
+        thr = load_thresholds()
+        # Badges
+        st.subheader("Quality Badges")
+        badges = compute_validation_badges(path, thresholds=thr)
+        b1, b2, b3 = st.columns(3)
+        def _badge(col, title, item):
+            status = item.get('status', 'unknown')
+            value = item.get('value', None)
+            threshold = item.get('threshold', None)
+            color = '#60c460' if status == 'ok' else ('#e06666' if status == 'alert' else '#bdbdbd')
+            body = f"{value:.3f}" if isinstance(value, (int, float)) else "—"
+            thr_txt = f"<span style='font-size:12px;color:#666;'>thr {threshold:.3f}</span>" if isinstance(threshold, (int, float)) else ""
+            col.markdown(f"""
+                <div style='border-left:6px solid {color}; padding:8px; border-radius:4px; background:#f7f7f7;'>
+                    <div style='font-weight:600;'>{title}</div>
+                    <div style='font-size:20px'>{body}</div>
+                    {thr_txt}
+                </div>
+            """, unsafe_allow_html=True)
+        _badge(b1, 'Calibration MAE', badges['cal_mae'])
+        _badge(b2, 'PSI(EV vs GP)', badges['psi_ev_vs_gp'])
+        _badge(b3, 'KS(train vs holdout)', badges['ks_phat_train_holdout'])
+
+        # Alerts
+        alerts = load_alerts(path)
+        if alerts:
+            with st.expander("Alerts"):
+                for a in alerts:
+                    st.warning(f"{a.get('type')}: value={a.get('value')} threshold={a.get('threshold')}")
         col1, col2 = st.columns(2)
         # Metrics
         metrics_path = path / 'metrics.json'
@@ -93,6 +144,39 @@ elif tab == "Validation":
             fpath = path / fname
             if fpath.exists():
                 st.download_button(label=f"Download {fname}", data=fpath.read_bytes(), file_name=fname)
+
+elif tab == "Runs":
+    st.header("Runs (Registry)")
+    reg_path = OUTPUTS_DIR / 'runs' / 'runs.jsonl'
+    if not reg_path.exists():
+        st.info("No runs registry found at outputs/runs/runs.jsonl")
+    else:
+        rows = _read_jsonl(reg_path)
+        if not rows:
+            st.info("Runs registry is empty.")
+        else:
+            df = pd.DataFrame(rows)
+            df = df.sort_values('run_id', ascending=False)
+            st.dataframe(df, use_container_width=True, height=300)
+            idx = st.number_input("Select row index", min_value=0, max_value=max(0, len(df)-1), value=0, step=1)
+            sel = df.iloc[int(idx)]
+            st.subheader(f"Run {sel.get('run_id','?')} — {sel.get('phase','?')} [{sel.get('status','?')}]")
+            run_dir = Path(sel.get('artifacts_path', OUTPUTS_DIR / 'runs' / str(sel.get('run_id',''))))
+            man = run_dir / 'manifest.json'
+            cfg = run_dir / 'config_resolved.yaml'
+            c1, c2 = st.columns(2)
+            with c1:
+                st.caption("Manifest (planned/emitted artifacts)")
+                if man.exists():
+                    st.code(_read_text(man))
+                else:
+                    st.info("manifest.json not found")
+            with c2:
+                st.caption("Resolved Config Snapshot")
+                if cfg.exists():
+                    st.code(_read_text(cfg))
+                else:
+                    st.info("config_resolved.yaml not found")
 import streamlit as st
 import pandas as pd
 import json
