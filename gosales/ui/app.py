@@ -191,6 +191,17 @@ elif tab == "Explainability":
         sg = OUTPUTS_DIR / f"shap_global_{div.lower()}.csv"
         ss = OUTPUTS_DIR / f"shap_sample_{div.lower()}.csv"
         cf = OUTPUTS_DIR / f"coef_{div.lower()}.csv"
+        # Feature catalog and stats (show latest by cutoff if multiple)
+        cat_candidates = sorted(OUTPUTS_DIR.glob(f"feature_catalog_{div.lower()}_*.csv"), reverse=True)
+        stats_candidates = sorted(OUTPUTS_DIR.glob(f"feature_stats_{div.lower()}_*.json"), reverse=True)
+        if cat_candidates:
+            st.subheader("Feature Catalog")
+            cat = _read_csv(cat_candidates[0])
+            st.dataframe(cat, use_container_width=True, height=320)
+            st.download_button("Download feature catalog", data=cat.to_csv(index=False), file_name=cat_candidates[0].name)
+        if stats_candidates:
+            st.subheader("Feature Stats")
+            st.code(_read_text(stats_candidates[0]))
         if sg.exists():
             st.subheader("SHAP Global")
             sg_df = _read_csv(sg)
@@ -206,10 +217,14 @@ elif tab == "Explainability":
                 pass
         if ss.exists():
             st.subheader("SHAP Sample")
-            st.dataframe(_read_csv(ss).head(200), use_container_width=True, height=320)
+            ss_df = _read_csv(ss).head(200)
+            st.dataframe(ss_df, use_container_width=True, height=320)
+            st.download_button("Download SHAP sample", data=ss_df.to_csv(index=False), file_name=ss.name)
         if cf.exists():
             st.subheader("Logistic Regression Coefficients")
-            st.dataframe(_read_csv(cf), use_container_width=True, height=320)
+            cf_df = _read_csv(cf)
+            st.dataframe(cf_df, use_container_width=True, height=320)
+            st.download_button("Download coefficients", data=cf_df.to_csv(index=False), file_name=cf.name)
         if not any(p.exists() for p in [sg, ss, cf]):
             st.info("No explainability artifacts found for this division.")
 

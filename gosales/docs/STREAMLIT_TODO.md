@@ -27,8 +27,9 @@ Metrics (Phase 3)
 Explainability (Phase 3)
 - [x] SHAP global CSV (if present): sortable table and bar chart of mean-abs SHAP
 - [x] LR coefficients CSV (if present): sortable table
-- [ ] SHAP sample CSV (if present): top N rows with download
+- [x] SHAP sample CSV (if present): top N rows with download
 - [ ] Helper text/tooltips for interpretation
+ - [x] Feature Catalog and Feature Stats (latest cutoff)
 
 Whitespace (Phase 4)
 - [x] Ranked table from `whitespace_<cutoff>.csv` with column filters/search
