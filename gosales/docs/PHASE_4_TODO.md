@@ -27,7 +27,7 @@
 - Business‑rule gating & capacity
   - Apply gating AFTER scoring; log rule counts (kept/removed). PARTIAL (per-rule counts aggregated when columns available)
   - Capacity slicing modes: top‑N%, per‑rep capacity, hybrid with diversification; configurable and logged. PARTIAL (top_percent + per_rep implemented; bias share check)
-  - Cooldown logic: de‑emphasize accounts surfaced recently without action. TODO
+  - Cooldown logic: de‑emphasize accounts surfaced recently without action. DONE (config + score scaling when `days_since_last_surfaced` present)
 
 - Explanations
   - Generate short human‑readable `nba_reason` (<150 chars) using 1–2 strongest drivers (e.g., high p, strong affinity, EV ~$Xk). PARTIAL (basic template)

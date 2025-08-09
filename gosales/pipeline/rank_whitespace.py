@@ -311,6 +311,16 @@ def main(cutoff: str, window_months: int, division: str | None, weights: str | N
     out = pd.concat(rows, ignore_index=True)
     # Tie-breakers: higher p_icp, higher EV, then customer_id asc
     out = out.sort_values(['score', 'p_icp', 'EV_norm', 'customer_id'], ascending=[False, False, False, True])
+
+    # Cooldown de-emphasis: reduce score for recently surfaced accounts if such column exists
+    try:
+        cd_days = int(cfg.whitespace.cooldown_days)
+        cd_factor = float(cfg.whitespace.cooldown_factor)
+        if 'days_since_last_surfaced' in out.columns and cd_days > 0 and 0.0 < cd_factor < 1.0:
+            mask_cd = pd.to_numeric(out['days_since_last_surfaced'], errors='coerce').fillna(1e9) < cd_days
+            out.loc[mask_cd, 'score'] = out.loc[mask_cd, 'score'] * cd_factor
+    except Exception:
+        pass
     # Capacity slicing (top_percent mode)
     cap_mode = capacity_mode or cfg.whitespace.capacity_mode
     thresholds_rows = []

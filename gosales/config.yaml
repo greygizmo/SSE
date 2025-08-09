@@ -60,5 +60,7 @@ whitespace:
   ev_cap_percentile: 0.95
   als_coverage_threshold: 0.30
   bias_division_max_share_topN: 0.6
+  cooldown_days: 30
+  cooldown_factor: 0.75
 
 

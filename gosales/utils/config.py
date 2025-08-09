@@ -104,6 +104,8 @@ class Config:
         ev_cap_percentile: float = 0.95
         als_coverage_threshold: float = 0.30
         bias_division_max_share_topN: float = 0.6
+        cooldown_days: int = 30
+        cooldown_factor: float = 0.75
 
     whitespace: 'Config.Whitespace' = field(default_factory=Whitespace)
 
@@ -256,6 +258,8 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
             ev_cap_percentile=float(ws_cfg.get("ev_cap_percentile", 0.95)),
             als_coverage_threshold=float(ws_cfg.get("als_coverage_threshold", 0.30)),
             bias_division_max_share_topN=float(ws_cfg.get("bias_division_max_share_topN", 0.6)),
+            cooldown_days=int(ws_cfg.get("cooldown_days", 30)),
+            cooldown_factor=float(ws_cfg.get("cooldown_factor", 0.75)),
         ),
     )
 
