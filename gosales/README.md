@@ -70,6 +70,9 @@ $env:PYTHONPATH = "$PWD"; python gosales/pipeline/score_all.py
 
 # 7) Phase 4 — Rank whitespace (example)
 $env:PYTHONPATH = "$PWD"; python -m gosales.pipeline.rank_whitespace --cutoff "2024-06-30" --window-months 6 --normalize percentile --capacity-mode top_percent --config gosales/config.yaml
+
+# 8) Phase 5 — Forward validation (example)
+$env:PYTHONPATH = "$PWD"; python -m gosales.validation.forward --division Solidworks --cutoff "2024-12-31" --window-months 6 --capacity-grid "5,10,20" --accounts-per-rep-grid "10,25" --bootstrap 1000 --config gosales/config.yaml
 ```
 
 ---
