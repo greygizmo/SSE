@@ -61,7 +61,7 @@
 
 - Performance & logging
   - Batched scoring I/O; vectorized normalization; memory‑safe joins. TODO
-  - Structured logs with rule counts, weight adjustments, capacity outcomes. PARTIAL (elig counts, coverage, final weights in metrics)
+  - Structured logs with rule counts, weight adjustments, capacity outcomes. DONE (division summaries + selection summary JSONL)
 
 - Documentation
   - Update README: Phase 4 overview, CLI usage, artifacts list, glossary entries. TODO

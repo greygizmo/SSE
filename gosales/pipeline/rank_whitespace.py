@@ -248,6 +248,7 @@ def main(cutoff: str, window_months: int, division: str | None, weights: str | N
 
     rows = []
     metrics_div: list[dict] = []
+    log_entries: list[dict] = []
     for div in divisions:
         # For now, reuse the latest features parquet for the cutoff
         feat_path = OUTPUTS_DIR / f"features_{div.lower()}_{cutoff}.parquet"
@@ -301,7 +302,7 @@ def main(cutoff: str, window_months: int, division: str | None, weights: str | N
         # Explanations
         tmp['nba_reason'] = tmp.apply(_explain, axis=1)
         rows.append(tmp)
-        metrics_div.append({
+        div_entry = {
             'division': div,
             'eligibility_counts': elig_counts,
             'coverage': {
@@ -311,7 +312,9 @@ def main(cutoff: str, window_months: int, division: str | None, weights: str | N
             'weights_final': w_div,
             'adjustments': adjustments,
             'ev_capped_count': int(ev_capped_count),
-        })
+        }
+        metrics_div.append(div_entry)
+        log_entries.append({"type": "division_summary", **div_entry})
 
     if not rows:
         logger.warning("No ranked rows produced")
@@ -425,6 +428,26 @@ def main(cutoff: str, window_months: int, division: str | None, weights: str | N
     except Exception:
         pass
 
+    # Stability vs prior run (Jaccard of top-N selections if previous CSV exists)
+    stability = None
+    try:
+        prev_files = sorted([p for p in OUTPUTS_DIR.glob('whitespace_*.csv') if cutoff not in p.name])
+        if prev_files:
+            prev_path = prev_files[-1]
+            prev = pd.read_csv(prev_path)
+            cap_percent = cfg.modeling.capacity_percent
+            kk = max(1, int(len(out) * (cap_percent / 100.0)))
+            cur_top = out.nlargest(kk, ['score','p_icp','EV_norm','customer_id'])[['customer_id','division']]
+            prev_kk = max(1, int(len(prev) * (cap_percent / 100.0)))
+            prev_top = prev.nlargest(prev_kk, ['score','p_icp','EV_norm','customer_id'])[['customer_id','division']]
+            cur_set = set(map(tuple, cur_top.to_records(index=False)))
+            prev_set = set(map(tuple, prev_top.to_records(index=False)))
+            inter = len(cur_set & prev_set)
+            union = max(1, len(cur_set | prev_set))
+            stability = float(inter / union)
+    except Exception:
+        stability = None
+
     metrics = {
         'cutoff': cutoff,
         'weights': w,
@@ -435,6 +458,8 @@ def main(cutoff: str, window_months: int, division: str | None, weights: str | N
         'selected_rows': int(len(selected)),
         'division_shares_topN': share_map,
         'capture_at_k': capture_at_k,
+        'stability_jaccard_topN': stability,
+        'ev_capped_total': int(sum(d.get('ev_capped_count', 0) for d in metrics_div)),
         'by_division': metrics_div,
     }
     out_path = OUTPUTS_DIR / f"whitespace_{cutoff}.csv"
@@ -446,6 +471,21 @@ def main(cutoff: str, window_months: int, division: str | None, weights: str | N
     pd.DataFrame(thresholds_rows).to_csv(OUTPUTS_DIR / f"thresholds_whitespace_{cutoff}.csv", index=False)
     # Metrics export
     (OUTPUTS_DIR / f"whitespace_metrics_{cutoff}.json").write_text(pd.Series(metrics).to_json(indent=2), encoding='utf-8')
+    # Structured log export
+    try:
+        log_entries.append({
+            "type": "selection_summary",
+            "capacity_mode": cap_mode,
+            "selected_rows": int(len(selected)),
+            "division_shares_topN": share_map,
+            "stability_jaccard_topN": stability,
+        })
+        log_path = OUTPUTS_DIR / f"whitespace_log_{cutoff}.jsonl"
+        with open(log_path, 'w', encoding='utf-8') as f:
+            for entry in log_entries:
+                f.write(json.dumps(entry) + "\n")
+    except Exception:
+        pass
     logger.info(f"Wrote {out_path} with {len(out)} rows; selected {len(selected)} for capacity mode {cap_mode}")
 
 
