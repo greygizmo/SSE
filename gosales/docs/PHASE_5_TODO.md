@@ -20,10 +20,10 @@
   - Block bootstrap by customer (seeded) producing 95% CIs for capture@K, revenue capture, Brier, cal-MAE, precision@K. TODO
 
 - Drift diagnostics
-  - Feature drift PSI between train (latest training frame) and holdout; flag PSI > cfg.threshold. PARTIAL (PSI utility; proxy wired)
-  - Score drift KS on `p_hat` (train vs holdout); flag KS > cfg.threshold. TODO
+  - Feature drift PSI between train (latest training frame) and holdout; flag PSI > cfg.threshold. PARTIAL (PSI utility; proxy wired; drift.json writes EV vs holdout GP PSI)
+  - Score drift KS on `p_hat` (train vs holdout); flag KS > cfg.threshold. PARTIAL (KS(p_hat) pos vs neg as proxy)
   - Optional: SHAP drift if LGBM available and SHAP installed. TODO
-  - Write `drift.json`. TODO
+  - Write `drift.json`. DONE (basic PSI/KS proxies)
 
 - Scenarios (capacity & thresholds)
   - Grid over capacity modes (top-N% and per-rep) and percents; compute contacts, precision, recall (capture), expected_GP, realized_GP (historical), 95% CI. PARTIAL (top-% + per-rep + hybrid-segment; capture/precision/rev_capture/realized_GP with CIs)

@@ -363,6 +363,20 @@ def main(division: str, cutoff: str, window_months: int, capacity_grid: str, acc
             pd.DataFrame(seg_rows).to_csv(out_dir / 'segment_performance.csv', index=False)
     except Exception:
         pass
+
+    # Drift JSON: PSI (EV vs holdout GP) and KS(p_hat positives vs negatives)
+    try:
+        drift_report = {}
+        ev_raw = vf.get('rfm__all__gp_sum__12m', pd.Series(dtype=float))
+        hold_gp = vf.get('holdout_gp', pd.Series(dtype=float))
+        drift_report['psi_ev_vs_holdout_gp'] = psi(ev_raw, hold_gp)
+        if 'bought_in_division' in vf.columns:
+            pos_p = pd.Series(p)[vf['bought_in_division'] == 1]
+            neg_p = pd.Series(p)[vf['bought_in_division'] == 0]
+            drift_report['ks_p_hat_pos_vs_neg'] = ks_statistic(pos_p, neg_p)
+        (out_dir / 'drift.json').write_text(pd.Series(drift_report).to_json(indent=2), encoding='utf-8')
+    except Exception:
+        pass
     logger.info(f"Wrote validation artifacts to {out_dir}")
 
 
