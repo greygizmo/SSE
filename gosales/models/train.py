@@ -31,6 +31,7 @@ from gosales.models.metrics import (
     calibration_bins,
     calibration_mae,
 )
+from gosales.ops.run import run_context
 
 
 logger = get_logger(__name__)
@@ -89,16 +90,18 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
     model_names = [m.strip() for m in models.split(",") if m.strip()]
     cal_methods = [c.strip() for c in calibration.split(",") if c.strip()]
 
+    artifacts: dict[str, str] = {}
     results = []
-    for cutoff in cut_list:
-        fm = create_feature_matrix(engine, division, cutoff, window_months)
-        if fm.is_empty():
-            logger.warning(f"Empty feature matrix for cutoff {cutoff}")
-            continue
-        df = fm.to_pandas()
-        y = df['bought_in_division'].astype(int).values
-        X = df.drop(columns=['customer_id','bought_in_division'])
-        X_train, X_valid, y_train, y_valid = _train_test_split_time_aware(X, y, cfg.modeling.seed)
+    with run_context("phase3_train") as ctx:
+        for cutoff in cut_list:
+            fm = create_feature_matrix(engine, division, cutoff, window_months)
+            if fm.is_empty():
+                logger.warning(f"Empty feature matrix for cutoff {cutoff}")
+                continue
+            df = fm.to_pandas()
+            y = df['bought_in_division'].astype(int).values
+            X = df.drop(columns=['customer_id','bought_in_division'])
+            X_train, X_valid, y_train, y_valid = _train_test_split_time_aware(X, y, cfg.modeling.seed)
 
         # Baseline LR (elastic-net via saga)
         if 'logreg' in model_names:
@@ -248,10 +251,12 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
     try:
         import joblib
         joblib.dump(model, out_dir / "model.pkl")
+        artifacts["model.pkl"] = str(out_dir / "model.pkl")
     except Exception:
         pass
     with open(out_dir / "feature_list.json", "w", encoding="utf-8") as f:
         json.dump(feature_names, f)
+    artifacts["feature_list.json"] = str(out_dir / "feature_list.json")
     # Final predictions and guardrails
     try:
         p_final = model.predict_proba(X_final)[:,1]
@@ -266,16 +271,20 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
         # Persist train-time p_hat snapshot for Phase 5 drift comparison
         try:
             if p_final is not None:
+                ts_path = OUTPUTS_DIR / f"train_scores_{division.lower()}_{last_cut}.csv"
                 pd.DataFrame({"customer_id": df_final['customer_id'].values, "p_hat": p_final}).to_csv(
-                    OUTPUTS_DIR / f"train_scores_{division.lower()}_{last_cut}.csv", index=False
+                    ts_path, index=False
                 )
+                artifacts[ts_path.name] = str(ts_path)
             # Persist train-time feature sample for Phase 5 PSI (sample to control size)
             try:
                 num_cols = [c for c in feature_names if pd.api.types.is_numeric_dtype(df_final[c])]
                 sample_df = df_final[['customer_id'] + num_cols].copy()
                 if len(sample_df) > 5000:
                     sample_df = sample_df.sample(n=5000, random_state=cfg.modeling.seed)
-                sample_df.to_parquet(OUTPUTS_DIR / f"train_feature_sample_{division.lower()}_{last_cut}.parquet", index=False)
+                fs_path = OUTPUTS_DIR / f"train_feature_sample_{division.lower()}_{last_cut}.parquet"
+                sample_df.to_parquet(fs_path, index=False)
+                artifacts[fs_path.name] = str(fs_path)
             except Exception:
                 pass
         except Exception:
@@ -302,12 +311,16 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
         gains_df = gains_df.sort_values("p", ascending=False).reset_index(drop=True)
         gains_df["decile"] = (np.floor((gains_df.index / max(1, len(gains_df)-1)) * 10) + 1).clip(1, 10).astype(int)
         gains = gains_df.groupby("decile").agg(bought_in_division_mean=("y","mean"), count=("y","size"), p_mean=("p","mean")).reset_index()
-        gains.to_csv(OUTPUTS_DIR / f"gains_{division.lower()}.csv", index=False)
+        gains_path = OUTPUTS_DIR / f"gains_{division.lower()}.csv"
+        gains.to_csv(gains_path, index=False)
+        artifacts[gains_path.name] = str(gains_path)
 
         # Calibration bins & MAE
         try:
             calib = calibration_bins(y_final, p_final, n_bins=10)
-            calib.to_csv(OUTPUTS_DIR / f"calibration_{division.lower()}.csv", index=False)
+            calib_path = OUTPUTS_DIR / f"calibration_{division.lower()}.csv"
+            calib.to_csv(calib_path, index=False)
+            artifacts[calib_path.name] = str(calib_path)
             cal_mae = calibration_mae(calib, weighted=True)
         except Exception:
             cal_mae = None
@@ -320,7 +333,9 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
             thr = compute_topk_threshold(p_final, k)
             cutoff_idx = max(1, int(len(p_final) * (k/100.0)))
             thr_rows.append({"k_percent": k, "threshold": float(thr), "count": cutoff_idx})
-        pd.DataFrame(thr_rows).to_csv(OUTPUTS_DIR / f"thresholds_{division.lower()}.csv", index=False)
+        thr_path = OUTPUTS_DIR / f"thresholds_{division.lower()}.csv"
+        pd.DataFrame(thr_rows).to_csv(thr_path, index=False)
+        artifacts[thr_path.name] = str(thr_path)
 
         # LR coefficients (if available)
         try:
@@ -346,18 +361,24 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
                     shap_vals = explainer.shap_values(X_final)
                     vals = shap_vals[1] if isinstance(shap_vals, list) and len(shap_vals) == 2 else shap_vals
                     mean_abs = np.mean(np.abs(vals), axis=0)
-                    pd.DataFrame({"feature": feature_names, "mean_abs_shap": mean_abs}).sort_values("mean_abs_shap", ascending=False).to_csv(OUTPUTS_DIR / f"shap_global_{division.lower()}.csv", index=False)
+                    shap_global = OUTPUTS_DIR / f"shap_global_{division.lower()}.csv"
+                    pd.DataFrame({"feature": feature_names, "mean_abs_shap": mean_abs}).sort_values("mean_abs_shap", ascending=False).to_csv(shap_global, index=False)
+                    artifacts[shap_global.name] = str(shap_global)
                     # sample
                     sample_n = min(200, len(X_final))
                     sample_idx = np.random.RandomState(cfg.modeling.seed).choice(len(X_final), size=sample_n, replace=False)
                     sample = pd.DataFrame(vals[sample_idx], columns=feature_names)
                     sample.insert(0, 'customer_id', df_final.iloc[sample_idx]['customer_id'].values)
-                    sample.to_csv(OUTPUTS_DIR / f"shap_sample_{division.lower()}.csv", index=False)
+                    shap_sample = OUTPUTS_DIR / f"shap_sample_{division.lower()}.csv"
+                    sample.to_csv(shap_sample, index=False)
+                    artifacts[shap_sample.name] = str(shap_sample)
                 elif isinstance(base, LogisticRegression):
                     explainer = shap.LinearExplainer(base, X_final)
                     vals = explainer.shap_values(X_final)
                     mean_abs = np.mean(np.abs(vals), axis=0)
-                    pd.DataFrame({"feature": feature_names, "mean_abs_shap": mean_abs}).sort_values("mean_abs_shap", ascending=False).to_csv(OUTPUTS_DIR / f"shap_global_{division.lower()}.csv", index=False)
+                    shap_global = OUTPUTS_DIR / f"shap_global_{division.lower()}.csv"
+                    pd.DataFrame({"feature": feature_names, "mean_abs_shap": mean_abs}).sort_values("mean_abs_shap", ascending=False).to_csv(shap_global, index=False)
+                    artifacts[shap_global.name] = str(shap_global)
         except Exception as e:
             logger.warning(f"Failed SHAP export: {e}")
 
@@ -379,8 +400,10 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
             "seed": cfg.modeling.seed,
             "window_months": int(window_months),
         }
-        with open(OUTPUTS_DIR / f"metrics_{division.lower()}.json", "w", encoding="utf-8") as f:
+        metrics_path = OUTPUTS_DIR / f"metrics_{division.lower()}.json"
+        with open(metrics_path, "w", encoding="utf-8") as f:
             json.dump(metrics, f, indent=2)
+        artifacts[metrics_path.name] = str(metrics_path)
 
         # Model card JSON
         card = {
@@ -407,12 +430,19 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
                 "thresholds_csv": str(OUTPUTS_DIR / f"thresholds_{division.lower()}.csv"),
             },
         }
-        with open(OUTPUTS_DIR / f"model_card_{division.lower()}.json", "w", encoding="utf-8") as f:
+        model_card = OUTPUTS_DIR / f"model_card_{division.lower()}.json"
+        with open(model_card, "w", encoding="utf-8") as f:
             json.dump(card, f, indent=2)
+        artifacts[model_card.name] = str(model_card)
     except Exception as e:
         logger.warning(f"Failed writing Phase 3 artifacts: {e}")
 
     logger.info(f"Training complete for {division}")
+    try:
+        ctx["write_manifest"](artifacts)
+        ctx["append_registry"]({"phase": "phase3_train", "division": division, "cutoffs": cut_list, "artifact_count": len(artifacts)})
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":

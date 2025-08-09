@@ -14,6 +14,7 @@ from gosales.utils.paths import OUTPUTS_DIR, MODELS_DIR
 from gosales.utils.logger import get_logger
 from gosales.pipeline.rank_whitespace import _percentile_normalize
 from gosales.validation.utils import bootstrap_ci, psi, ks_statistic
+from gosales.ops.run import run_context
 from gosales.etl.sku_map import get_sku_mapping
 
 
@@ -96,6 +97,9 @@ def main(division: str, cutoff: str, window_months: int, capacity_grid: str, acc
     cfg = load_config(config)
     out_dir = OUTPUTS_DIR / 'validation' / division.lower() / cutoff
     out_dir.mkdir(parents=True, exist_ok=True)
+    artifacts: dict[str, str] = {}
+    ctx_cm = run_context("phase5_validation")
+    ctx = ctx_cm.__enter__()
 
     vf = _build_validation_frame(division, cutoff, window_months, cfg)
     # Join holdout labels from holdout CSVs if available (data/holdout/*). Fallback to training labels in feature parquet
@@ -164,16 +168,31 @@ def main(division: str, cutoff: str, window_months: int, capacity_grid: str, acc
     # Persist validation frame parquet
     out_dir = OUTPUTS_DIR / 'validation' / division.lower() / cutoff
     out_dir.mkdir(parents=True, exist_ok=True)
-    vf.to_parquet(out_dir / 'validation_frame.parquet', index=False)
+    vf_path = out_dir / 'validation_frame.parquet'
+    vf.to_parquet(vf_path, index=False)
+    try:
+        artifacts['validation_frame.parquet'] = str(vf_path)
+    except Exception:
+        pass
 
     y = vf.get('bought_in_division', pd.Series(0, index=vf.index)).astype(int).values
     p = vf['p_hat'].values
 
     # Metrics
     gains = _gains_deciles(y, p)
-    gains.to_csv(out_dir / 'gains.csv', index=False)
+    gains_path = out_dir / 'gains.csv'
+    gains.to_csv(gains_path, index=False)
+    try:
+        artifacts['gains.csv'] = str(gains_path)
+    except Exception:
+        pass
     calib = _calibration_bins(y, p, n_bins=10)
-    calib.to_csv(out_dir / 'calibration.csv', index=False)
+    calib_path = out_dir / 'calibration.csv'
+    calib.to_csv(calib_path, index=False)
+    try:
+        artifacts['calibration.csv'] = str(calib_path)
+    except Exception:
+        pass
     # Core metrics
     auc_val = float(roc_auc_score(y, p)) if len(np.unique(y)) > 1 else float('nan')
     pr_prec, pr_rec, _ = precision_recall_curve(y, p)
@@ -314,10 +333,22 @@ def main(division: str, cutoff: str, window_months: int, capacity_grid: str, acc
     try:
         rank_by = 'expected_gp_norm' if (not np.isnan(cal_mae) and cal_mae < 0.03) else 'capture'
         scen_sorted = scen_df.sort_values(rank_by, ascending=False).reset_index(drop=True)
-        scen_sorted.to_csv(out_dir / 'topk_scenarios.csv', index=False)
-        scen_sorted.to_csv(out_dir / 'topk_scenarios_sorted.csv', index=False)
+        scen_csv = out_dir / 'topk_scenarios.csv'
+        scen_sorted.to_csv(scen_csv, index=False)
+        scen_sorted_path = out_dir / 'topk_scenarios_sorted.csv'
+        scen_sorted.to_csv(scen_sorted_path, index=False)
+        try:
+            artifacts['topk_scenarios.csv'] = str(scen_csv)
+            artifacts['topk_scenarios_sorted.csv'] = str(scen_sorted_path)
+        except Exception:
+            pass
     except Exception:
-        scen_df.to_csv(out_dir / 'topk_scenarios.csv', index=False)
+        scen_csv = out_dir / 'topk_scenarios.csv'
+        scen_df.to_csv(scen_csv, index=False)
+        try:
+            artifacts['topk_scenarios.csv'] = str(scen_csv)
+        except Exception:
+            pass
 
     # Drift diagnostics (if training score snapshot available)
     drift = {}
@@ -375,7 +406,8 @@ def main(division: str, cutoff: str, window_months: int, capacity_grid: str, acc
             'cal_mae': cal_mae,
         },
     }
-    (out_dir / 'metrics.json').write_text(pd.Series(metrics).to_json(indent=2), encoding='utf-8')
+    metrics_file = out_dir / 'metrics.json'
+    metrics_file.write_text(pd.Series(metrics).to_json(indent=2), encoding='utf-8')
     # Log top PSI-flagged features for quick visibility
     try:
         flagged = drift_highlights.get('psi_flagged_top', []) if isinstance(drift_highlights, dict) else []
@@ -406,7 +438,12 @@ def main(division: str, cutoff: str, window_months: int, capacity_grid: str, acc
                     total_gp = float(sub.get('holdout_gp', pd.Series(0.0, index=sub.index)).sum())
                     rev_capture = float(realized_gp / total_gp) if total_gp > 0 else 0.0
                     seg_rows.append({'segment_col': seg_col, 'segment': seg_val, 'k_percent': k, 'capture': capture, 'precision': precision, 'rev_capture': rev_capture})
-            pd.DataFrame(seg_rows).to_csv(out_dir / 'segment_performance.csv', index=False)
+            seg_perf = out_dir / 'segment_performance.csv'
+            pd.DataFrame(seg_rows).to_csv(seg_perf, index=False)
+            try:
+                artifacts['segment_performance.csv'] = str(seg_perf)
+            except Exception:
+                pass
     except Exception:
         pass
 
@@ -443,7 +480,22 @@ def main(division: str, cutoff: str, window_months: int, capacity_grid: str, acc
                 if c in train_feat.columns:
                     per_feature[c] = psi(train_feat[c], vf[c])
             drift_report['psi_per_feature'] = per_feature
-        (out_dir / 'drift.json').write_text(json.dumps(drift_report, indent=2), encoding='utf-8')
+        drift_file = out_dir / 'drift.json'
+        drift_file.write_text(json.dumps(drift_report, indent=2), encoding='utf-8')
+    except Exception:
+        pass
+    try:
+        artifacts['metrics.json'] = str(metrics_file)
+    except Exception:
+        pass
+    # Write run manifest and registry
+    try:
+        ctx['write_manifest'](artifacts)
+        ctx['append_registry']({'phase': 'phase5_validation', 'division': division, 'cutoff': cutoff, 'artifact_count': len(artifacts)})
+    except Exception:
+        pass
+    try:
+        ctx_cm.__exit__(None, None, None)
     except Exception:
         pass
     logger.info(f"Wrote validation artifacts to {out_dir}")

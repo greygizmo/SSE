@@ -11,6 +11,7 @@ import json
 from gosales.utils.config import load_config
 from gosales.utils.paths import OUTPUTS_DIR, MODELS_DIR
 from gosales.utils.logger import get_logger
+from gosales.ops.run import run_context
 
 
 logger = get_logger(__name__)
@@ -249,72 +250,74 @@ def main(cutoff: str, window_months: int, division: str | None, weights: str | N
     rows = []
     metrics_div: list[dict] = []
     log_entries: list[dict] = []
-    for div in divisions:
-        # For now, reuse the latest features parquet for the cutoff
-        feat_path = OUTPUTS_DIR / f"features_{div.lower()}_{cutoff}.parquet"
-        if not feat_path.exists():
-            logger.warning(f"Missing features for division {div} at cutoff {cutoff}: {feat_path}")
-            continue
-        df = pd.read_parquet(feat_path)
+    artifacts: dict[str, str] = {}
+    with run_context("phase4_whitespace") as ctx:
+        for div in divisions:
+            # For now, reuse the latest features parquet for the cutoff
+            feat_path = OUTPUTS_DIR / f"features_{div.lower()}_{cutoff}.parquet"
+            if not feat_path.exists():
+                logger.warning(f"Missing features for division {div} at cutoff {cutoff}: {feat_path}")
+                continue
+            df = pd.read_parquet(feat_path)
 
-        # Derive owned pre-cutoff if not present (any div-scope tx in windows implies owned)
-        if 'owned_division_pre_cutoff' not in df.columns:
-            win_cols = [f'rfm__div__tx_n__{w}m' for w in cfg.features.windows_months]
-            present_cols = [c for c in win_cols if c in df.columns]
-            if present_cols:
-                df['owned_division_pre_cutoff'] = (df[present_cols].sum(axis=1) > 0).astype(bool)
-            elif 'rfm__div__recency_days__life' in df.columns:
-                df['owned_division_pre_cutoff'] = pd.to_numeric(df['rfm__div__recency_days__life'], errors='coerce').fillna(0) > 0
-            else:
-                df['owned_division_pre_cutoff'] = False
+            # Derive owned pre-cutoff if not present (any div-scope tx in windows implies owned)
+            if 'owned_division_pre_cutoff' not in df.columns:
+                win_cols = [f'rfm__div__tx_n__{w}m' for w in cfg.features.windows_months]
+                present_cols = [c for c in win_cols if c in df.columns]
+                if present_cols:
+                    df['owned_division_pre_cutoff'] = (df[present_cols].sum(axis=1) > 0).astype(bool)
+                elif 'rfm__div__recency_days__life' in df.columns:
+                    df['owned_division_pre_cutoff'] = pd.to_numeric(df['rfm__div__recency_days__life'], errors='coerce').fillna(0) > 0
+                else:
+                    df['owned_division_pre_cutoff'] = False
 
-        # Eligibility
-        df, elig_counts = _apply_eligibility(df, cfg)
-        if df.empty:
-            continue
+            # Eligibility
+            df, elig_counts = _apply_eligibility(df, cfg)
+            if df.empty:
+                continue
 
-        # Signals
-        p_icp, p_icp_pct = _score_p_icp(df.drop(columns=['customer_id', 'bought_in_division'], errors='ignore'), div)
-        lift_norm = _compute_affinity_lift(df)
-        als_norm = _compute_als_norm(df, cfg)
-        ev_norm, ev_capped_count = _compute_ev_norm_by_segment(df, cfg)
+            # Signals
+            p_icp, p_icp_pct = _score_p_icp(df.drop(columns=['customer_id', 'bought_in_division'], errors='ignore'), div)
+            lift_norm = _compute_affinity_lift(df)
+            als_norm = _compute_als_norm(df, cfg)
+            ev_norm, ev_capped_count = _compute_ev_norm_by_segment(df, cfg)
 
-        # Weight degradation if coverage is sparse
-        w_div, adjustments = _scale_weights_by_coverage(w, als_norm, lift_norm, cfg.whitespace.als_coverage_threshold)
+            # Weight degradation if coverage is sparse
+            w_div, adjustments = _scale_weights_by_coverage(w, als_norm, lift_norm, cfg.whitespace.als_coverage_threshold)
 
-        tmp = pd.DataFrame({
-            'customer_id': df['customer_id'].values,
-            'division': div,
-            'p_icp': p_icp.values,
-            'p_icp_pct': p_icp_pct.values,
-            'lift_norm': lift_norm.values,
-            'als_norm': als_norm.values,
-            'EV_norm': ev_norm.values,
-            'label': df.get('bought_in_division', pd.Series(0, index=df.index)).astype(int).values,
-        })
-        # Blend
-        tmp['score'] = (
-            w_div[0] * tmp['p_icp_pct'] +
-            w_div[1] * tmp['lift_norm'] +
-            w_div[2] * tmp['als_norm'] +
-            w_div[3] * tmp['EV_norm']
-        )
-        # Explanations
-        tmp['nba_reason'] = tmp.apply(_explain, axis=1)
-        rows.append(tmp)
-        div_entry = {
-            'division': div,
-            'eligibility_counts': elig_counts,
-            'coverage': {
-                'als': float((als_norm > 0).mean()),
-                'affinity': float((lift_norm > 0).mean()),
-            },
-            'weights_final': w_div,
-            'adjustments': adjustments,
-            'ev_capped_count': int(ev_capped_count),
-        }
-        metrics_div.append(div_entry)
-        log_entries.append({"type": "division_summary", **div_entry})
+            tmp = pd.DataFrame({
+                'customer_id': df['customer_id'].values,
+                'division': div,
+                'p_icp': p_icp.values,
+                'p_icp_pct': p_icp_pct.values,
+                'lift_norm': lift_norm.values,
+                'als_norm': als_norm.values,
+                'EV_norm': ev_norm.values,
+                'label': df.get('bought_in_division', pd.Series(0, index=df.index)).astype(int).values,
+            })
+            # Blend
+            tmp['score'] = (
+                w_div[0] * tmp['p_icp_pct'] +
+                w_div[1] * tmp['lift_norm'] +
+                w_div[2] * tmp['als_norm'] +
+                w_div[3] * tmp['EV_norm']
+            )
+            # Explanations
+            tmp['nba_reason'] = tmp.apply(_explain, axis=1)
+            rows.append(tmp)
+            div_entry = {
+                'division': div,
+                'eligibility_counts': elig_counts,
+                'coverage': {
+                    'als': float((als_norm > 0).mean()),
+                    'affinity': float((lift_norm > 0).mean()),
+                },
+                'weights_final': w_div,
+                'adjustments': adjustments,
+                'ev_capped_count': int(ev_capped_count),
+            }
+            metrics_div.append(div_entry)
+            log_entries.append({"type": "division_summary", **div_entry})
 
     if not rows:
         logger.warning("No ranked rows produced")
@@ -464,13 +467,19 @@ def main(cutoff: str, window_months: int, division: str | None, weights: str | N
     }
     out_path = OUTPUTS_DIR / f"whitespace_{cutoff}.csv"
     out.to_csv(out_path, index=False)
+    artifacts[out_path.name] = str(out_path)
     # Explanations export (subset)
     expl_path = OUTPUTS_DIR / f"whitespace_explanations_{cutoff}.csv"
     out[['customer_id','division','score','nba_reason','p_icp','p_icp_pct','lift_norm','als_norm','EV_norm']].to_csv(expl_path, index=False)
+    artifacts[expl_path.name] = str(expl_path)
     # Thresholds export
-    pd.DataFrame(thresholds_rows).to_csv(OUTPUTS_DIR / f"thresholds_whitespace_{cutoff}.csv", index=False)
+    thr_path = OUTPUTS_DIR / f"thresholds_whitespace_{cutoff}.csv"
+    pd.DataFrame(thresholds_rows).to_csv(thr_path, index=False)
+    artifacts[thr_path.name] = str(thr_path)
     # Metrics export
-    (OUTPUTS_DIR / f"whitespace_metrics_{cutoff}.json").write_text(pd.Series(metrics).to_json(indent=2), encoding='utf-8')
+    metrics_path = OUTPUTS_DIR / f"whitespace_metrics_{cutoff}.json"
+    metrics_path.write_text(pd.Series(metrics).to_json(indent=2), encoding='utf-8')
+    artifacts[metrics_path.name] = str(metrics_path)
     # Structured log export
     try:
         log_entries.append({
@@ -484,9 +493,15 @@ def main(cutoff: str, window_months: int, division: str | None, weights: str | N
         with open(log_path, 'w', encoding='utf-8') as f:
             for entry in log_entries:
                 f.write(json.dumps(entry) + "\n")
+        artifacts[log_path.name] = str(log_path)
     except Exception:
         pass
     logger.info(f"Wrote {out_path} with {len(out)} rows; selected {len(selected)} for capacity mode {cap_mode}")
+    try:
+        ctx["write_manifest"](artifacts)
+        ctx["append_registry"]({"phase": "phase4_whitespace", "cutoff": cutoff, "artifact_count": len(artifacts)})
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":
