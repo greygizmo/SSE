@@ -112,3 +112,15 @@ def compute_default_validation_index(runs: List[Tuple[str, str, Path]], preferre
     except Exception:
         return 0
 
+
+def read_runs_registry(base_outputs: Path | None = None) -> List[Dict[str, object]]:
+    """Read runs registry JSONL from outputs/runs/runs.jsonl"""
+    out_dir = base_outputs or OUTPUTS_DIR
+    reg_path = out_dir / 'runs' / 'runs.jsonl'
+    if not reg_path.exists():
+        return []
+    try:
+        return [json.loads(line) for line in reg_path.read_text(encoding='utf-8').splitlines() if line.strip()]
+    except Exception:
+        return []
+

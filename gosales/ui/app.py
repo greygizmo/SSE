@@ -5,7 +5,7 @@ import pandas as pd
 import streamlit as st
 
 from gosales.utils.paths import OUTPUTS_DIR, MODELS_DIR
-from gosales.ui.utils import discover_validation_runs, compute_validation_badges, load_thresholds, load_alerts, compute_default_validation_index
+from gosales.ui.utils import discover_validation_runs, compute_validation_badges, load_thresholds, load_alerts, compute_default_validation_index, read_runs_registry
 
 
 st.set_page_config(page_title="GoSales Engine", layout="wide")
@@ -84,6 +84,12 @@ with st.sidebar:
             st.session_state['latest_whitespace_cutoff'] = wc[0]
     except Exception:
         pass
+    # Cache thresholds in session
+    if 'thresholds' not in st.session_state:
+        try:
+            st.session_state['thresholds'] = load_thresholds()
+        except Exception:
+            st.session_state['thresholds'] = {}
 
 def list_validation_runs():
     base = OUTPUTS_DIR / 'validation'
@@ -300,7 +306,7 @@ elif tab == "Validation":
         default_index = compute_default_validation_index(runs, st.session_state.get('preferred_validation'))
         sel = st.selectbox("Pick run", options=list(range(len(runs))), index=default_index, format_func=lambda i: labels[i])
         _, _, path = runs[sel]
-        thr = load_thresholds()
+        thr = st.session_state.get('thresholds', load_thresholds())
         # Badges
         st.subheader("Quality Badges")
         badges = compute_validation_badges(path, thresholds=thr)
