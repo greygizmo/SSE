@@ -372,7 +372,7 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
 
         # LR coefficients (if available)
         try:
-            from sklearn.linear_model import LogisticRegression
+            # reuse imported LogisticRegression
             base = getattr(model, "base_estimator", None)
             if base is None and hasattr(model, "estimator"):
                 base = model.estimator
