@@ -143,7 +143,7 @@ elif tab == "Metrics":
     if not divisions:
         st.info("No divisions discovered (expected models/*_model or metrics_*.json)")
     else:
-        div = st.selectbox("Division", divisions)
+        div = st.selectbox("Division", divisions, help="Pick a division to load explainability artifacts (SHAP/coefficients)")
         # Model card
         mc_path = OUTPUTS_DIR / f"model_card_{div.lower()}.json"
         if mc_path.exists():
@@ -212,14 +212,17 @@ elif tab == "Explainability":
         if cat_candidates:
             st.subheader("Feature Catalog")
             cat = _read_csv(cat_candidates[0])
+            st.caption("Columns: name (feature id), dtype (pandas dtype), coverage (non-null share). Use to assess feature availability.")
             st.dataframe(cat, use_container_width=True, height=320)
             st.download_button("Download feature catalog", data=cat.to_csv(index=False), file_name=cat_candidates[0].name)
         if stats_candidates:
             st.subheader("Feature Stats")
+            st.caption("Includes per-column coverage; optional winsor caps for gp_sum features; checksum ensures determinism of the feature parquet.")
             st.code(_read_text(stats_candidates[0]))
         if sg.exists():
             with st.expander("SHAP Global — what it means", expanded=True):
-                st.markdown("- Mean absolute SHAP reflects feature influence magnitude. Higher = more impact on predictions.")
+                st.markdown("- Mean absolute SHAP reflects average feature influence magnitude across customers. Higher = more impact on predictions.")
+                st.markdown("- Use this to identify globally important features; pair with coefficients for direction (if LR).")
             sg_df = _read_csv(sg)
             st.dataframe(sg_df, use_container_width=True, height=320)
             # Optional bar chart if aggregated column present
@@ -233,13 +236,16 @@ elif tab == "Explainability":
                 pass
         if ss.exists():
             with st.expander("SHAP Sample — how to read", expanded=False):
-                st.markdown("- Row = customer; columns = per-feature SHAP values (positive raises probability; negative lowers). Compare features within a customer.")
+                st.markdown("- Row = customer; columns = per-feature SHAP values.")
+                st.markdown("- Sign: positive raises probability; negative lowers. Compare features within the same customer.")
+                st.markdown("- Magnitude: larger absolute value = stronger effect for that customer.")
             ss_df = _read_csv(ss).head(200)
             st.dataframe(ss_df, use_container_width=True, height=320)
             st.download_button("Download SHAP sample", data=ss_df.to_csv(index=False), file_name=ss.name)
         if cf.exists():
             with st.expander("Logistic Regression Coefficients — interpretation", expanded=False):
-                st.markdown("- Positive coefficient increases log-odds; magnitude indicates strength (units depend on feature scaling).")
+                st.markdown("- Positive coefficient increases log-odds; negative decreases. Magnitude depends on feature scaling.")
+                st.markdown("- Combine with SHAP for instance-level interpretation.")
             cf_df = _read_csv(cf)
             st.dataframe(cf_df, use_container_width=True, height=320)
             st.download_button("Download coefficients", data=cf_df.to_csv(index=False), file_name=cf.name)
