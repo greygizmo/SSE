@@ -22,13 +22,14 @@ def test_drift_psi_smoke(monkeypatch):
     n = 200
     # Create EV increasing, holdout GP decreasing (strong drift)
     ev = np.linspace(0, 100, n)
-    hold_gp = np.linspace(100, 0, n)
+    # This distribution is different from ev, which should result in a high PSI
+    hold_gp = np.linspace(50, 150, n)
     feats = pd.DataFrame({
         'customer_id': np.arange(1, n + 1),
         'f1': np.random.RandomState(0).rand(n),
         'f2': np.random.RandomState(1).rand(n),
         'rfm__all__gp_sum__12m': ev,
-        'EV_norm': (ev - ev.min()) / (ev.ptp() + 1e-9),
+        'EV_norm': (ev - ev.min()) / (np.ptp(ev) + 1e-9),
         'bought_in_division': np.random.RandomState(2).randint(0, 2, size=n),
         'holdout_gp': hold_gp,
     })

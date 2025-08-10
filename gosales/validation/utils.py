@@ -23,11 +23,22 @@ def psi(train: pd.Series, holdout: pd.Series, bins: int = 10) -> float:
     h = pd.to_numeric(holdout, errors='coerce').dropna()
     if t.empty or h.empty:
         return 0.0
-    edges = np.quantile(t, np.linspace(0.0, 1.0, bins+1))
+
+    # Use quantiles on the combined series for robust binning
+    combined = pd.concat([t, h])
+    # Ensure edges are unique
+    edges = np.unique(np.quantile(combined, np.linspace(0, 1, bins + 1)))
+
+    if len(edges) < 2:
+        return 0.0
+
     t_hist, _ = np.histogram(t, bins=edges)
     h_hist, _ = np.histogram(h, bins=edges)
-    t_pct = (t_hist / max(1, t_hist.sum())).clip(1e-9)
-    h_pct = (h_hist / max(1, h_hist.sum())).clip(1e-9)
+
+    # Add a small epsilon to avoid division by zero or log(0)
+    t_pct = (t_hist / max(1, t_hist.sum())) + 1e-10
+    h_pct = (h_hist / max(1, h_hist.sum())) + 1e-10
+
     return float(np.sum((h_pct - t_pct) * np.log(h_pct / t_pct)))
 
 

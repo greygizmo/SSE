@@ -294,6 +294,11 @@ def main(cutoff: str, window_months: int, division: str | None, weights: str | N
                 'als_norm': als_norm.values,
                 'EV_norm': ev_norm.values,
                 'label': df.get('bought_in_division', pd.Series(0, index=df.index)).astype(int).values,
+                # Store the adjusted weights used for this division
+                'w_p_icp': w_div[0],
+                'w_lift': w_div[1],
+                'w_als': w_div[2],
+                'w_ev': w_div[3],
             })
             # Blend
             tmp['score'] = (
@@ -328,17 +333,26 @@ def main(cutoff: str, window_months: int, division: str | None, weights: str | N
     # Optional pooled normalization across all divisions
     normalize_mode = normalize or cfg.whitespace.normalize
     if str(normalize_mode).lower() == 'pooled':
+        # BUG: The original implementation had a subtle bug here.
+        # It correctly re-normalized the signals (p_icp_pct, lift_norm, etc.) across the pooled data,
+        # but when it re-computed the score, it used the original base weights (`w`) from the config.
+        # This discarded the per-division coverage adjustments (`w_div`) calculated in the loop above.
+        # For instance, if a division had low ALS coverage, its `w_als` should be down-weighted,
+        # but this logic incorrectly reset it to the global default.
+        #
+        # FIX: The logic is corrected below to use the per-division adjusted weights that are
+        # now preserved in the `out` DataFrame.
         try:
             out['p_icp_pct'] = _percentile_normalize(pd.to_numeric(out['p_icp'], errors='coerce').fillna(0.0))
             out['lift_norm'] = _percentile_normalize(pd.to_numeric(out['lift_norm'], errors='coerce').fillna(0.0))
             out['als_norm'] = _percentile_normalize(pd.to_numeric(out['als_norm'], errors='coerce').fillna(0.0))
             out['EV_norm'] = _percentile_normalize(pd.to_numeric(out['EV_norm'], errors='coerce').fillna(0.0))
-            # Recompute score using base weights
+            # Recompute score using the preserved per-division adjusted weights
             out['score'] = (
-                w[0] * out['p_icp_pct'] +
-                w[1] * out['lift_norm'] +
-                w[2] * out['als_norm'] +
-                w[3] * out['EV_norm']
+                out['w_p_icp'] * out['p_icp_pct'] +
+                out['w_lift'] * out['lift_norm'] +
+                out['w_als'] * out['als_norm'] +
+                out['w_ev'] * out['EV_norm']
             )
         except Exception:
             pass
