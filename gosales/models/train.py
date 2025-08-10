@@ -66,6 +66,18 @@ def _train_test_split_time_aware(X: pd.DataFrame, y: pd.Series, seed: int) -> tu
     return train_test_split(X, y, test_size=0.2, random_state=seed, stratify=y)
 
 
+def _sanitize_features(X: pd.DataFrame) -> pd.DataFrame:
+    """Ensure numeric dtype; replace infs with NaN then fill NaN with 0.0.
+
+    Protects scaler/estimators from infinities and mixed dtypes.
+    """
+    Xc = X.copy()
+    for col in Xc.columns:
+        if not (pd.api.types.is_integer_dtype(Xc[col]) or pd.api.types.is_float_dtype(Xc[col])):
+            Xc[col] = pd.to_numeric(Xc[col], errors='coerce')
+    Xc.replace([np.inf, -np.inf], np.nan, inplace=True)
+    return Xc.fillna(0.0)
+
 def _calibrate(clf, X_train: pd.DataFrame, y_train: pd.Series, X_valid: pd.DataFrame, method: str):
     calibrated = CalibratedClassifierCV(base_estimator=clf, method="sigmoid" if method == "platt" else "isotonic", cv=3)
     calibrated.fit(X_train, y_train)
@@ -79,7 +91,8 @@ def _calibrate(clf, X_train: pd.DataFrame, y_train: pd.Series, X_valid: pd.DataF
 @click.option("--models", default="logreg,lgbm")
 @click.option("--calibration", default="platt,isotonic")
 @click.option("--config", default=str((Path(__file__).parents[1] / "config.yaml").resolve()))
-def main(division: str, cutoffs: str, window_months: int, models: str, calibration: str, config: str) -> None:
+@click.option("--dry-run/--no-dry-run", default=False, help="Skip training; only verify inputs and emit planned artifacts to manifest")
+def main(division: str, cutoffs: str, window_months: int, models: str, calibration: str, config: str, dry_run: bool) -> None:
     cfg = load_config(config)
     cut_list = [c.strip() for c in cutoffs.split(",") if c.strip()]
     OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -93,6 +106,24 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
     artifacts: dict[str, str] = {}
     results = []
     with run_context("phase3_train") as ctx:
+        if dry_run:
+            # Plan artifacts without training
+            out_dir = MODELS_DIR / f"{division.lower()}_model"
+            artifacts.update({
+                "planned_model.pkl": str(out_dir / "model.pkl"),
+                "planned_feature_list.json": str(out_dir / "feature_list.json"),
+                f"planned_metrics_{division.lower()}.json": str(OUTPUTS_DIR / f"metrics_{division.lower()}.json"),
+                f"planned_gains_{division.lower()}.csv": str(OUTPUTS_DIR / f"gains_{division.lower()}.csv"),
+                f"planned_calibration_{division.lower()}.csv": str(OUTPUTS_DIR / f"calibration_{division.lower()}.csv"),
+                f"planned_thresholds_{division.lower()}.csv": str(OUTPUTS_DIR / f"thresholds_{division.lower()}.csv"),
+                f"planned_model_card_{division.lower()}.json": str(OUTPUTS_DIR / f"model_card_{division.lower()}.json"),
+            })
+            try:
+                ctx["write_manifest"](artifacts)
+                ctx["append_registry"]({"phase": "phase3_train", "division": division, "cutoffs": cut_list, "artifact_count": len(artifacts), "status": "dry-run"})
+            except Exception:
+                pass
+            return
         for cutoff in cut_list:
             fm = create_feature_matrix(engine, division, cutoff, window_months)
             if fm.is_empty():
@@ -101,6 +132,7 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
             df = fm.to_pandas()
             y = df['bought_in_division'].astype(int).values
             X = df.drop(columns=['customer_id','bought_in_division'])
+            X = _sanitize_features(X)
             X_train, X_valid, y_train, y_valid = _train_test_split_time_aware(X, y, cfg.modeling.seed)
 
         # Baseline LR (elastic-net via saga)
@@ -227,6 +259,7 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
     df_final = fm_final.to_pandas()
     y_final = df_final['bought_in_division'].astype(int).values
     X_final = df_final.drop(columns=['customer_id','bought_in_division'])
+    X_final = _sanitize_features(X_final)
     # Minimal: refit winner without hyper search for brevity (could repeat best params)
     if winner == 'logreg':
         scaler = StandardScaler(with_mean=False)
