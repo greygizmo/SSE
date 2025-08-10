@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import pytest
 
 from gosales.pipeline.rank_whitespace import _scale_weights_by_coverage, _compute_als_norm, _compute_affinity_lift
 

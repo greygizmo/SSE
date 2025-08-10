@@ -64,6 +64,52 @@ class Features:
 
 
 @dataclass
+class ModelingConfig:
+    seed: int = 42
+    folds: int = 3
+    models: list[str] = field(default_factory=lambda: ["logreg", "lgbm"])
+    lr_grid: Dict[str, Any] = field(default_factory=lambda: {"l1_ratio": [0.0, 0.2, 0.5], "C": [0.1, 1.0, 10.0]})
+    lgbm_grid: Dict[str, Any] = field(default_factory=lambda: {"num_leaves": [31, 63], "min_data_in_leaf": [50, 100], "learning_rate": [0.05, 0.1], "feature_fraction": [0.7, 0.9], "bagging_fraction": [0.7, 0.9]})
+    calibration_methods: list[str] = field(default_factory=lambda: ["platt", "isotonic"])
+    top_k_percents: list[int] = field(default_factory=lambda: [5, 10, 20])
+    capacity_percent: int = 10
+
+
+@dataclass
+class WhitespaceEligibilityConfig:
+    exclude_if_owned_ever: bool = True
+    exclude_if_recent_contact_days: int = 0
+    exclude_if_open_deal: bool = False
+    require_region_match: bool = False
+
+
+@dataclass
+class WhitespaceConfig:
+    weights: list[float] = field(default_factory=lambda: [0.60, 0.20, 0.10, 0.10])
+    normalize: str = "percentile"
+    eligibility: WhitespaceEligibilityConfig = field(default_factory=WhitespaceEligibilityConfig)
+    capacity_mode: str = "top_percent"
+    accounts_per_rep: int = 25
+    ev_cap_percentile: float = 0.95
+    als_coverage_threshold: float = 0.30
+    bias_division_max_share_topN: float = 0.6
+    cooldown_days: int = 30
+    cooldown_factor: float = 0.75
+
+
+@dataclass
+class ValidationConfig:
+    bootstrap_n: int = 1000
+    top_k_percents: list[int] = field(default_factory=lambda: [5, 10, 20])
+    capacity_grid: list[int] = field(default_factory=lambda: [5, 10, 20])
+    ev_cap_percentile: float = 0.95
+    segment_columns: list[str] = field(default_factory=lambda: ["industry", "industry_sub", "region", "territory"])
+    ks_threshold: float = 0.15
+    psi_threshold: float = 0.25
+    cal_mae_threshold: float = 0.03
+
+
+@dataclass
 class Config:
     paths: Paths
     database: Database = field(default_factory=Database)
@@ -72,62 +118,15 @@ class Config:
     logging: Logging = field(default_factory=Logging)
     labels: Labels = field(default_factory=Labels)
     features: Features = field(default_factory=Features)
-    # Modeling configuration for Phase 3
-    @dataclass
-    class Modeling:
-        seed: int = 42
-        folds: int = 3
-        models: list[str] = field(default_factory=lambda: ["logreg", "lgbm"])  # allowed: logreg, lgbm
-        lr_grid: Dict[str, Any] = field(default_factory=lambda: {"l1_ratio": [0.0, 0.2, 0.5], "C": [0.1, 1.0, 10.0]})
-        lgbm_grid: Dict[str, Any] = field(default_factory=lambda: {"num_leaves": [31, 63], "min_data_in_leaf": [50, 100], "learning_rate": [0.05, 0.1], "feature_fraction": [0.7, 0.9], "bagging_fraction": [0.7, 0.9]})
-        calibration_methods: list[str] = field(default_factory=lambda: ["platt", "isotonic"])  # platt|isotonic
-        top_k_percents: list[int] = field(default_factory=lambda: [5, 10, 20])
-        capacity_percent: int = 10
-
-    modeling: 'Config.Modeling' = field(default_factory=Modeling)
-
-    # Phase 4 whitespace ranking configuration
-    @dataclass
-    class WhitespaceEligibility:
-        exclude_if_owned_ever: bool = True
-        exclude_if_recent_contact_days: int = 0
-        exclude_if_open_deal: bool = False
-        require_region_match: bool = False
-
-    @dataclass
-    class Whitespace:
-        weights: list[float] = field(default_factory=lambda: [0.60, 0.20, 0.10, 0.10])  # [p_icp_pct, lift_norm, als_norm, EV_norm]
-        normalize: str = "percentile"  # percentile | pooled
-        eligibility: 'Config.WhitespaceEligibility' = field(default_factory=WhitespaceEligibility)
-        capacity_mode: str = "top_percent"  # top_percent | per_rep | hybrid
-        accounts_per_rep: int = 25
-        ev_cap_percentile: float = 0.95
-        als_coverage_threshold: float = 0.30
-        bias_division_max_share_topN: float = 0.6
-        cooldown_days: int = 30
-        cooldown_factor: float = 0.75
-
-    whitespace: 'Config.Whitespace' = field(default_factory=Whitespace)
-
-    # Phase 5 validation configuration
-    @dataclass
-    class Validation:
-        bootstrap_n: int = 1000
-        top_k_percents: list[int] = field(default_factory=lambda: [5, 10, 20])
-        capacity_grid: list[int] = field(default_factory=lambda: [5, 10, 20])
-        ev_cap_percentile: float = 0.95
-        segment_columns: list[str] = field(default_factory=lambda: ["industry", "industry_sub", "region", "territory"]) 
-        ks_threshold: float = 0.15
-        psi_threshold: float = 0.25
-        cal_mae_threshold: float = 0.03
-
-    validation: 'Config.Validation' = field(default_factory=Validation)
+    modeling: ModelingConfig = field(default_factory=ModelingConfig)
+    whitespace: WhitespaceConfig = field(default_factory=WhitespaceConfig)
+    validation: ValidationConfig = field(default_factory=ValidationConfig)
 
     def to_dict(self) -> Dict[str, Any]:
         def _convert(obj: Any) -> Any:
             if isinstance(obj, Path):
                 return str(obj)
-            if isinstance(obj, (Paths, Database, Run, ETL, Logging)):
+            if hasattr(obj, '__dataclass_fields__'):
                 d = asdict(obj)
                 return {k: _convert(v) for k, v in d.items()}
             return obj
@@ -177,23 +176,17 @@ def _paths_from_dict(d: Dict[str, Any]) -> Paths:
 
 
 def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optional[Dict[str, Any]] = None) -> Config:
-    """Load configuration from YAML with optional overrides.
-
-    Precedence: YAML -> environment -> CLI overrides.
-    """
     if config_path is None:
         config_path = ROOT_DIR / "config.yaml"
 
     cfg_path_obj = Path(config_path)
     cfg_dict = _load_yaml(cfg_path_obj) if cfg_path_obj.exists() else {}
 
-    # Validate unknown top-level keys early
     allowed_top = {"paths","database","run","etl","logging","labels","features","modeling","whitespace","validation"}
     unknown_top = set(cfg_dict.keys()) - allowed_top
     if unknown_top:
         raise ValueError(f"Unknown top-level config keys: {sorted(unknown_top)}. Allowed: {sorted(allowed_top)}")
 
-    # Environment overrides (flat small set for now)
     env_db_engine = os.getenv("GOSALES_DB_ENGINE")
     env_sqlite_path = os.getenv("GOSALES_SQLITE_PATH")
     if env_db_engine:
@@ -201,10 +194,8 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
     if env_sqlite_path:
         cfg_dict.setdefault("database", {})["sqlite_path"] = env_sqlite_path
 
-    # CLI overrides (nested)
     cfg_dict = _merge_overrides(cfg_dict, cli_overrides)
 
-    # Default paths if missing
     paths_dict = cfg_dict.get("paths") or {
         "raw": str(ROOT_DIR / "data" / "raw"),
         "staging": str(ROOT_DIR / "data" / "staging"),
@@ -221,6 +212,8 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
     mdl_cfg = cfg_dict.get("modeling", {})
     ws_cfg = cfg_dict.get("whitespace", {})
     val_cfg = cfg_dict.get("validation", {})
+
+    ws_eligibility_cfg = ws_cfg.get("eligibility", {})
 
     cfg = Config(
         paths=_paths_from_dict(paths_dict),
@@ -257,7 +250,7 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
             use_item2vec=bool(feat_cfg.get("use_item2vec", False)),
             use_text_tags=bool(feat_cfg.get("use_text_tags", False)),
         ),
-        modeling=Config.Modeling(
+        modeling=ModelingConfig(
             seed=int(mdl_cfg.get("seed", 42)),
             folds=int(mdl_cfg.get("folds", 3)),
             models=list(mdl_cfg.get("models", ["logreg", "lgbm"])),
@@ -267,14 +260,14 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
             top_k_percents=list(mdl_cfg.get("top_k_percents", [5, 10, 20])),
             capacity_percent=int(mdl_cfg.get("capacity_percent", 10)),
         ),
-        whitespace=Config.Whitespace(
+        whitespace=WhitespaceConfig(
             weights=list(ws_cfg.get("weights", [0.60, 0.20, 0.10, 0.10])),
             normalize=str(ws_cfg.get("normalize", "percentile")),
-            eligibility=Config.WhitespaceEligibility(
-                exclude_if_owned_ever=bool(ws_cfg.get("eligibility", {}).get("exclude_if_owned_ever", True)),
-                exclude_if_recent_contact_days=int(ws_cfg.get("eligibility", {}).get("exclude_if_recent_contact_days", 0)),
-                exclude_if_open_deal=bool(ws_cfg.get("eligibility", {}).get("exclude_if_open_deal", False)),
-                require_region_match=bool(ws_cfg.get("eligibility", {}).get("require_region_match", False)),
+            eligibility=WhitespaceEligibilityConfig(
+                exclude_if_owned_ever=bool(ws_eligibility_cfg.get("exclude_if_owned_ever", True)),
+                exclude_if_recent_contact_days=int(ws_eligibility_cfg.get("exclude_if_recent_contact_days", 0)),
+                exclude_if_open_deal=bool(ws_eligibility_cfg.get("exclude_if_open_deal", False)),
+                require_region_match=bool(ws_eligibility_cfg.get("require_region_match", False)),
             ),
             capacity_mode=str(ws_cfg.get("capacity_mode", "top_percent")),
             accounts_per_rep=int(ws_cfg.get("accounts_per_rep", 25)),
@@ -284,7 +277,7 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
             cooldown_days=int(ws_cfg.get("cooldown_days", 30)),
             cooldown_factor=float(ws_cfg.get("cooldown_factor", 0.75)),
         ),
-        validation=Config.Validation(
+        validation=ValidationConfig(
             bootstrap_n=int(val_cfg.get("bootstrap_n", 1000)),
             top_k_percents=list(val_cfg.get("top_k_percents", [5, 10, 20])),
             capacity_grid=list(val_cfg.get("capacity_grid", [5, 10, 20])),
@@ -292,14 +285,13 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
             segment_columns=list(val_cfg.get("segment_columns", ["industry", "industry_sub", "region", "territory"])),
             ks_threshold=float(val_cfg.get("ks_threshold", 0.15)),
             psi_threshold=float(val_cfg.get("psi_threshold", 0.25)),
+            cal_mae_threshold=float(val_cfg.get("cal_mae_threshold", 0.03)),
         ),
     )
 
-    # Sanity checks
-    # whitespace weights length and normalization
     try:
         if len(cfg.whitespace.weights) != 4:
-            raise ValueError("whitespace.weights must have 4 entries [p_icp_pct, lift_norm, als_norm, EV_norm]")
+            raise ValueError("whitespace.weights must have 4 entries")
         if str(cfg.whitespace.normalize).lower() not in {"percentile","pooled"}:
             raise ValueError("whitespace.normalize must be 'percentile' or 'pooled'")
         if any(k <= 0 or k > 100 for k in cfg.modeling.top_k_percents):
@@ -309,10 +301,7 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
     except Exception as e:
         raise
 
-    # Ensure directories exist (non-destructive)
     for p in [cfg.paths.raw, cfg.paths.staging, cfg.paths.curated, cfg.paths.outputs]:
         Path(p).mkdir(parents=True, exist_ok=True)
 
     return cfg
-
-

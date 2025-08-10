@@ -28,7 +28,7 @@ def test_drift_psi_smoke(monkeypatch):
         'f1': np.random.RandomState(0).rand(n),
         'f2': np.random.RandomState(1).rand(n),
         'rfm__all__gp_sum__12m': ev,
-        'EV_norm': (ev - ev.min()) / (ev.ptp() + 1e-9),
+        'EV_norm': (ev - ev.min()) / (np.ptp(ev) + 1e-9),
         'bought_in_division': np.random.RandomState(2).randint(0, 2, size=n),
         'holdout_gp': hold_gp,
     })
