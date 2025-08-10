@@ -1,32 +1,52 @@
-# GoSales Engine — ICP & Whitespace (Phases 0–3)
+## GoSales Engine — ICP & Whitespace (Phases 0–6)
 
 A division-focused Ideal Customer Profile (ICP) & Whitespace engine. The pipeline ingests raw sales logs, builds a curated star schema, engineers leakage-safe features at a time cutoff, trains and calibrates per-division models, and produces scores and whitespace opportunities ready for a Streamlit UI.
 
 ---
 
-## What’s implemented (by phase)
+### What’s implemented (by phase)
 
-- Phase 0 — ETL, Star Schema, Contracts
+- **Phase 0 — ETL, Star Schema, Contracts**
   - Tidy `fact_transactions` and `dim_customer` with enrichment and fuzzy fallback
   - Contracts: required columns, PK checks, date-bounds; violations CSV
   - Curated Parquet + QA: schema snapshot, row counts, violations, checksums
   - CLI flags: `--config`, `--rebuild`, `--staging-only`, `--fail-soft`
-- Phase 1 — Labels
+- **Phase 1 — Labels**
   - Leakage-safe labels per `(customer, division, cutoff)` with modes: `expansion|all`
   - Cohorts (`is_new_logo`, `is_expansion`, `is_renewal_like`), censoring detection
   - Denylist SKUs and GP threshold via config; artifacts: labels parquet, prevalence CSV, cutoff JSON
-- Phase 2 — Features
+- **Phase 2 — Features**
   - RFM windows (3/6/12/24m), trajectory (monthly slope/std), lifecycle (tenure, gaps, active months), seasonality, cross-division shares (EB-smoothed), diversity, returns
   - Optional toggles: market-basket affinity, ALS embeddings
   - Artifacts: features parquet, feature catalog CSV, feature stats JSON (coverage, winsor caps, checksum)
   - Determinism and winsorization tests
-- Phase 3 — Modeling (initial)
+ - **Phase 3 — Modeling**
   - Config-driven modeling grids and seeds
   - Training CLI for LR (elastic-net) and LGBM across multiple cutoffs, with calibration (Platt/Isotonic) and selection by mean lift@10 (tie-breaker Brier)
+  - Metrics: AUC, PR-AUC, Brier, lift@{5,10,20}%, revenue-weighted lift@K, calibration MAE
+  - Artifacts: `metrics.json`, `gains.csv`, `calibration.csv`, `thresholds.csv`, `model_card.json`, SHAP summaries (guarded)
+  - Guardrails: degenerate classifier check, deterministic LGBM, early stopping, overfit-gap guard, capped `scale_pos_weight`
+
+- **Phase 4 — Whitespace Ranking / Next‑Best‑Action**
+  - Signals: calibrated probability (`p_icp` + per‑division percentile), market‑basket affinity (`mb_lift_max`, `mb_lift_mean`), ALS similarity, expected value proxy (capped)
+  - Normalization: per‑division percentile (default) or pooled; blending weights → single score
+  - Capacity: top‑percent, per‑rep, or hybrid diversification; gating and cooldown; JSONL logs
+  - Artifacts: `whitespace_<cutoff>.csv`, `whitespace_explanations_<cutoff>.csv`, `thresholds_whitespace_<cutoff>.csv`, `whitespace_metrics_<cutoff>.json`, `whitespace_log_<cutoff>.jsonl`, `mb_rules_<division>_<cutoff>.csv`
+
+- **Phase 5 — Forward Validation / Holdout**
+  - CLI: `python -m gosales.validation.forward --division Solidworks --cutoff 2024-12-31 --window-months 6 --capacity-grid 5,10,20 --accounts-per-rep-grid 10,25`
+  - Artifacts per division/cutoff in `gosales/outputs/validation/<division>/<cutoff>/`: `validation_frame.parquet`, `gains.csv`, `calibration.csv`, `topk_scenarios*.csv`, `segment_performance.csv`, `metrics.json`, `drift.json`
+  - Phase 3 emits `train_scores_*` and `train_feature_sample_*` to support drift
+
+- **Phase 6 — Configuration, UX, Observability**
+  - Central config precedence and stricter validation
+  - Run registry/manifests via `run_context` with per‑run `config_resolved.yaml`
+  - Validation improvements: weighted PSI(EV vs holdout GP), per‑feature PSI highlights, `alerts.json`
+  - Streamlit UI: artifact‑driven pages, validation badges (Cal MAE, PSI, KS), alerts display, caching + refresh
 
 ---
 
-## Quick Start (Windows/PowerShell)
+### Quick Start (Windows/PowerShell)
 
 ```powershell
 # 1) Clone the repository and set up the Python environment
@@ -54,22 +74,25 @@ $env:PYTHONPATH = "$PWD"; python -m gosales.features.build --division Solidworks
 # 6) Phase 3 — Train models across cutoffs (example)
 $env:PYTHONPATH = "$PWD"; python -m gosales.models.train --division Solidworks --cutoffs "2023-06-30,2023-09-30,2023-12-31" --window-months 6 --models logreg,lgbm --calibration platt,isotonic --config gosales/config.yaml
 
-# 7) Score and generate whitespace + UI artifacts
+# 6) Score all available division models
 $env:PYTHONPATH = "$PWD"; python gosales/pipeline/score_all.py
 
-# 8) Launch the UI
-./run_streamlit.ps1
+# 7) Phase 4 — Rank whitespace (example)
+$env:PYTHONPATH = "$PWD"; python -m gosales.pipeline.rank_whitespace --cutoff "2024-06-30" --window-months 6 --normalize percentile --capacity-mode top_percent --config gosales/config.yaml
+
+# 8) Launch Streamlit UI (Phase 6)
+$env:PYTHONPATH = "$PWD"; streamlit run gosales/ui/app.py
 ```
 
 ---
 
-## Modeling & Validation Notes
+### Modeling & validation notes
 
 - Class imbalance is handled via class weights (LR) and `scale_pos_weight` (LightGBM).
 - Probability calibration curves are exported to `gosales/outputs/calibration_<division>.csv`.
 - Holdout labels for 2025 are derived directly from `gosales/data/holdout/Sales Log 2025 YTD.csv` using `Division == 'Solidworks'` and dates in Jan–Jun 2025.
 
-## Feature Library (Phase 2 highlights)
+### Feature Library (Phase 2 highlights)
 
 The feature set includes and extends:
 - Core: recency, frequency, monetary; product and SKU diversity.
@@ -83,15 +106,9 @@ The feature set includes and extends:
 
 Artifacts: `gosales/outputs/feature_catalog_<division>_<cutoff>.csv` lists feature names and coverage.
 
-## 8. Changelog
-
-- feat(features): Phase 2 expansion — windowed RFM, temporal dynamics, cadence, seasonality, division mix, SKU micro-signals.
-- feat(validate): derive holdout labels directly from 2025 YTD CSV; append zero-imputed rows for missing buyers in evaluation set.
-- feat(modeling): class weighting and probability calibration; export calibration curves.
-
 ---
 
-## Data Flow
+### Data Flow
 
 The new data flow is designed to prevent leakage by strictly separating past and future data.
 
@@ -132,7 +149,7 @@ graph TD
 
 ---
 
-## Multi‑Division support
+### Multi‑division support
 
 Known divisions are sourced from `etl/sku_map.division_set()`; cross-division features adapt automatically.
 Scoring auto-discovers models in `models/*_model` and scores each division with an available model.
