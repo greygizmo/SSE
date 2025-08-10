@@ -218,7 +218,8 @@ elif tab == "Explainability":
             st.subheader("Feature Stats")
             st.code(_read_text(stats_candidates[0]))
         if sg.exists():
-            st.subheader("SHAP Global")
+            with st.expander("SHAP Global — what it means", expanded=True):
+                st.markdown("- Mean absolute SHAP reflects feature influence magnitude. Higher = more impact on predictions.")
             sg_df = _read_csv(sg)
             st.dataframe(sg_df, use_container_width=True, height=320)
             # Optional bar chart if aggregated column present
@@ -231,12 +232,14 @@ elif tab == "Explainability":
             except Exception:
                 pass
         if ss.exists():
-            st.subheader("SHAP Sample")
+            with st.expander("SHAP Sample — how to read", expanded=False):
+                st.markdown("- Row = customer; columns = per-feature SHAP values (positive raises probability; negative lowers). Compare features within a customer.")
             ss_df = _read_csv(ss).head(200)
             st.dataframe(ss_df, use_container_width=True, height=320)
             st.download_button("Download SHAP sample", data=ss_df.to_csv(index=False), file_name=ss.name)
         if cf.exists():
-            st.subheader("Logistic Regression Coefficients")
+            with st.expander("Logistic Regression Coefficients — interpretation", expanded=False):
+                st.markdown("- Positive coefficient increases log-odds; magnitude indicates strength (units depend on feature scaling).")
             cf_df = _read_csv(cf)
             st.dataframe(cf_df, use_container_width=True, height=320)
             st.download_button("Download coefficients", data=cf_df.to_csv(index=False), file_name=cf.name)
