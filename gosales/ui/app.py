@@ -107,6 +107,9 @@ def list_validation_runs():
 if tab == "Overview":
     st.header("Overview")
     st.write("High-level summary and ETL/data-quality snapshots if available.")
+    with st.expander("Tips"):
+        st.markdown("- Use this page to sanity-check ETL coverage and contracts before training.")
+        st.markdown("- If counts look off, re-run ETL or inspect `contracts/violations.csv` for failures.")
     # Industry coverage
     cov = OUTPUTS_DIR / 'industry_coverage_summary.csv'
     if cov.exists():
@@ -143,7 +146,11 @@ elif tab == "Metrics":
     if not divisions:
         st.info("No divisions discovered (expected models/*_model or metrics_*.json)")
     else:
-        div = st.selectbox("Division", divisions, help="Pick a division to load explainability artifacts (SHAP/coefficients)")
+        div = st.selectbox("Division", divisions, help="Choose a division to view model artifacts")
+        with st.expander("How to read these metrics", expanded=False):
+            st.markdown("- AUC/PR-AUC: overall ranking quality (higher is better). Brier: probability accuracy (lower is better).")
+            st.markdown("- Gains: average conversion by decile (1=top 10% by score). Expect decreasing pattern.")
+            st.markdown("- Thresholds: score cut lines for top‑K%. Use to set capacity policies in ops.")
         # Model card
         mc_path = OUTPUTS_DIR / f"model_card_{div.lower()}.json"
         if mc_path.exists():
@@ -158,6 +165,7 @@ elif tab == "Metrics":
         cal_path = OUTPUTS_DIR / f"calibration_{div.lower()}.csv"
         if cal_path.exists():
             st.subheader("Calibration (train split)")
+            st.caption("Mean predicted vs fraction positives by bins; close tracking indicates good calibration.")
             cal = _read_csv(cal_path)
             try:
                 import plotly.graph_objects as go
@@ -176,6 +184,7 @@ elif tab == "Metrics":
         g_path = OUTPUTS_DIR / f"gains_{div.lower()}.csv"
         if g_path.exists():
             st.subheader("Gains (train split)")
+            st.caption("Average conversion by decile (1=top 10% by score).")
             gains = _read_csv(g_path)
             try:
                 import plotly.express as px
@@ -192,6 +201,7 @@ elif tab == "Metrics":
         th_path = OUTPUTS_DIR / f"thresholds_{div.lower()}.csv"
         if th_path.exists():
             st.subheader("Top-K Thresholds")
+            st.caption("Score thresholds to select top‑K% of customers; use with capacity planning.")
             thr = _read_csv(th_path)
             st.dataframe(thr, use_container_width=True)
             st.download_button("Download thresholds CSV", data=thr.to_csv(index=False), file_name=th_path.name)
@@ -261,14 +271,14 @@ elif tab == "Whitespace":
         # Use latest cutoff as default
         latest = st.session_state.get('latest_whitespace_cutoff')
         default_idx = cutoffs.index(latest) if latest in cutoffs else 0
-        sel_cut = st.selectbox("Cutoff", cutoffs, index=default_idx)
+        sel_cut = st.selectbox("Cutoff", cutoffs, index=default_idx, help="Choose ranking outputs by cutoff date (latest auto-selected)")
         ws = OUTPUTS_DIR / f"whitespace_{sel_cut}.csv"
         if ws.exists():
             # Filters
             df = _read_csv(ws)
             if not df.empty:
                 # Simple filters on key columns when present
-                cols = st.multiselect("Columns to show", df.columns.tolist(), default=df.columns.tolist()[:12])
+                cols = st.multiselect("Columns to show", df.columns.tolist(), default=df.columns.tolist()[:12], help="Tip: reduce visible columns to focus on key signals")
                 if cols:
                     st.dataframe(df[cols].head(200), use_container_width=True)
                 else:
@@ -278,27 +288,32 @@ elif tab == "Whitespace":
         ex = OUTPUTS_DIR / f"whitespace_explanations_{sel_cut}.csv"
         if ex.exists():
             st.subheader("Explanations")
+            st.caption("Short reasons combining key drivers (probability, affinity, EV).")
             st.dataframe(_read_csv(ex).head(200), use_container_width=True)
         # Metrics
         wm = OUTPUTS_DIR / f"whitespace_metrics_{sel_cut}.json"
         if wm.exists():
             st.subheader("Whitespace Metrics")
+            st.caption("Capture@K, division shares, stability vs prior run, coverage, and weights.")
             st.code(_read_text(wm))
         # Thresholds
         wthr = OUTPUTS_DIR / f"thresholds_whitespace_{sel_cut}.csv"
         if wthr.exists():
             st.subheader("Capacity Thresholds")
+            st.caption("Top‑percent / per‑rep / hybrid thresholds for list sizing & diversification.")
             st.dataframe(_read_csv(wthr), use_container_width=True)
         # Logs preview
         wlog = OUTPUTS_DIR / f"whitespace_log_{sel_cut}.jsonl"
         if wlog.exists():
             st.subheader("Log Preview")
+            st.caption("First 50 structured log rows; use for quick audit and guardrails.")
             lines = _read_jsonl(wlog)
             st.code(json.dumps(lines[:50], indent=2))
         # Market-basket rules (division-specific; match this cutoff)
         mb_files = list(OUTPUTS_DIR.glob(f"mb_rules_*_{sel_cut}.csv"))
         if mb_files:
             st.subheader("Market-Basket Rules")
+            st.caption("SKU-level co‑occurrence rules; Lift > 1 indicates positive association with the target division.")
             sel_mb = st.selectbox("Select rules file", mb_files, format_func=lambda p: p.name)
             mb = _read_csv(sel_mb)
             st.dataframe(mb.head(300), use_container_width=True)
@@ -363,6 +378,7 @@ elif tab == "Validation":
         cal_path = path / 'calibration.csv'
         if cal_path.exists():
             st.subheader("Calibration (holdout)")
+            st.caption("Probability calibration on holdout; closer lines indicate better calibration.")
             cal = _read_csv(cal_path)
             try:
                 import plotly.graph_objects as go
@@ -377,6 +393,7 @@ elif tab == "Validation":
         g2_path = path / 'gains.csv'
         if g2_path.exists():
             st.subheader("Gains (holdout)")
+            st.caption("Average conversion by decile in holdout data.")
             gains2 = _read_csv(g2_path)
             try:
                 import plotly.express as px
@@ -417,8 +434,12 @@ elif tab == "Runs":
         else:
             df = pd.DataFrame(rows)
             df = df.sort_values('run_id', ascending=False)
+            st.caption("Each entry is a pipeline run with start/finish, phase, status, and artifact path.")
+            # Flag dry-run entries
+            if 'status' in df.columns:
+                df['note'] = df['status'].apply(lambda s: 'dry-run (no compute)' if str(s).lower()=='dry-run' else '')
             st.dataframe(df, use_container_width=True, height=300)
-            idx = st.number_input("Select row index", min_value=0, max_value=max(0, len(df)-1), value=0, step=1)
+            idx = st.number_input("Select row index", min_value=0, max_value=max(0, len(df)-1), value=0, step=1, help="Pick a run to view manifest/config and deep-link to Validation (if applicable)")
             sel = df.iloc[int(idx)]
             st.subheader(f"Run {sel.get('run_id','?')} — {sel.get('phase','?')} [{sel.get('status','?')}]")
             run_dir = Path(sel.get('artifacts_path', OUTPUTS_DIR / 'runs' / str(sel.get('run_id',''))))
