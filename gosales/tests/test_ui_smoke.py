@@ -24,7 +24,7 @@ def test_compute_validation_badges_ok(tmp_path: Path):
         }
     }
     drift = {
-        'psi_ev_vs_holdout_gp': 0.10,
+        'psi_holdout_ev_vs_holdout_gp': 0.10,
         'ks_phat_train_holdout': 0.05,
     }
     run_dir = _make_run(tmp_path, metrics, drift)
@@ -42,7 +42,7 @@ def test_compute_validation_badges_alerts(tmp_path: Path):
         }
     }
     drift = {
-        'psi_ev_vs_holdout_gp': 0.40,
+        'psi_holdout_ev_vs_holdout_gp': 0.40,
         'ks_phat_train_holdout': 0.20,
     }
     alerts = {

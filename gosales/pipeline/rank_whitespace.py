@@ -49,7 +49,7 @@ def _score_p_icp(df: pd.DataFrame, division: str) -> Tuple[pd.Series, pd.Series]
     return p, p_pct
 
 
-def _compute_expected_value(df: pd.DataFrame, cfg) -> Tuple[pd.Series, int]:
+def _compute_expected_value_with_count(df: pd.DataFrame, cfg) -> Tuple[pd.Series, int]:
     # Simple proxy: use recent all-scope GP (e.g., 12m) if available; else 0
     col = None
     for c in ["rfm__all__gp_sum__12m", "rfm__all__gp_sum__24m", "total_gp_all_time"]:
@@ -65,6 +65,11 @@ def _compute_expected_value(df: pd.DataFrame, cfg) -> Tuple[pd.Series, int]:
     return ev_norm, capped_count
 
 
+def _compute_expected_value(df: pd.DataFrame, cfg) -> pd.Series:
+    ev_norm, _ = _compute_expected_value_with_count(df, cfg)
+    return ev_norm
+
+
 def _compute_ev_norm_by_segment(df: pd.DataFrame, cfg) -> Tuple[pd.Series, int]:
     # Prefer segment medians if segment columns present; fallback to global proxy
     seg_cols = []
@@ -78,7 +83,7 @@ def _compute_ev_norm_by_segment(df: pd.DataFrame, cfg) -> Tuple[pd.Series, int]:
             col = c
             break
     if col is None:
-        return _compute_expected_value(df, cfg)
+        return _compute_expected_value_with_count(df, cfg)
     base = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
     # Segment medians blended with global median (simple average for now)
     if seg_cols:
@@ -226,7 +231,8 @@ def _explain(row: pd.Series) -> str:
 @click.option("--capacity-mode", default=None)
 @click.option("--accounts-per-rep", default=None, type=int)
 @click.option("--config", default=str((Path(__file__).parents[1] / "config.yaml").resolve()))
-def main(cutoff: str, window_months: int, division: str | None, weights: str | None, normalize: str | None, capacity_mode: str | None, accounts_per_rep: int | None, config: str) -> None:
+@click.option("--dry-run/--no-dry-run", default=False, help="Skip ranking; only verify inputs and planned outputs")
+def main(cutoff: str, window_months: int, division: str | None, weights: str | None, normalize: str | None, capacity_mode: str | None, accounts_per_rep: int | None, config: str, dry_run: bool) -> None:
     cfg = load_config(config, cli_overrides={"run": {"prediction_window_months": window_months}})
     OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -252,6 +258,20 @@ def main(cutoff: str, window_months: int, division: str | None, weights: str | N
     log_entries: list[dict] = []
     artifacts: dict[str, str] = {}
     with run_context("phase4_whitespace") as ctx:
+        if dry_run:
+            artifacts.update({
+                f"planned_whitespace_{cutoff}.csv": str(OUTPUTS_DIR / f"whitespace_{cutoff}.csv"),
+                f"planned_whitespace_explanations_{cutoff}.csv": str(OUTPUTS_DIR / f"whitespace_explanations_{cutoff}.csv"),
+                f"planned_thresholds_whitespace_{cutoff}.csv": str(OUTPUTS_DIR / f"thresholds_whitespace_{cutoff}.csv"),
+                f"planned_whitespace_metrics_{cutoff}.json": str(OUTPUTS_DIR / f"whitespace_metrics_{cutoff}.json"),
+                f"planned_whitespace_log_{cutoff}.jsonl": str(OUTPUTS_DIR / f"whitespace_log_{cutoff}.jsonl"),
+            })
+            try:
+                ctx["write_manifest"](artifacts)
+                ctx["append_registry"]({"phase": "phase4_whitespace", "cutoff": cutoff, "artifact_count": len(artifacts), "status": "dry-run"})
+            except Exception:
+                pass
+            return
         for div in divisions:
             # For now, reuse the latest features parquet for the cutoff
             feat_path = OUTPUTS_DIR / f"features_{div.lower()}_{cutoff}.parquet"

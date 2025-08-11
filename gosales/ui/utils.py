@@ -73,7 +73,8 @@ def compute_validation_badges(run_dir: Path, thresholds: Dict[str, float] | None
     if drift_path.exists():
         try:
             drift = json.loads(drift_path.read_text(encoding='utf-8'))
-            psi_ev = drift.get('psi_ev_vs_holdout_gp', None)
+            # Prefer the clearer key name; fallback to legacy if present
+            psi_ev = drift.get('psi_holdout_ev_vs_holdout_gp', drift.get('psi_ev_vs_holdout_gp', None))
             ks_th = drift.get('ks_phat_train_holdout', None)
             if psi_ev is not None:
                 v = float(psi_ev)

@@ -64,8 +64,10 @@ def _build_validation_frame(division: str, cutoff: str, window_months: int, cfg)
 
 def _gains_deciles(y: np.ndarray, p: np.ndarray) -> pd.DataFrame:
     df = pd.DataFrame({'y': y, 'p': p}).sort_values('p', ascending=False).reset_index(drop=True)
-    decile_calc = (np.floor((df.index / max(1, len(df)-1)) * 10) + 1)
-    df['decile'] = pd.Series(decile_calc).clip(1, 10).astype(int)
+    # Use numpy to avoid Index.clip confusion on some pandas versions; align index explicitly
+    dec = (np.floor((df.index.values / max(1, len(df) - 1)) * 10) + 1)
+    dec = np.clip(dec, 1, 10).astype(int)
+    df['decile'] = pd.Series(dec, index=df.index)
     return df.groupby('decile').agg(fraction_positives=('y', 'mean'), count=('y', 'size'), mean_predicted=('p', 'mean')).reset_index()
 
 
@@ -94,13 +96,28 @@ def _calibration_mae(bins_df: pd.DataFrame) -> float:
 @click.option('--accounts-per-rep-grid', default='10,25')
 @click.option('--bootstrap', default=1000, type=int)
 @click.option('--config', default=str((Path(__file__).parents[1] / 'config.yaml').resolve()))
-def main(division: str, cutoff: str, window_months: int, capacity_grid: str, accounts_per_rep_grid: str, bootstrap: int, config: str) -> None:
+@click.option('--dry-run/--no-dry-run', default=False, help='Skip compute; only verify inputs and planned outputs')
+def main(division: str, cutoff: str, window_months: int, capacity_grid: str, accounts_per_rep_grid: str, bootstrap: int, config: str, dry_run: bool) -> None:
     cfg = load_config(config)
     out_dir = OUTPUTS_DIR / 'validation' / division.lower() / cutoff
     out_dir.mkdir(parents=True, exist_ok=True)
     artifacts: dict[str, str] = {}
     ctx_cm = run_context("phase5_validation")
     ctx = ctx_cm.__enter__()
+
+    if dry_run:
+        # Plan outputs without computing
+        try:
+            artifacts['planned_validation_frame.parquet'] = str(out_dir / 'validation_frame.parquet')
+            for name in ['gains.csv','calibration.csv','topk_scenarios.csv','topk_scenarios_sorted.csv','segment_performance.csv','metrics.json','drift.json','alerts.json']:
+                artifacts[f'planned_{name}'] = str(out_dir / name)
+            ctx = run_context("phase5_validation").__enter__()
+            ctx['write_manifest'](artifacts)
+            ctx['append_registry']({'phase': 'phase5_validation', 'division': division, 'cutoff': cutoff, 'artifact_count': len(artifacts), 'status': 'dry-run'})
+            run_context("phase5_validation").__exit__(None, None, None)
+        except Exception:
+            pass
+        return
 
     vf = _build_validation_frame(division, cutoff, window_months, cfg)
     # Join holdout labels from holdout CSVs if available (data/holdout/*). Fallback to training labels in feature parquet
@@ -151,11 +168,12 @@ def main(division: str, cutoff: str, window_months: int, capacity_grid: str, acc
                         holdout_gp_map[cust_col] = pd.to_numeric(holdout_gp_map[cust_col], errors='coerce').astype('Int64')
                 except Exception:
                     holdout_gp_map = None
-        if buyers is not None:
+        if buyers is not None and len(buyers) > 0:
             labels_df = pd.DataFrame({'customer_id': buyers, 'holdout_bought': 1})
             vf['customer_id'] = pd.to_numeric(vf['customer_id'], errors='coerce').astype('Int64')
             vf = vf.merge(labels_df, on='customer_id', how='left')
             vf['holdout_bought'] = vf['holdout_bought'].fillna(0).astype(int)
+            # Override labels only when holdout buyers exist
             if 'bought_in_division' in vf.columns:
                 vf.drop(columns=['bought_in_division'], inplace=True)
             vf.rename(columns={'holdout_bought': 'bought_in_division'}, inplace=True)
@@ -258,6 +276,9 @@ def main(division: str, cutoff: str, window_months: int, capacity_grid: str, acc
             rev_capture = float(realized_gp / max(1e-9, total_realized_gp)) if total_realized_gp > 0 else None
             scenarios.append({'mode': 'hybrid_segment', 'segment': seg_col, 'k_percent': k, 'contacts': contacts, 'capture': capture, 'precision': precision, 'expected_gp_norm': exp_gp, 'realized_gp': realized_gp, 'rev_capture': rev_capture})
     scen_df = pd.DataFrame(scenarios)
+    # Ensure k_percent exists for rows where relevant; drop rows missing it for CI computation
+    if not scen_df.empty and 'k_percent' in scen_df.columns:
+        scen_df['k_percent'] = pd.to_numeric(scen_df['k_percent'], errors='coerce')
     # Bootstrap CIs for capture and precision
     try:
         n_boot = int(getattr(cfg.validation, 'bootstrap_n', 1000))
@@ -289,8 +310,11 @@ def main(division: str, cutoff: str, window_months: int, capacity_grid: str, acc
             kk = max(1, int(len(df_in) * (k / 100.0)))
             topk = df_in.nlargest(kk, ['p_hat','EV_norm','customer_id'])
             return float(topk.get('holdout_gp', pd.Series(0.0, index=topk.index)).sum())
-        for i, row in scen_df[scen_df['mode'].isin(['top_percent', 'hybrid_segment'])].iterrows():
-            k = int(row['k_percent'])
+        for i, row in scen_df.iterrows():
+            k_val = row.get('k_percent') if isinstance(row, pd.Series) else None
+            if pd.isna(k_val):
+                continue
+            k = int(k_val)
             lo_c, hi_c = bootstrap_ci(lambda df_in, kk=k: cap_at_k(df_in, kk), vf, n=n_boot, seed=cfg.modeling.seed)
             lo_p, hi_p = bootstrap_ci(lambda df_in, kk=k: prec_at_k(df_in, kk), vf, n=n_boot, seed=cfg.modeling.seed)
             lo_rc, hi_rc = bootstrap_ci(lambda df_in, kk=k: rev_cap_at_k(df_in, kk), vf, n=n_boot, seed=cfg.modeling.seed)
@@ -376,7 +400,34 @@ def main(division: str, cutoff: str, window_months: int, capacity_grid: str, acc
         else:
             drift_report['ks_phat_train_holdout'] = None
 
-        # Per-feature PSI using train feature sample snapshot
+    # Minimal metrics.json
+
+    # Build capture grid only for entries with k_percent available
+    capture_grid = {}
+    try:
+        for s in scenarios:
+            if 'k_percent' in s and s.get('capture') is not None:
+                capture_grid[str(int(s['k_percent']))] = s['capture']
+    except Exception:
+        capture_grid = {}
+
+    metrics = {
+        'division': division,
+        'cutoff': cutoff,
+        'rows': int(len(vf)),
+        'capture_grid': capture_grid,
+        'drift': drift,
+        # Note: drift_highlights computed only when per-feature PSI is available
+        'metrics': {
+            'auc': auc_val,
+            'pr_auc': pr_auc_val,
+            'brier': brier,
+            'cal_mae': cal_mae,
+        },
+    }
+    # Per-feature PSI highlights (train snapshot vs holdout) for metrics.json
+    drift_highlights = {}
+    try:
         feat_sample_path = OUTPUTS_DIR / f"train_feature_sample_{division.lower()}_{cutoff}.parquet"
         if feat_sample_path.exists():
             train_feat = pd.read_parquet(feat_sample_path)
@@ -385,49 +436,23 @@ def main(division: str, cutoff: str, window_months: int, capacity_grid: str, acc
             for c in num_cols:
                 if c in train_feat.columns:
                     per_feature[c] = psi(train_feat[c], vf[c])
-            drift_report['psi_per_feature'] = per_feature
-
-        drift_file = out_dir / 'drift.json'
-        drift_file.write_text(json.dumps(drift_report, indent=2), encoding='utf-8')
-        artifacts['drift.json'] = str(drift_file)
-    except Exception as e:
-        logger.warning(f"Drift calculation failed: {e}")
-        drift_report = {}
-
-    # Drift highlights for metrics.json
-    drift_highlights = {}
-    try:
-        psi_map = drift_report.get('psi_per_feature', {})
-        thr = float(getattr(cfg.validation, 'psi_threshold', 0.25))
-        flagged = sorted(
-            (
-                {'feature': k, 'psi': float(v)}
-                for k, v in psi_map.items()
-                if isinstance(v, (int, float)) and v is not None and not np.isnan(v) and float(v) >= thr
-            ),
-            key=lambda x: x['psi'], reverse=True
-        )[:20]
-        drift_highlights = {
-            'psi_threshold': thr,
-            'psi_flagged_top': flagged,
-        }
+            thr = float(getattr(cfg.validation, 'psi_threshold', 0.25))
+            flagged = sorted(
+                (
+                    {'feature': k, 'psi': float(v)}
+                    for k, v in per_feature.items()
+                    if isinstance(v, (int, float)) and float(v) >= thr
+                ),
+                key=lambda x: x['psi'], reverse=True
+            )[:20]
+            drift_highlights = {
+                'psi_threshold': thr,
+                'psi_flagged_top': flagged,
+            }
     except Exception:
         drift_highlights = {}
 
-    metrics = {
-        'division': division,
-        'cutoff': cutoff,
-        'rows': int(len(vf)),
-        'capture_grid': {str(s['k_percent']): s['capture'] for s in scenarios if 'k_percent' in s},
-        'drift': drift_report, # Use the full drift report here
-        'drift_highlights': drift_highlights,
-        'metrics': {
-            'auc': auc_val,
-            'pr_auc': pr_auc_val,
-            'brier': brier,
-            'cal_mae': cal_mae,
-        },
-    }
+    metrics['drift_highlights'] = drift_highlights
     metrics_file = out_dir / 'metrics.json'
     metrics_file.write_text(pd.Series(metrics).to_json(indent=2), encoding='utf-8')
     # Log top PSI-flagged features for quick visibility
@@ -473,9 +498,31 @@ def main(division: str, cutoff: str, window_months: int, capacity_grid: str, acc
     try:
         drift_report = {}
         # EV vs holdout GP PSI
-        ev_raw = vf.get('rfm__all__gp_sum__12m', pd.Series(dtype=float))
-        hold_gp = vf.get('holdout_gp', pd.Series(dtype=float))
-        drift_report['psi_ev_vs_holdout_gp'] = psi(ev_raw, hold_gp)
+        ev_raw = pd.to_numeric(vf.get('rfm__all__gp_sum__12m', pd.Series(dtype=float)), errors='coerce')
+        hold_gp = pd.to_numeric(vf.get('holdout_gp', pd.Series(dtype=float)), errors='coerce')
+        # Value-weighted PSI across EV-decile bins comparing EV sums vs holdout GP sums
+        try:
+            t = ev_raw.dropna()
+            h = hold_gp.dropna()
+            if not t.empty and not h.empty:
+                edges = np.quantile(t, np.linspace(0.0, 1.0, 11))
+                # Assign bins
+                t_bins = pd.cut(t, bins=edges, include_lowest=True, duplicates='drop')
+                h_aligned = h.reindex(t.index).fillna(0.0)
+                # Sum within bins
+                t_sum = t.groupby(t_bins).sum()
+                h_sum = h_aligned.groupby(t_bins).sum()
+                # Normalize
+                tp = (t_sum / max(1e-9, t_sum.sum())).clip(1e-9)
+                hp = (h_sum / max(1e-9, h_sum.sum())).clip(1e-9)
+                drift_report['psi_holdout_ev_vs_holdout_gp'] = float(np.sum((hp - tp) * np.log(hp / tp)))
+            else:
+                drift_report['psi_holdout_ev_vs_holdout_gp'] = 0.0
+        except Exception:
+            drift_report['psi_holdout_ev_vs_holdout_gp'] = 0.0
+        # Also report unweighted PSI for EV_norm if present
+        if 'EV_norm' in vf.columns:
+            drift_report['psi_evnorm_vs_holdout_gp'] = psi(vf['EV_norm'], hold_gp)
         # p_hat separation KS (pos vs neg)
         if 'bought_in_division' in vf.columns:
             pos_p = pd.Series(p)[vf['bought_in_division'] == 1]

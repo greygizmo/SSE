@@ -10,7 +10,7 @@ def test_scale_weights_by_coverage_scales_and_normalizes():
     lift = pd.Series([0.0]*8 + [0.9, 0.8])     # 20% coverage
     als = pd.Series([0.0]*9 + [0.7])           # 10% coverage
     w_adj, adj = _scale_weights_by_coverage(base, als, lift, threshold=0.3)
-    assert sum(w_adj) == pytest.approx(1.0, rel=1e-6)
+    assert abs(sum(w_adj) - 1.0) < 1e-6
     # Both lift and als should be scaled down (coverage below threshold)
     assert adj.get('als_weight_factor', 1.0) < 1.0
     assert adj.get('aff_weight_factor', 1.0) < 1.0

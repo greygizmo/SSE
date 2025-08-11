@@ -34,7 +34,7 @@ def test_drift_psi_smoke(monkeypatch):
         'holdout_gp': hold_gp,
     })
     OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
-    (OUTPUTS_DIR / f"features_{division.lower()}_{cutoff}.parquet").write_bytes(feats.to_parquet(index=False))
+    feats.to_parquet(OUTPUTS_DIR / f"features_{division.lower()}_{cutoff}.parquet", index=False)
 
     # Dummy p_hat constant
     p_hold = np.full(n, 0.5)
@@ -52,7 +52,7 @@ def test_drift_psi_smoke(monkeypatch):
     assert result.exit_code == 0
     drift_path = OUTPUTS_DIR / 'validation' / division.lower() / cutoff / 'drift.json'
     drift = json.loads(drift_path.read_text(encoding='utf-8'))
-    assert float(drift.get('psi_ev_vs_holdout_gp', 0.0)) > 0.25
+    assert float(drift.get('psi_holdout_ev_vs_holdout_gp', 0.0)) > 0.25
 
 
 def test_calibration_sanity(monkeypatch):
