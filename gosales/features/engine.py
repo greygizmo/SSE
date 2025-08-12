@@ -337,7 +337,7 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
                 rec_div = rec_div.merge(extra, on='customer_id', how='outer')
 
         # SKU-level features (last 12 months)
-        important_skus = ['SWX_Core', 'SWX_Pro_Prem', 'Core_New_UAP', 'Pro_Prem_New_UAP', 'PDM', 'Simulation', 'Services', 'Training', 'Success Plan GP', 'Supplies']
+        important_skus = ['SWX_Core', 'SWX_Pro_Prem', 'Core_New_UAP', 'Pro_Prem_New_UAP', 'PDM', 'Simulation', 'Services', 'Training', 'Success Plan GP', 'Supplies', 'SW_Plastics', 'AM_Software', 'DraftSight', 'Fortus', 'HV_Simulation', 'CATIA', 'Delmia_Apriso']
         sl = fd.loc[last12_mask, ['customer_id', 'product_sku', 'gross_profit', 'quantity']].copy()
         sku_gp = sl.groupby(['customer_id', 'product_sku'])['gross_profit'].sum().unstack(fill_value=0.0)
         sku_gp = sku_gp.reindex(columns=important_skus, fill_value=0.0).add_prefix('sku_gp_12m_')
@@ -503,6 +503,24 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
     except Exception as e:
         # Non-fatal; proceed with base features if advanced features fail
         logger.warning(f"Advanced temporal features failed: {e}")
+
+    # Flags / indicators aggregated from sales_log: ACR and New
+    try:
+        sl_flags = pd.read_sql("SELECT CustomerId, [Rec Date] AS rec_date, ACR, [New] FROM sales_log", engine)
+        sl_flags['rec_date'] = pd.to_datetime(sl_flags['rec_date'], errors='coerce')
+        sl_flags['customer_id'] = pd.to_numeric(sl_flags['CustomerId'], errors='coerce').astype('Int64')
+        if cutoff_date:
+            sl_flags = sl_flags[sl_flags['rec_date'] <= cutoff_dt]
+        agg_flags = sl_flags.groupby('customer_id').agg(
+            ever_acr=('ACR', lambda s: int(pd.to_numeric(s, errors='coerce').fillna(0).astype(int).max() > 0)),
+            ever_new_customer=('[New]', lambda s: int(pd.to_numeric(s, errors='coerce').fillna(0).astype(int).max() > 0))
+        ).reset_index()
+        features_pd = features_pd.merge(agg_flags, on='customer_id', how='left')
+        for c in ['ever_acr', 'ever_new_customer']:
+            if c in features_pd.columns:
+                features_pd[c] = features_pd[c].fillna(0).astype(int)
+    except Exception as e:
+        logger.warning(f"Flag aggregation failed: {e}")
 
     # Convert back to polars
     features = pl.from_pandas(features_pd)

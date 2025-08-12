@@ -14,7 +14,7 @@ def test_ev_cap_applies():
     df = pd.DataFrame({
         'rfm__all__gp_sum__12m': list(range(100)) + [10000],
     })
-    ev_norm, _ = _compute_expected_value(df, DummyCfg)
+    ev_norm = _compute_expected_value(df, DummyCfg)
     # The outlier should be capped; normalized value should be <= 1
     assert float(ev_norm.max()) <= 1.0
 

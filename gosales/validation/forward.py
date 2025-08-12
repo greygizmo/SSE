@@ -399,6 +399,8 @@ def main(division: str, cutoff: str, window_months: int, capacity_grid: str, acc
             drift_report['ks_phat_train_holdout'] = ks_statistic(p_train, p_hold)
         else:
             drift_report['ks_phat_train_holdout'] = None
+    except Exception:
+        pass
 
     # Minimal metrics.json
 
@@ -410,6 +412,9 @@ def main(division: str, cutoff: str, window_months: int, capacity_grid: str, acc
                 capture_grid[str(int(s['k_percent']))] = s['capture']
     except Exception:
         capture_grid = {}
+
+    # Backward-compat for metrics.json schema
+    drift = drift_report
 
     metrics = {
         'division': division,
@@ -496,28 +501,12 @@ def main(division: str, cutoff: str, window_months: int, capacity_grid: str, acc
 
     # Drift JSON: per-feature PSI (train sample vs holdout), EV vs holdout GP PSI, KS(p_hat train vs holdout and pos vs neg)
     try:
-        drift_report = {}
         # EV vs holdout GP PSI
         ev_raw = pd.to_numeric(vf.get('rfm__all__gp_sum__12m', pd.Series(dtype=float)), errors='coerce')
         hold_gp = pd.to_numeric(vf.get('holdout_gp', pd.Series(dtype=float)), errors='coerce')
-        # Value-weighted PSI across EV-decile bins comparing EV sums vs holdout GP sums
+        # Simple PSI on raw EV vs holdout GP to flag distribution shift robustly
         try:
-            t = ev_raw.dropna()
-            h = hold_gp.dropna()
-            if not t.empty and not h.empty:
-                edges = np.quantile(t, np.linspace(0.0, 1.0, 11))
-                # Assign bins
-                t_bins = pd.cut(t, bins=edges, include_lowest=True, duplicates='drop')
-                h_aligned = h.reindex(t.index).fillna(0.0)
-                # Sum within bins
-                t_sum = t.groupby(t_bins).sum()
-                h_sum = h_aligned.groupby(t_bins).sum()
-                # Normalize
-                tp = (t_sum / max(1e-9, t_sum.sum())).clip(1e-9)
-                hp = (h_sum / max(1e-9, h_sum.sum())).clip(1e-9)
-                drift_report['psi_holdout_ev_vs_holdout_gp'] = float(np.sum((hp - tp) * np.log(hp / tp)))
-            else:
-                drift_report['psi_holdout_ev_vs_holdout_gp'] = 0.0
+            drift_report['psi_holdout_ev_vs_holdout_gp'] = psi(ev_raw, hold_gp)
         except Exception:
             drift_report['psi_holdout_ev_vs_holdout_gp'] = 0.0
         # Also report unweighted PSI for EV_norm if present

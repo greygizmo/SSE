@@ -19,8 +19,8 @@ A “living” reference for the raw GoSales *Sales_Log.csv* export. This docume
 | | `Term GP`, `Referral_GP` | decimal | ... | Specialized GP calculations. | Medium |
 | **G. SOLIDWORKS GP ($)** | `SWX_Core`, `SWX_Pro_Prem`, `Core_New_UAP`, `Pro_Prem_New_UAP` | decimal | `4000.00` | Gross Profit from core SOLIDWORKS products and their associated support (UAP) contracts. | **High** (direct inputs for 'Solidworks' model) |
 | **H. SOLIDWORKS Qty** | `SWX_Core_Qty`, `SWX_Pro_Prem_Qty`, `Core_New_UAP_Qty`, `Pro_Prem_New_UAP_Qty` | int | `1` | Seat counts for core SOLIDWORKS products and UAP contracts. | **High** (essential for `seat_cagr` feature) |
-| **I. Other Product GP ($)** | `Simulation`, `PDM`, `CAMWorks`, `Services`, `Training`, `Supplies`, etc. | decimal | `1497.50` | Gross Profit allocated to other specific products or services in the transaction. | **High** (inputs for future division models) |
-| **J. Other Product Qty** | `Simulation_Qty`, `PDM_Qty`, `CAMWorks_Qty`, `Services_Qty`, etc. | int | `1` | Quantities for the corresponding products and services. | **High** (inputs for future division models) |
+| **I. Other Product GP ($)** | `Simulation`, `PDM`, `CAMWorks`, `Services`, `Training`, `Supplies`, `DraftSight`, `Post_Processing`, `AM_Software`, `HV_Simulation`, `CATIA`, `Delmia_Apriso` | decimal | `1497.50` | Gross Profit allocated to other specific products or services. `HV_Simulation`/`CATIA`/`Delmia_Apriso` belong to the new `CPE` division. | **High** |
+| **J. Other Product Qty** | `Simulation_Qty`, `PDM_Qty`, `CAMWorks_Qty`, `Services_Qty`, `SW_Plastics_Qty`, `AM_Software_Qty`, `DraftSight_Qty`, `Post_Processing_Qty`, `HV_Simulation_Qty`, `CATIA_Qty`, `Delmia_Apriso_Qty` | int | `1` | Quantities for the corresponding products. `SW_Plastics_Qty` rolls into Simulation seat counts even when GP is zero. `_3DP_Software_Qty` is aliased to `AM_Software_Qty`. | **High** |
 | **K. Quotas & Targets** | `GP Quota`, `SW Quota`, `Sim Quota`, `PDM Quota`, etc. | decimal | numeric | Rep's sales quotas for various products. | Low (Rep-specific, not customer-specific) |
 | **L. Success Plan** | `Success Plan GP`, `Success_Plan_Qty`, `Success Plan Level`, `Success Plan Attached` | mixed | `1497.5 / Elite / TRUE` | Metrics related to the sale of an elevated customer support plan. | **High** (strong indicator of customer investment) |
 | **M. Currency & FX** | `InvoiceCurrency`, `UsdCadConversionRate`, `GPCurrencyRateAdjustment` | text/dec | `USD / 1.00` | Fields for handling multi-currency transactions. | Medium (important if dealing with non-USD transactions) |
@@ -38,7 +38,7 @@ The following columns should be "unpivoted" into our `fact_transactions` table a
 
 *   **Identifiers:** `CustomerId`, `Rec Date`, `Division`
 *   **Core Product Metrics (Solidworks):** `SWX_Core`, `SWX_Core_Qty`, `SWX_Pro_Prem`, `SWX_Pro_Prem_Qty`, `Core_New_UAP`, `Core_New_UAP_Qty`, `Pro_Prem_New_UAP`, `Pro_Prem_New_UAP_Qty`
-*   **Ecosystem Metrics:** `Simulation`, `PDM`, `CAMWorks`, `Services`, `Training`, `Supplies`, `Success Plan GP`, `Success_Plan_Qty` and all other `_Qty` and `GP`/dollar value columns.
+*   **Ecosystem Metrics:** `Simulation`, `PDM`, `CAMWorks`, `Services`, `Training`, `Supplies`, `DraftSight`, `Post_Processing`, `AM_Software`, `HV_Simulation`, `CATIA`, `Delmia_Apriso`, `Success Plan GP`, `Success_Plan_Qty` and all other `_Qty` and `GP` columns. `_3DP_Software_Qty` → `AM_Software_Qty` (alias).
 *   **Transaction Flags:** `New`, `Success Plan Attached`
 
 ### Proposed Calculated Features (Behavioral Metrics):
@@ -65,6 +65,6 @@ This new dataset allows for the creation of powerful behavioral features. I will
     *   `has_success_plan`: A binary flag indicating if the customer has ever purchased a Success Plan.
     *   `product_diversity_score`: A count of the number of distinct product divisions the customer has purchased from (e.g., Solidworks, Simulation, Services).
 
-This updated schema and feature plan provide a robust foundation for building a highly accurate ICP model for the 'Solidworks' division, while also setting us up perfectly to tackle other divisions in the future.
+This updated schema and feature plan provide a robust foundation for building a highly accurate ICP model for the 'Solidworks' division, and cleanly introduces new divisions such as `CPE` and `Post_Processing`, aligning ETL, features, and future models.
 
 My next step will be to implement the ETL changes to create the `fact_transactions` table based on this new understanding.

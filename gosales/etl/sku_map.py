@@ -36,6 +36,24 @@ def get_sku_mapping() -> Dict[str, Dict[str, str]]:
         },
         # Assuming supplies = consumables
         "Supplies": {"qty_col": "Consumables_Qty", "division": "Hardware"},
+
+        # Simulation and related
+        # Plastics: quantity-only; GP often captured elsewhere (HV_Simulation). Keep under Simulation for seat signals
+        "SW_Plastics": {"qty_col": "SW_Plastics_Qty", "division": "Simulation"},
+
+        # Additive Manufacturing
+        # Post_Processing as separate subdivision
+        "Post_Processing": {"qty_col": "Post_Processing_Qty", "division": "Post_Processing"},
+        # AM Software and alias of 3DP software qty
+        "AM_Software": {"qty_col": "AM_Software_Qty", "division": "AM_Software"},
+
+        # FDM Printers: keep Fortus canonical; alias legacy printer SKUs to Fortus in ETL normalization
+        "Fortus": {"qty_col": "Fortus_Qty", "division": "FDM"},
+
+        # PLM / 3DEXPERIENCE (CPE)
+        "HV_Simulation": {"qty_col": "HV_Simulation_Qty", "division": "CPE"},
+        "CATIA": {"qty_col": "CATIA_Qty", "division": "CPE"},
+        "Delmia_Apriso": {"qty_col": "Delmia_Apriso_Qty", "division": "CPE"},
     }
     # Apply optional overrides
     try:

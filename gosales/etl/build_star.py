@@ -100,6 +100,16 @@ def build_star_schema(engine, config_path: str | Path | None = None, rebuild: bo
                 ("PDM", "EPDM_CAD_Editor"),
                 ("PDM_Qty", "EPDM_CAD_Editor_Qty"),
                 ("Supplies", "Consumables"),
+                # DraftSight inference inputs (map to canonical DraftSight if present downstream)
+                ("DraftSight", "CGP"),
+                ("DraftSight_Qty", "Misc_Qty"),
+                # AM software alias
+                ("AM_Software_Qty", "_3DP_Software_Qty"),
+                # Legacy printer SKUs alias to Fortus
+                ("Fortus", "_1200_Elite_Fortus250"),
+                ("Fortus_Qty", "_1200_Elite_Fortus250_Qty"),
+                ("Fortus", "UPrint"),
+                ("Fortus_Qty", "UPrint_Qty"),
             ]
             for target, source in alias_pairs:
                 if target not in df.columns and source in df.columns:
