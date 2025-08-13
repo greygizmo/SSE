@@ -14,6 +14,8 @@ from sklearn.linear_model import SGDClassifier, LogisticRegression
 from sklearn.metrics import roc_auc_score, precision_recall_curve, auc, brier_score_loss
 from sklearn.calibration import CalibratedClassifierCV
 from lightgbm import LGBMClassifier
+from sklearn.exceptions import ConvergenceWarning
+import warnings
 try:
     import shap  # type: ignore
     _HAS_SHAP = True
@@ -79,8 +81,46 @@ def _sanitize_features(X: pd.DataFrame) -> pd.DataFrame:
     Xc.replace([np.inf, -np.inf], np.nan, inplace=True)
     return Xc.fillna(0.0)
 
+
+def _drop_low_variance(X: pd.DataFrame, threshold: float = 1e-12) -> tuple[pd.DataFrame, list[str]]:
+    """Drop constant and near-constant columns to help optimization stability."""
+    variances = X.var(axis=0, numeric_only=True)
+    low_var_cols = [c for c, v in variances.items() if (pd.isna(v) or float(v) <= threshold)]
+    Xr = X.drop(columns=low_var_cols, errors="ignore")
+    return Xr, low_var_cols
+
+
+def _drop_high_correlation(X: pd.DataFrame, threshold: float = 0.995) -> tuple[pd.DataFrame, list[tuple[str, str]]]:
+    """Drop one of each pair of highly correlated features (absolute Pearson > threshold)."""
+    dropped_pairs: list[tuple[str, str]] = []
+    try:
+        num = X.select_dtypes(include=[np.number])
+        if num.shape[1] <= 1:
+            return X, dropped_pairs
+        corr = num.corr().abs()
+        upper = corr.where(np.triu(np.ones(corr.shape), k=1).astype(bool))
+        to_drop = [column for column in upper.columns if any(upper[column] > threshold)]
+        for col in to_drop:
+            offending = upper.index[upper[col] > threshold].tolist()
+            if offending:
+                dropped_pairs.append((offending[0], col))
+        Xr = X.drop(columns=list(set(to_drop)), errors="ignore")
+        return Xr, dropped_pairs
+    except Exception:
+        return X, dropped_pairs
+
+
+def _emit_diagnostics(out_dir: Path, division: str, context: dict) -> None:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        diag_path = OUTPUTS_DIR / f"diagnostics_{division.lower()}.json"
+        with open(diag_path, "w", encoding="utf-8") as f:
+            json.dump(context, f, indent=2)
+    except Exception:
+        pass
+
 def _calibrate(clf, X_train: pd.DataFrame, y_train: pd.Series, X_valid: pd.DataFrame, method: str):
-    calibrated = CalibratedClassifierCV(base_estimator=clf, method="sigmoid" if method == "platt" else "isotonic", cv=3)
+    calibrated = CalibratedClassifierCV(estimator=clf, method="sigmoid" if method == "platt" else "isotonic", cv=3)
     calibrated.fit(X_train, y_train)
     return calibrated
 
@@ -125,6 +165,8 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
             except Exception:
                 pass
             return
+        all_dropped_low_var: list[str] = []
+        all_dropped_corr: list[tuple[str, str]] = []
         for cutoff in cut_list:
             fm = create_feature_matrix(engine, division, cutoff, window_months)
             # Persist features parquet for validation phase (Phase 5) compatibility
@@ -141,6 +183,16 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
             y = df['bought_in_division'].astype(int).values
             X = df.drop(columns=['customer_id','bought_in_division'])
             X = _sanitize_features(X)
+            # Feature pruning for stability
+            dropped_low_var: list[str] = []
+            dropped_corr: list[tuple[str, str]] = []
+            try:
+                X, dropped_low_var = _drop_low_variance(X)
+                X, dropped_corr = _drop_high_correlation(X)
+                all_dropped_low_var.extend([c for c in dropped_low_var if c not in all_dropped_low_var])
+                all_dropped_corr.extend(dropped_corr)
+            except Exception:
+                pass
             X_train, X_valid, y_train, y_valid = _train_test_split_time_aware(X, y, cfg.modeling.seed)
 
         # Baseline LR (elastic-net via saga)
@@ -148,19 +200,36 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
             lr_params = cfg.modeling.lr_grid
             best_lr_pipe = None
             best_lr_auc = -1
-            for l1_ratio in lr_params.get('l1_ratio', [0.0, 0.5]):
-                for C in lr_params.get('C', [1.0]):
-                    lr = LogisticRegression(penalty='elasticnet', solver='saga', l1_ratio=l1_ratio, C=C, max_iter=2000, class_weight='balanced', random_state=cfg.modeling.seed)
+            best_conv = True
+            # Expanded grid and higher iteration budget
+            grid_l1 = lr_params.get('l1_ratio', [0.0, 0.2, 0.5, 0.8])
+            grid_C = lr_params.get('C', [0.1, 0.5, 1.0])
+            for l1_ratio in grid_l1:
+                for C in grid_C:
+                    if float(l1_ratio) == 0.0:
+                        lr = LogisticRegression(
+                            penalty='l2', solver='lbfgs', C=C, max_iter=10000, tol=1e-3,
+                            class_weight='balanced', random_state=cfg.modeling.seed
+                        )
+                    else:
+                        lr = LogisticRegression(
+                            penalty='elasticnet', solver='saga', l1_ratio=l1_ratio, C=C,
+                            max_iter=10000, tol=1e-3, class_weight='balanced', random_state=cfg.modeling.seed
+                        )
                     pipe = Pipeline([
                         ('scaler', StandardScaler(with_mean=False)),
                         ('model', lr),
                     ])
-                    pipe.fit(X_train, y_train)
+                    with warnings.catch_warnings(record=True) as ws:
+                        warnings.simplefilter("always", ConvergenceWarning)
+                        pipe.fit(X_train, y_train)
+                        conv_warn = any(isinstance(w.message, ConvergenceWarning) for w in ws)
                     p = pipe.predict_proba(X_valid)[:, 1]
                     auc_lr = roc_auc_score(y_valid, p)
                     if auc_lr > best_lr_auc:
                         best_lr_auc = auc_lr
                         best_lr_pipe = pipe
+                        best_conv = not conv_warn
             if best_lr_pipe is not None:
                 # Calibration on the entire pipeline
                 best_cal = None
@@ -174,7 +243,19 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
                         best_cal = cal
                 p = best_cal.predict_proba(X_valid)[:, 1]
                 lift10 = _lift_at_k(y_valid, p, 10)
-                results.append({"cutoff": cutoff, "model": "logreg", "auc": float(best_lr_auc), "lift10": float(lift10), "brier": float(best_brier), "calibration": best_cal.method})
+                # Pull n_iter_ from underlying LR if available
+                try:
+                    lr_inner = best_lr_pipe.named_steps.get('model')
+                    n_iter_val = getattr(lr_inner, 'n_iter_', None)
+                    if isinstance(n_iter_val, (list, np.ndarray)):
+                        n_iter_val = [int(x) for x in np.ravel(n_iter_val).tolist()]
+                except Exception:
+                    n_iter_val = None
+                results.append({
+                    "cutoff": cutoff, "model": "logreg", "auc": float(best_lr_auc),
+                    "lift10": float(lift10), "brier": float(best_brier), "calibration": best_cal.method,
+                    "converged": bool(best_conv), "n_iter": n_iter_val
+                })
 
         # LGBM challenger
         if 'lgbm' in model_names:
@@ -202,7 +283,7 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
                                     bagging_fraction=bagging_fraction,
                                     scale_pos_weight=min(spw, 10.0),
                                 )
-                                clf.fit(X_train, y_train, eval_set=[(X_valid, y_valid)], eval_metric='auc', verbose=False, early_stopping_rounds=100)
+                                clf.fit(X_train, y_train, eval_set=[(X_valid, y_valid)], eval_metric='auc')
                                 p = clf.predict_proba(X_valid)[:,1]
                                 auc_lgbm = roc_auc_score(y_valid, p)
                                 # Overfit guard: compare train vs valid AUC; if large gap, try stronger regularization once
@@ -225,14 +306,14 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
                                         bagging_fraction=max(0.5, bagging_fraction * 0.9),
                                         scale_pos_weight=min(spw, 10.0),
                                     )
-                                    reg_clf.fit(X_train, y_train, eval_set=[(X_valid, y_valid)], eval_metric='auc', verbose=False, early_stopping_rounds=100)
+                                    reg_clf.fit(X_train, y_train, eval_set=[(X_valid, y_valid)], eval_metric='auc')
                                     p_reg = reg_clf.predict_proba(X_valid)[:,1]
                                     auc_reg = roc_auc_score(y_valid, p_reg)
                                     if auc_reg >= auc_lgbm - 0.002:  # accept similar or better valid AUC with stronger regularization
                                         clf = reg_clf
                                         p = p_reg
                                         auc_lgbm = auc_reg
-                                        logger.info(f"Overfit guard applied: gap={gap:.3f} → using regularized params for LGBM")
+                                        logger.info(f"Overfit guard applied: gap={gap:.3f} -> using regularized params for LGBM")
                                 if auc_lgbm > best_auc:
                                     best_auc = auc_lgbm
                                     best_lgbm = clf
@@ -352,7 +433,9 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
         # Gains (deciles)
         gains_df = pd.DataFrame({"y": y_final, "p": p_final})
         gains_df = gains_df.sort_values("p", ascending=False).reset_index(drop=True)
-        gains_df["decile"] = (np.floor((gains_df.index / max(1, len(gains_df)-1)) * 10) + 1).clip(1, 10).astype(int)
+        idx = np.arange(len(gains_df))
+        gains_df["decile"] = (np.floor((idx / max(1, len(gains_df)-1)) * 10) + 1)
+        gains_df["decile"] = np.clip(gains_df["decile"].astype(int), 1, 10)
         gains = gains_df.groupby("decile").agg(bought_in_division_mean=("y","mean"), count=("y","size"), p_mean=("p","mean")).reset_index()
         gains_path = OUTPUTS_DIR / f"gains_{division.lower()}.csv"
         gains.to_csv(gains_path, index=False)
@@ -486,6 +569,23 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
         artifacts[model_card.name] = str(model_card)
     except Exception as e:
         logger.warning(f"Failed writing Phase 3 artifacts: {e}")
+
+    # Emit diagnostics summary (feature pruning collected on last iteration)
+    try:
+        diag_ctx = {
+            "division": division,
+            "cutoffs": cut_list,
+            "selected_model": winner,
+            "dropped_low_variance_cols": list(dict.fromkeys(all_dropped_low_var)),
+            "dropped_high_corr_pairs": all_dropped_corr,
+            "results_grid": results,
+        }
+        _emit_diagnostics(OUTPUTS_DIR, division, diag_ctx)
+        # If any LR result shows non-convergence, log a warning
+        if any((r.get('model') == 'logreg' and r.get('converged') is False) for r in results):
+            logger.warning("Logistic Regression did not fully converge for some grid settings. See diagnostics JSON for details.")
+    except Exception:
+        pass
 
     logger.info(f"Training complete for {division}")
     try:
