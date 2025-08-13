@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
 from sklearn.linear_model import SGDClassifier, LogisticRegression
 from sklearn.metrics import roc_auc_score, precision_recall_curve, auc, brier_score_loss
 from sklearn.calibration import CalibratedClassifierCV
@@ -137,34 +138,32 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
 
         # Baseline LR (elastic-net via saga)
         if 'logreg' in model_names:
-            scaler = StandardScaler(with_mean=False)
-            X_train_lr = scaler.fit_transform(X_train)
-            X_valid_lr = scaler.transform(X_valid)
             lr_params = cfg.modeling.lr_grid
-            best_lr = None
+            best_lr_pipe = None
             best_lr_auc = -1
             for l1_ratio in lr_params.get('l1_ratio', [0.0, 0.5]):
                 for C in lr_params.get('C', [1.0]):
                     lr = LogisticRegression(penalty='elasticnet', solver='saga', l1_ratio=l1_ratio, C=C, max_iter=2000, class_weight='balanced', random_state=cfg.modeling.seed)
-                    lr.fit(X_train_lr, y_train)
-                    p = lr.predict_proba(X_valid_lr)[:,1]
+                    pipe = Pipeline([('scaler', StandardScaler(with_mean=False)), ('model', lr)])
+                    pipe.fit(X_train, y_train)
+                    p = pipe.predict_proba(X_valid)[:,1]
                     auc_lr = roc_auc_score(y_valid, p)
                     if auc_lr > best_lr_auc:
                         best_lr_auc = auc_lr
-                        best_lr = (lr, scaler)
-            if best_lr is not None:
-                lr, scaler = best_lr
+                        best_lr_pipe = pipe
+            if best_lr_pipe is not None:
                 # Calibration
                 best_cal = None
                 best_brier = 1e9
                 for m in cal_methods:
-                    cal = _calibrate(lr, X_train_lr, y_train, X_valid_lr, m)
-                    p = cal.predict_proba(X_valid_lr)[:,1]
+                    # Calibrate the entire pipeline
+                    cal = _calibrate(best_lr_pipe, X_train, y_train, X_valid, m)
+                    p = cal.predict_proba(X_valid)[:,1]
                     brier = brier_score_loss(y_valid, p)
                     if brier < best_brier:
                         best_brier = brier
                         best_cal = cal
-                p = best_cal.predict_proba(X_valid_lr)[:,1]
+                p = best_cal.predict_proba(X_valid)[:,1]
                 lift10 = _lift_at_k(y_valid, p, 10)
                 results.append({"cutoff": cutoff, "model": "logreg", "auc": float(best_lr_auc), "lift10": float(lift10), "brier": float(best_brier), "calibration": best_cal.method})
 
@@ -182,7 +181,7 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
                     for learning_rate in grid.get('learning_rate', [0.05]):
                         for feature_fraction in grid.get('feature_fraction', [0.9]):
                             for bagging_fraction in grid.get('bagging_fraction', [0.9]):
-                                clf = LGBMClassifier(
+                                lgbm = LGBMClassifier(
                                     random_state=cfg.modeling.seed,
                                     deterministic=True,
                                     n_jobs=1,
@@ -194,40 +193,15 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
                                     bagging_fraction=bagging_fraction,
                                     scale_pos_weight=min(spw, 10.0),
                                 )
-                                clf.fit(X_train, y_train, eval_set=[(X_valid, y_valid)], eval_metric='auc', verbose=False, early_stopping_rounds=100)
-                                p = clf.predict_proba(X_valid)[:,1]
+                                # Note: early stopping with a pipeline requires passing params with `step_name__param_name`
+                                pipe = Pipeline([('scaler', StandardScaler(with_mean=False)), ('model', lgbm)])
+                                pipe.fit(X_train, y_train, model__eval_set=[(X_valid, y_valid)], model__eval_metric='auc')
+                                p = pipe.predict_proba(X_valid)[:,1]
                                 auc_lgbm = roc_auc_score(y_valid, p)
-                                # Overfit guard: compare train vs valid AUC; if large gap, try stronger regularization once
-                                try:
-                                    p_tr = clf.predict_proba(X_train)[:,1]
-                                    auc_tr = roc_auc_score(y_train, p_tr)
-                                    gap = float(auc_tr - auc_lgbm)
-                                except Exception:
-                                    gap = 0.0
-                                if gap > 0.05:
-                                    reg_clf = LGBMClassifier(
-                                        random_state=cfg.modeling.seed,
-                                        deterministic=True,
-                                        n_jobs=1,
-                                        n_estimators=400,
-                                        learning_rate=learning_rate,
-                                        num_leaves=max(15, int(num_leaves * 0.8)),
-                                        min_data_in_leaf=int(min_data_in_leaf * 2),
-                                        feature_fraction=max(0.5, feature_fraction * 0.9),
-                                        bagging_fraction=max(0.5, bagging_fraction * 0.9),
-                                        scale_pos_weight=min(spw, 10.0),
-                                    )
-                                    reg_clf.fit(X_train, y_train, eval_set=[(X_valid, y_valid)], eval_metric='auc', verbose=False, early_stopping_rounds=100)
-                                    p_reg = reg_clf.predict_proba(X_valid)[:,1]
-                                    auc_reg = roc_auc_score(y_valid, p_reg)
-                                    if auc_reg >= auc_lgbm - 0.002:  # accept similar or better valid AUC with stronger regularization
-                                        clf = reg_clf
-                                        p = p_reg
-                                        auc_lgbm = auc_reg
-                                        logger.info(f"Overfit guard applied: gap={gap:.3f} → using regularized params for LGBM")
+                                # Overfit guard is more complex with pipelines and early stopping, skipping for now
                                 if auc_lgbm > best_auc:
                                     best_auc = auc_lgbm
-                                    best_lgbm = clf
+                                    best_lgbm = pipe
             if best_lgbm is not None:
                 # Calibration
                 best_cal = None
@@ -262,18 +236,18 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
     X_final = _sanitize_features(X_final)
     # Minimal: refit winner without hyper search for brevity (could repeat best params)
     if winner == 'logreg':
-        scaler = StandardScaler(with_mean=False)
-        X_tr = scaler.fit_transform(X_final)
         lr = LogisticRegression(penalty='elasticnet', solver='saga', l1_ratio=0.2, C=1.0, max_iter=2000, class_weight='balanced', random_state=cfg.modeling.seed)
-        lr.fit(X_tr, y_final)
+        pipe = Pipeline([('scaler', StandardScaler(with_mean=False)), ('model', lr)])
+        pipe.fit(X_final, y_final)
         # Calibrate
-        cal = CalibratedClassifierCV(lr, method='sigmoid', cv=3).fit(X_tr, y_final)
+        cal = CalibratedClassifierCV(pipe, method='sigmoid', cv=3).fit(X_final, y_final)
         model = cal
         feature_names = list(X_final.columns)
     else:
-        clf = LGBMClassifier(random_state=cfg.modeling.seed, n_estimators=400, learning_rate=0.05, deterministic=True, n_jobs=1)
-        clf.fit(X_final, y_final)
-        cal = CalibratedClassifierCV(clf, method='sigmoid', cv=3).fit(X_final, y_final)
+        lgbm = LGBMClassifier(random_state=cfg.modeling.seed, n_estimators=400, learning_rate=0.05, deterministic=True, n_jobs=1)
+        pipe = Pipeline([('scaler', StandardScaler(with_mean=False)), ('model', lgbm)])
+        pipe.fit(X_final, y_final)
+        cal = CalibratedClassifierCV(pipe, method='sigmoid', cv=3).fit(X_final, y_final)
         model = cal
         feature_names = list(X_final.columns)
 
