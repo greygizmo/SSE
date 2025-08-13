@@ -91,6 +91,20 @@ with st.sidebar:
         except Exception:
             st.session_state['thresholds'] = {}
 
+    # Default preferred validation run: Solidworks @ 2024-06-30 if present
+    if 'preferred_validation' not in st.session_state:
+        try:
+            runs = discover_validation_runs()
+            for div, cut, _ in runs:
+                if div.lower() == 'solidworks' and cut == '2024-06-30':
+                    st.session_state['preferred_validation'] = {
+                        'division': 'Solidworks',
+                        'cutoff': '2024-06-30',
+                    }
+                    break
+        except Exception:
+            pass
+
 def list_validation_runs():
     base = OUTPUTS_DIR / 'validation'
     if not base.exists():
