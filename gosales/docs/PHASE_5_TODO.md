@@ -5,14 +5,14 @@
   - Create `gosales/validation/` package with helpers and CLI. PARTIAL (package + forward CLI skeleton)
 
 - Evaluation frame
-  - Load frozen model + calibrator + feature list for a given cutoff. TODO
+  - Load frozen model + calibrator + feature list for a given cutoff. DONE (feature list alignment and calibrated pipeline supported)
   - Build features ≤ cutoff for all customers; score `p_hat`. DONE (from features parquet)
   - Join holdout labels (Phase 1 logic) and EV proxy; apply Phase 4 eligibility. PARTIAL (EV proxy fallback; labels fallback)
-  - Persist `validation/{division}/{cutoff}/validation_frame.parquet` (deterministic sort). TODO
+  - Persist `validation/{division}/{cutoff}/validation_frame.parquet` (deterministic sort). DONE
 
 - Metrics & artifacts
-  - Ranking/business: AUC, PR-AUC, gains by decile, capture@{5,10,20}%, precision@K, revenue-weighted capture, expected GP @ capacity. PARTIAL (AUC/PR-AUC/gains/capture grid/expected GP norm)
-  - Calibration: Brier, cal-MAE, reliability bins (10–20). PARTIAL (bins + Brier + cal-MAE)
+  - Ranking/business: AUC, PR-AUC, gains by decile, capture@{5,10,20}%, precision@K, revenue-weighted capture, expected GP @ capacity. DONE
+  - Calibration: Brier, cal-MAE, reliability bins (10–20). DONE (explicit groupby observed=False to ensure stable behavior)
   - Stability by segment (cohort/industry/size/region). PARTIAL (segment_performance.csv for first available segment)
   - Write: `metrics.json`, `gains.csv`, `calibration.csv`, `topk_scenarios.csv`. PARTIAL (also writes sorted scenarios)
 
@@ -20,8 +20,8 @@
   - Block bootstrap by customer (seeded) producing 95% CIs for capture@K, revenue capture, Brier, cal-MAE, precision@K. TODO
 
 - Drift diagnostics
-  - Feature drift PSI between train (latest training frame) and holdout; flag PSI > cfg.threshold. PARTIAL (PSI utility; proxy wired; drift.json writes EV vs holdout GP PSI)
-  - Score drift KS on `p_hat` (train vs holdout); flag KS > cfg.threshold. PARTIAL (KS(p_hat) pos vs neg as proxy)
+  - Feature drift PSI between train (latest training frame) and holdout; flag PSI > cfg.threshold. PARTIAL (per-feature PSI included when training feature snapshot exists)
+  - Score drift KS on `p_hat` (train vs holdout); flag KS > cfg.threshold. DONE (train vs holdout KS if `train_scores_*` exists)
   - Optional: SHAP drift if LGBM available and SHAP installed. TODO
   - Write `drift.json`. DONE (basic PSI/KS proxies)
 
@@ -30,7 +30,7 @@
   - Rank by expected GP if calibration is strong; otherwise by capture@K. TODO
 
 - CLI
-  - `gosales/validation/forward.py` with flags: `--division`, `--cutoff`, `--window-months`, `--capacity-grid`, `--bootstrap`, `--config`. PARTIAL (skeleton implemented: gains, calibration, scenarios, minimal metrics)
+  - `gosales/validation/forward.py` with flags: `--division`, `--cutoff`, `--window-months`, `--capacity-grid`, `--bootstrap`, `--config`. DONE (gains, calibration, scenarios with CIs, drift/metrics emission)
 
 - Guardrails
   - Censoring: if holdout window incomplete, flag and exclude; log counts. TODO

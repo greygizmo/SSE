@@ -73,8 +73,9 @@ Testing & QA
 - [ ] Link check: all download buttons point to existing files
 - [ ] Scenario math sampling: verify scenario CSV columns exist if file present
 
-Docs
-- [ ] README section: UI overview, page descriptions, thresholds, badges, alerts
+- Docs
+  - [ ] README section: UI overview, page descriptions, thresholds, badges, alerts
+  - [ ] Note artifact-driven design; validation badges map to `cal-MAE`, `PSI(EV vs GP)`, and `KS(train vs holdout)` from config thresholds
 - [ ] Screenshots for each page (optional)
 - [ ] Troubleshooting guide (missing artifacts, permissions, caching)
 

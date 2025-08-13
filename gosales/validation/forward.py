@@ -23,14 +23,22 @@ logger = get_logger(__name__)
 
 def _load_model_and_features(division: str):
     import joblib, json
-    model_path = MODELS_DIR / f"{division.lower()}_model" / "model.pkl"
-    feat_path = MODELS_DIR / f"{division.lower()}_model" / "feature_list.json"
+    model_dir = MODELS_DIR / f"{division.lower()}_model"
+    model_path = model_dir / "model.pkl"
+    feat_path = model_dir / "feature_list.json"
+    meta_path = model_dir / "metadata.json"
     if not model_path.exists():
         raise FileNotFoundError(f"Missing model for {division}: {model_path}")
     model = joblib.load(model_path)
     feats = None
-    if feat_path.exists():
-        feats = json.loads(feat_path.read_text(encoding="utf-8"))
+    try:
+        if feat_path.exists():
+            feats = json.loads(feat_path.read_text(encoding="utf-8"))
+        elif meta_path.exists():
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            feats = meta.get("feature_names")
+    except Exception:
+        feats = None
     return model, feats
 
 
@@ -42,7 +50,16 @@ def _build_validation_frame(division: str, cutoff: str, window_months: int, cfg)
     df = pd.read_parquet(base_path)
     # Score with frozen model
     model, feat_cols = _load_model_and_features(division)
-    X = df[feat_cols] if feat_cols else df.select_dtypes(include=[np.number])
+    if feat_cols:
+        # Align columns to training feature order; fill missing with 0.0; drop extras
+        for c in feat_cols:
+            if c not in df.columns:
+                df[c] = 0.0
+        X = df.reindex(columns=feat_cols)
+        # Coerce to numeric where possible
+        X = X.apply(pd.to_numeric, errors='coerce').fillna(0.0)
+    else:
+        X = df.select_dtypes(include=[np.number])
     df['p_hat'] = model.predict_proba(X)[:, 1]
     # Eligibility proxy (reuse Phase 4 columns if present)
     if 'owned_division_pre_cutoff' not in df.columns:
@@ -68,7 +85,9 @@ def _gains_deciles(y: np.ndarray, p: np.ndarray) -> pd.DataFrame:
     dec = (np.floor((df.index.values / max(1, len(df) - 1)) * 10) + 1)
     dec = np.clip(dec, 1, 10).astype(int)
     df['decile'] = pd.Series(dec, index=df.index)
-    return df.groupby('decile').agg(fraction_positives=('y', 'mean'), count=('y', 'size'), mean_predicted=('p', 'mean')).reset_index()
+    return df.groupby('decile', observed=False).agg(
+        fraction_positives=('y', 'mean'), count=('y', 'size'), mean_predicted=('p', 'mean')
+    ).reset_index()
 
 
 def _calibration_bins(y: np.ndarray, p: np.ndarray, n_bins: int = 10) -> pd.DataFrame:
@@ -77,7 +96,9 @@ def _calibration_bins(y: np.ndarray, p: np.ndarray, n_bins: int = 10) -> pd.Data
         bins = pd.qcut(df['p'], q=n_bins, duplicates='drop')
     except Exception:
         bins = pd.cut(df['p'], bins=n_bins, include_lowest=True, duplicates='drop')
-    return df.assign(bin=bins).groupby('bin').agg(mean_predicted=('p','mean'), fraction_positives=('y','mean'), count=('y','size')).reset_index(drop=True)
+    return df.assign(bin=bins).groupby('bin', observed=False).agg(
+        mean_predicted=('p','mean'), fraction_positives=('y','mean'), count=('y','size')
+    ).reset_index(drop=True)
 
 
 def _calibration_mae(bins_df: pd.DataFrame) -> float:
@@ -133,7 +154,9 @@ def main(division: str, cutoff: str, window_months: int, capacity_grid: str, acc
             parts = []
             for pth in holdout_dir.glob('*.csv'):
                 try:
-                    parts.append(pd.read_csv(pth))
+                    # Read all columns as strings to avoid mixed-type inference warnings;
+                    # numeric coercion is applied explicitly downstream where needed
+                    parts.append(pd.read_csv(pth, dtype=str, low_memory=False))
                 except Exception:
                     continue
             if parts:
@@ -150,6 +173,7 @@ def main(division: str, cutoff: str, window_months: int, capacity_grid: str, acc
                 else:
                     mask_div = pd.Series(True, index=ho.index)
                 cust_col = 'CustomerId' if 'CustomerId' in ho.columns else 'customer_id'
+                # If entire file was read as strings, coerce to numeric safely
                 buyers = pd.to_numeric(ho.loc[mask_window & mask_div, cust_col], errors='coerce').dropna().astype('Int64').unique()
 
                 # Compute realized GP for target division using SKU mapping (sum of division GP columns)
@@ -160,7 +184,7 @@ def main(division: str, cutoff: str, window_months: int, capacity_grid: str, acc
                     div_cols = [c for c in div_cols if c in ho.columns]
                     if div_cols:
                         gp_df = ho.loc[mask_window, [cust_col] + div_cols].copy()
-                        # Coerce GP cols to numeric
+                        # Coerce GP cols to numeric after reading as strings
                         for c in div_cols:
                             gp_df[c] = pd.to_numeric(gp_df[c], errors='coerce').fillna(0.0)
                         gp_df['holdout_gp'] = gp_df[div_cols].sum(axis=1)
@@ -392,7 +416,7 @@ def main(division: str, cutoff: str, window_months: int, capacity_grid: str, acc
         # Train vs holdout KS on p_hat
         train_scores_path = OUTPUTS_DIR / f"train_scores_{division.lower()}_{cutoff}.csv"
         if train_scores_path.exists():
-            train_scores = pd.read_csv(train_scores_path)
+            train_scores = pd.read_csv(train_scores_path, dtype={'customer_id': 'string'}, low_memory=False)
             merged = vf[['customer_id']].merge(train_scores, on='customer_id', how='left')
             p_train = pd.to_numeric(merged['p_hat'], errors='coerce')
             p_hold = pd.Series(p)

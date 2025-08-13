@@ -48,7 +48,7 @@ def calibration_bins(y_true: np.ndarray, y_score: np.ndarray, n_bins: int = 10) 
     except Exception:
         # If not enough unique values, fall back to equal-width bins
         bins = pd.cut(df["p"], bins=n_bins, include_lowest=True, duplicates="drop")
-    grouped = df.assign(bin=bins).groupby("bin").agg(
+    grouped = df.assign(bin=bins).groupby("bin", observed=False).agg(
         mean_predicted=("p", "mean"),
         fraction_positives=("y", "mean"),
         count=("y", "size"),

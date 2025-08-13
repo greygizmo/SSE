@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
 from sklearn.linear_model import SGDClassifier, LogisticRegression
 from sklearn.metrics import roc_auc_score, precision_recall_curve, auc, brier_score_loss
 from sklearn.calibration import CalibratedClassifierCV
@@ -126,6 +127,13 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
             return
         for cutoff in cut_list:
             fm = create_feature_matrix(engine, division, cutoff, window_months)
+            # Persist features parquet for validation phase (Phase 5) compatibility
+            try:
+                from gosales.utils.paths import OUTPUTS_DIR as _OUT
+                out_path = _OUT / f"features_{division.lower()}_{cutoff}.parquet"
+                fm.write_parquet(out_path)
+            except Exception:
+                pass
             if fm.is_empty():
                 logger.warning(f"Empty feature matrix for cutoff {cutoff}")
                 continue
@@ -137,34 +145,34 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
 
         # Baseline LR (elastic-net via saga)
         if 'logreg' in model_names:
-            scaler = StandardScaler(with_mean=False)
-            X_train_lr = scaler.fit_transform(X_train)
-            X_valid_lr = scaler.transform(X_valid)
             lr_params = cfg.modeling.lr_grid
-            best_lr = None
+            best_lr_pipe = None
             best_lr_auc = -1
             for l1_ratio in lr_params.get('l1_ratio', [0.0, 0.5]):
                 for C in lr_params.get('C', [1.0]):
                     lr = LogisticRegression(penalty='elasticnet', solver='saga', l1_ratio=l1_ratio, C=C, max_iter=2000, class_weight='balanced', random_state=cfg.modeling.seed)
-                    lr.fit(X_train_lr, y_train)
-                    p = lr.predict_proba(X_valid_lr)[:,1]
+                    pipe = Pipeline([
+                        ('scaler', StandardScaler(with_mean=False)),
+                        ('model', lr),
+                    ])
+                    pipe.fit(X_train, y_train)
+                    p = pipe.predict_proba(X_valid)[:, 1]
                     auc_lr = roc_auc_score(y_valid, p)
                     if auc_lr > best_lr_auc:
                         best_lr_auc = auc_lr
-                        best_lr = (lr, scaler)
-            if best_lr is not None:
-                lr, scaler = best_lr
-                # Calibration
+                        best_lr_pipe = pipe
+            if best_lr_pipe is not None:
+                # Calibration on the entire pipeline
                 best_cal = None
                 best_brier = 1e9
                 for m in cal_methods:
-                    cal = _calibrate(lr, X_train_lr, y_train, X_valid_lr, m)
-                    p = cal.predict_proba(X_valid_lr)[:,1]
+                    cal = _calibrate(best_lr_pipe, X_train, y_train, X_valid, m)
+                    p = cal.predict_proba(X_valid)[:, 1]
                     brier = brier_score_loss(y_valid, p)
                     if brier < best_brier:
                         best_brier = brier
                         best_cal = cal
-                p = best_cal.predict_proba(X_valid_lr)[:,1]
+                p = best_cal.predict_proba(X_valid)[:, 1]
                 lift10 = _lift_at_k(y_valid, p, 10)
                 results.append({"cutoff": cutoff, "model": "logreg", "auc": float(best_lr_auc), "lift10": float(lift10), "brier": float(best_brier), "calibration": best_cal.method})
 
@@ -262,12 +270,14 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
     X_final = _sanitize_features(X_final)
     # Minimal: refit winner without hyper search for brevity (could repeat best params)
     if winner == 'logreg':
-        scaler = StandardScaler(with_mean=False)
-        X_tr = scaler.fit_transform(X_final)
         lr = LogisticRegression(penalty='elasticnet', solver='saga', l1_ratio=0.2, C=1.0, max_iter=2000, class_weight='balanced', random_state=cfg.modeling.seed)
-        lr.fit(X_tr, y_final)
-        # Calibrate
-        cal = CalibratedClassifierCV(lr, method='sigmoid', cv=3).fit(X_tr, y_final)
+        pipe = Pipeline([
+            ('scaler', StandardScaler(with_mean=False)),
+            ('model', lr),
+        ])
+        pipe.fit(X_final, y_final)
+        # Calibrate entire pipeline to ensure consistent inference in ranking
+        cal = CalibratedClassifierCV(pipe, method='sigmoid', cv=3).fit(X_final, y_final)
         model = cal
         feature_names = list(X_final.columns)
     else:
@@ -372,10 +382,17 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
 
         # LR coefficients (if available)
         try:
-            # reuse imported LogisticRegression
+            # The calibrated model may wrap a Pipeline. Extract underlying LogisticRegression if present.
             base = getattr(model, "base_estimator", None)
             if base is None and hasattr(model, "estimator"):
                 base = model.estimator
+            # Unwrap Pipeline to its 'model' step if necessary
+            try:
+                from sklearn.pipeline import Pipeline as _SkPipeline  # local import to avoid top-level noise
+                if isinstance(base, _SkPipeline) and 'model' in getattr(base, 'named_steps', {}):
+                    base = base.named_steps['model']
+            except Exception:
+                pass
             if isinstance(base, LogisticRegression) and hasattr(base, "coef_"):
                 coef = pd.DataFrame({"feature": feature_names, "coef": base.coef_.ravel().tolist()})
                 coef.to_csv(OUTPUTS_DIR / f"coef_{division.lower()}.csv", index=False)

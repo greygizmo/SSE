@@ -20,16 +20,18 @@ A division-focused Ideal Customer Profile (ICP) & Whitespace engine. The pipelin
   - Optional toggles: market-basket affinity, ALS embeddings
   - Artifacts: features parquet, feature catalog CSV, feature stats JSON (coverage, winsor caps, checksum)
   - Determinism and winsorization tests
- - **Phase 3 — Modeling**
+- **Phase 3 — Modeling**
   - Config-driven modeling grids and seeds
   - Training CLI for LR (elastic-net) and LGBM across multiple cutoffs, with calibration (Platt/Isotonic) and selection by mean lift@10 (tie-breaker Brier)
+  - LR now trains via a Pipeline: `StandardScaler(with_mean=False)` → `LogisticRegression`; calibration is applied to the entire pipeline; coefficient export unwraps the calibrated pipeline
+  - LightGBM remains scale-invariant (no scaler in front)
   - Metrics: AUC, PR-AUC, Brier, lift@{5,10,20}%, revenue-weighted lift@K, calibration MAE
   - Artifacts: `metrics.json`, `gains.csv`, `calibration.csv`, `thresholds.csv`, `model_card.json`, SHAP summaries (guarded)
   - Guardrails: degenerate classifier check, deterministic LGBM, early stopping, overfit-gap guard, capped `scale_pos_weight`
 
 - **Phase 4 — Whitespace Ranking / Next‑Best‑Action**
   - Signals: calibrated probability (`p_icp` + per‑division percentile), market‑basket affinity (`mb_lift_max`, `mb_lift_mean`), ALS similarity, expected value proxy (capped)
-  - Normalization: per‑division percentile (default) or pooled; blending weights → single score
+  - Normalization: per‑division percentile (default) or pooled; pooled normalization preserves per‑division coverage‑adjusted weights when recomputing pooled scores
   - Capacity: top‑percent, per‑rep, or hybrid diversification; gating and cooldown; JSONL logs
   - Artifacts: `whitespace_<cutoff>.csv`, `whitespace_explanations_<cutoff>.csv`, `thresholds_whitespace_<cutoff>.csv`, `whitespace_metrics_<cutoff>.json`, `whitespace_log_<cutoff>.jsonl`, `mb_rules_<division>_<cutoff>.csv`
 
@@ -91,6 +93,10 @@ $env:PYTHONPATH = "$PWD"; streamlit run gosales/ui/app.py
 - Class imbalance is handled via class weights (LR) and `scale_pos_weight` (LightGBM).
 - Probability calibration curves are exported to `gosales/outputs/calibration_<division>.csv`.
 - Holdout labels for 2025 are derived directly from `gosales/data/holdout/Sales Log 2025 YTD.csv` using `Division == 'Solidworks'` and dates in Jan–Jun 2025.
+
+#### Warning handling (pandas/sklearn)
+- Pandas groupby: we explicitly set `observed=False` on groupby operations used to build calibration and gains tables to avoid version‑dependent FutureWarnings
+- CSV reads: holdout CSVs are read with `dtype=str` and `low_memory=False`, then numerics are coerced explicitly, preventing mixed‑type `DtypeWarning` while keeping behavior deterministic
 
 ### Feature Library (Phase 2 highlights)
 

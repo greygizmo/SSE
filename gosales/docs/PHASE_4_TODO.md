@@ -16,7 +16,7 @@
   - Expected value proxy (EV): segment medians (industry/size/region) blended with global; cap at p95; normalize → `EV_norm`. PARTIAL (segment blend + cap + normalization)
 
 - Normalization & comparability
-  - Implement per‑division percentile normalization (default) with option for pooled recalibration; verify approx. uniform per division. PARTIAL (pooled mode added)
+  - Implement per‑division percentile normalization (default) with option for pooled recalibration; verify approx. uniform per division. DONE (pooled mode added; pooled normalization recomputes scores using preserved per‑division coverage‑adjusted weights)
   - Graceful degradation: if a signal missing (e.g., ALS), set to 0, reduce weight if below coverage threshold; log weight adjustments. DONE (dynamic weight scaling by coverage, renormalized)
 
 - Scoring & ranking
@@ -34,7 +34,7 @@
   - Content guard: no sensitive attributes; fallback reason if signals are weak. TODO
 
 - Artifacts
-  - `whitespace_{cutoff}.csv` with: `customer_id, division, score, p_icp, p_icp_pct, lift_norm, als_norm, EV_norm, nba_reason`. PARTIAL (core columns written)
+  - `whitespace_{cutoff}.csv` with: `customer_id, division, score, p_icp, p_icp_pct, lift_norm, als_norm, EV_norm, nba_reason`. DONE (core and explanation columns written)
   - `whitespace_explanations_{cutoff}.csv` with expanded fields if needed. DONE
   - `whitespace_metrics_{cutoff}.json` (capture@K, diversity by division/segment, stability vs prior run). PARTIAL (rows, checksum, weights, coverage, per-division eligibility counts, division shares; add capture/stability)
   - `thresholds_whitespace_{cutoff}.csv` (capacity/threshold grid). DONE (top_percent)
