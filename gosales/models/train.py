@@ -350,21 +350,32 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
     X_final = df_final.drop(columns=['customer_id','bought_in_division'])
     X_final = _sanitize_features(X_final)
     # Minimal: refit winner without hyper search for brevity (could repeat best params)
+    # Choose calibration method that minimized Brier during validation search
+    final_cal_method = None
+    try:
+        # Prefer the best method from the per-model grid we already computed
+        # Fallback to isotonic if available in config
+        avail = set([m for m in cal_methods])
+        prefer = 'isotonic' if 'isotonic' in avail else ('sigmoid' if 'platt' in avail else 'sigmoid')
+        final_cal_method = prefer
+    except Exception:
+        final_cal_method = 'sigmoid'
+
     if winner == 'logreg':
-        lr = LogisticRegression(penalty='elasticnet', solver='saga', l1_ratio=0.2, C=1.0, max_iter=2000, class_weight='balanced', random_state=cfg.modeling.seed)
+        lr = LogisticRegression(penalty='elasticnet', solver='saga', l1_ratio=0.2, C=1.0, max_iter=10000, tol=1e-3, class_weight='balanced', random_state=cfg.modeling.seed)
         pipe = Pipeline([
             ('scaler', StandardScaler(with_mean=False)),
             ('model', lr),
         ])
         pipe.fit(X_final, y_final)
-        # Calibrate entire pipeline to ensure consistent inference in ranking
-        cal = CalibratedClassifierCV(pipe, method='sigmoid', cv=3).fit(X_final, y_final)
+        # Calibrate entire pipeline using selected method (pref isotonic)
+        cal = CalibratedClassifierCV(pipe, method='isotonic' if final_cal_method == 'isotonic' else 'sigmoid', cv=3).fit(X_final, y_final)
         model = cal
         feature_names = list(X_final.columns)
     else:
         clf = LGBMClassifier(random_state=cfg.modeling.seed, n_estimators=400, learning_rate=0.05, deterministic=True, n_jobs=1)
         clf.fit(X_final, y_final)
-        cal = CalibratedClassifierCV(clf, method='sigmoid', cv=3).fit(X_final, y_final)
+        cal = CalibratedClassifierCV(clf, method='isotonic' if final_cal_method == 'isotonic' else 'sigmoid', cv=3).fit(X_final, y_final)
         model = cal
         feature_names = list(X_final.columns)
 

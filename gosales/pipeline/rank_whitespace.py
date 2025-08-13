@@ -394,11 +394,18 @@ def main(cutoff: str, window_months: int, division: str | None, weights: str | N
     thresholds_rows = []
     selected = out
     if cap_mode == 'top_percent':
-        cap_percent = cfg.modeling.capacity_percent
-        k = max(1, int(len(out) * (cap_percent / 100.0)))
+        # Emit thresholds for a small grid of capacities to aid ops planning
+        cap_grid = sorted(list(set(getattr(cfg.validation, 'capacity_grid', [cfg.modeling.capacity_percent]))))
+        for cap_percent in cap_grid:
+            k = max(1, int(len(out) * (cap_percent / 100.0)))
+            thr = float(np.sort(out['score'].values)[-k])
+            sel = out[out['score'] >= thr]
+            thresholds_rows.append({'mode': 'top_percent', 'k_percent': int(cap_percent), 'threshold': thr, 'count': int(len(sel))})
+        # Use configured primary capacity for the selected output
+        primary = cfg.modeling.capacity_percent
+        k = max(1, int(len(out) * (primary / 100.0)))
         thr = float(np.sort(out['score'].values)[-k])
         selected = out[out['score'] >= thr]
-        thresholds_rows.append({'mode': 'top_percent', 'k_percent': cap_percent, 'threshold': thr, 'count': int(len(selected))})
     elif cap_mode == 'per_rep':
         # Select top N per rep if 'rep' column exists, else fallback to top_percent
         n = accounts_per_rep or cfg.whitespace.accounts_per_rep
