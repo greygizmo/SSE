@@ -5,7 +5,6 @@ from datetime import datetime
 from gosales.utils.db import get_db_connection
 from gosales.utils.logger import get_logger
 from gosales.utils import config as cfg
-from gosales.features.utils import filter_to_cutoff, winsorize_series
 from gosales.utils.paths import OUTPUTS_DIR
 from gosales.etl.sku_map import division_set
 
@@ -766,7 +765,6 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
     
     # Emit feature catalog artifact for auditing
     try:
-        from gosales.utils.paths import OUTPUTS_DIR
         OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
         fm_pd = feature_matrix.to_pandas()
         catalog = []
