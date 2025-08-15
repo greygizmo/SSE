@@ -96,6 +96,7 @@ def build_star_schema(engine, config_path: str | Path | None = None, rebuild: bo
                     df[col] = None
 
             # Alias common synonyms to our canonical GP/Qty columns
+            # Map common header variants to our canonical column names
             alias_pairs = [
                 ("PDM", "EPDM_CAD_Editor"),
                 ("PDM_Qty", "EPDM_CAD_Editor_Qty"),
@@ -105,11 +106,26 @@ def build_star_schema(engine, config_path: str | Path | None = None, rebuild: bo
                 ("DraftSight_Qty", "Misc_Qty"),
                 # AM software alias
                 ("AM_Software_Qty", "_3DP_Software_Qty"),
+                ("AM_Software_Qty", "3DP_Software_Qty"),
+                ("AM_Software_Qty", "AM Software Qty"),
+                ("AM_Software", "_3DP_Software"),
+                ("AM_Software", "3DP_Software"),
+                ("AM_Software", "AM Software"),
+                # Post Processing variants
+                ("Post_Processing", "Post Processing"),
+                ("Post_Processing", "PostProcessing"),
+                ("Post_Processing_Qty", "Post Processing_Qty"),
+                ("Post_Processing_Qty", "PostProcessing_Qty"),
                 # Legacy printer SKUs alias to Fortus
                 ("Fortus", "_1200_Elite_Fortus250"),
                 ("Fortus_Qty", "_1200_Elite_Fortus250_Qty"),
                 ("Fortus", "UPrint"),
                 ("Fortus_Qty", "UPrint_Qty"),
+                # CPE SKU variants with spaces
+                ("HV_Simulation", "HV Simulation"),
+                ("HV_Simulation_Qty", "HV Simulation_Qty"),
+                ("Delmia_Apriso", "Delmia Apriso"),
+                ("Delmia_Apriso_Qty", "Delmia Apriso_Qty"),
             ]
             for target, source in alias_pairs:
                 if target not in df.columns and source in df.columns:
@@ -494,7 +510,8 @@ def build_star_schema(engine, config_path: str | Path | None = None, rebuild: bo
         (fact_transactions_pd['gross_profit'] != 0) | (fact_transactions_pd['quantity'] != 0)
     ]
     
-    # Select and deterministically sort final columns
+    # Normalize division strings (trim) and select/sort final columns
+    fact_transactions_pd['product_division'] = fact_transactions_pd['product_division'].astype(str).str.strip()
     fact_transactions_pd = fact_transactions_pd[[
         'customer_id', 'order_date', 'product_sku', 'product_division', 'gross_profit', 'quantity'
     ]].sort_values(by=['customer_id', 'order_date', 'product_sku'], kind='mergesort').reset_index(drop=True)

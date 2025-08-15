@@ -4,7 +4,9 @@ alwaysApply: true
 ---
 
 - Default shell is Windows PowerShell. Generate commands using PowerShell syntax.
-- Never run shell commands inside an interactive interpreter. If the last terminal output shows a Python REPL (prefix '>>>' or 'In ['), assume a fresh shell and send normal PowerShell commands, not Python statements.
+- Never run shell commands inside an interactive interpreter.
+  - If the last terminal output shows a Python REPL (prefix '>>>' or 'In ['), first exit the REPL by sending: exit() (or quit()). Then run normal PowerShell commands.
+  - Do NOT send PowerShell like $env:...; python ... while the prompt shows '>>>'. Always exit the REPL first.
 - Before executing any Python module/script, set PYTHONPATH to the project root on the same line:
   - $env:PYTHONPATH = "$PWD"; python <command>
 - Command chaining: use ';' in PowerShell. Do NOT use '&&'.
@@ -17,16 +19,23 @@ alwaysApply: true
 - Python execution patterns:
   - Script: python gosales/pipeline/score_all.py
   - Module: python -m gosales.models.train_division_model --division Solidworks
+- Python -c quoting in PowerShell:
+  - Prefer single quotes around the code string: python -c 'import sys; print("ok")'
+  - If you need single quotes inside, double them: 'it''s ok'. If you need double quotes inside, keep them as normal.
+  - Do NOT use Bash heredocs like: python - <<'PY' (unsupported in PowerShell).
 - Long-running or non-interactive:
   - Prefer non-interactive flags; do not prompt the user.
   - If background is required, use Start-Process or Start-Job with appropriate arguments.
 - Safety checks and retries:
   - If a command fails due to shell syntax, automatically translate to PowerShell semantics (replace '&&' with ';', replace 'cat' with 'Get-Content') and retry once.
-  - If REPL context is detected, do not send shell commands; send a fresh PowerShell command line instead.
+  - If REPL context is detected, send exit() first to return to PowerShell, then run the command.
 
 Examples (PowerShell):
 
 ```
+# If Python REPL is active
+exit()
+
 # Full pipeline
 $env:PYTHONPATH = "$PWD"; python gosales/pipeline/score_all.py
 
@@ -39,5 +48,8 @@ Get-Content gosales/outputs/validation_metrics_2025.json
 
 # Git
 git add gosales/features/engine.py; git commit -m "fix: label target window"; git push
+
+# Python -c with proper quoting
+$env:PYTHONPATH = "$PWD"; python -c 'import pandas as pd; from gosales.utils.db import get_db_connection; e=get_db_connection(); print(pd.read_sql("select 1 as ok", e).to_string(index=False))'
 ```
 

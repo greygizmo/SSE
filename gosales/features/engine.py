@@ -8,6 +8,7 @@ from gosales.utils import config as cfg
 from gosales.features.utils import filter_to_cutoff, winsorize_series
 from gosales.utils.paths import OUTPUTS_DIR
 from gosales.etl.sku_map import division_set
+from gosales.utils.normalize import normalize_division
 
 logger = get_logger(__name__)
 
@@ -29,6 +30,13 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
         polars.DataFrame: The feature matrix with a binary target column `bought_in_division`.
     """
     logger.info(f"Creating feature matrix for division: {division_name}...")
+    try:
+        ds = normalize_division(division_name)
+        logger.info("Division string (repr/len): %r / %d", ds, len(ds))
+    except Exception:
+        pass
+    # Canonical division string used for comparisons
+    norm_division_name = normalize_division(division_name)
     if cutoff_date:
         logger.info(f"Using cutoff date: {cutoff_date} (features from data <= cutoff)")
         logger.info(f"Target: purchases in {prediction_window_months} months after cutoff")
@@ -50,6 +58,17 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
             from dateutil.relativedelta import relativedelta
             prediction_end = cutoff_dt + relativedelta(months=prediction_window_months)
             prediction_data = prediction_data[prediction_data['order_date'] <= prediction_end]
+            try:
+                top_divs = (
+                    prediction_data['product_division']
+                    .astype(str)
+                    .str.rstrip()
+                    .value_counts()
+                    .head(20)
+                )
+                logger.info("Top product_division in window:\n%s", top_divs.to_string())
+            except Exception:
+                pass
             
             logger.info(f"Feature data: {len(feature_data)} transactions <= {cutoff_date}")
             logger.info(f"Prediction data: {len(prediction_data)} transactions in {prediction_window_months}-month window")
@@ -77,8 +96,9 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
     # --- 2. Create the Binary Target Variable ---
     # Target: 1 if the customer bought any product in the target division in the prediction window, 0 otherwise.
     if cutoff_date:
-        # Use prediction window data for target labels
-        prediction_buyers_df = prediction_data[prediction_data['product_division'] == division_name]['customer_id'].unique()
+        # Use prediction window data for target labels (normalize division)
+        pred_div = prediction_data['product_division'].astype(str).str.strip()
+        prediction_buyers_df = prediction_data.loc[pred_div == norm_division_name, 'customer_id'].unique()
         division_buyers_pd = pd.DataFrame({'customer_id': prediction_buyers_df, 'bought_in_division': 1})
         # Enforce integer customer_id for join compatibility
         if 'customer_id' in division_buyers_pd.columns:
@@ -89,7 +109,7 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
         # Original behavior: ever bought in historical data
         division_buyers = (
             transactions.lazy()
-            .filter(pl.col("product_division") == division_name)
+            .filter(pl.col("product_division") == norm_division_name)
             .select("customer_id")
             .unique()
             .with_columns(pl.lit(1).cast(pl.Int8).alias("bought_in_division"))
@@ -203,7 +223,7 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
             per_customer_frames.append(agg)
 
             # Division-specific aggregates + margin (gp_pct) proxy over window
-            sub_div = fd.loc[mask & (fd['product_division'] == division_name), ['customer_id', 'order_date', 'gross_profit']]
+            sub_div = fd.loc[mask & (fd['product_division'].astype(str).str.strip() == norm_division_name), ['customer_id', 'order_date', 'gross_profit']]
             tx_n_div = sub_div.groupby('customer_id')['order_date'].count().rename(f'rfm__div__tx_n__{w}m').reset_index()
             gp_sum_div = sub_div.groupby('customer_id')['gross_profit'].sum().rename(f'rfm__div__gp_sum__{w}m').reset_index()
             gp_mean_div = sub_div.groupby('customer_id')['gross_profit'].mean().rename(f'rfm__div__gp_mean__{w}m').reset_index()
@@ -326,7 +346,7 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
         # Division recency (days since last division order)
         rec_div_list = []
         for d in known_divisions:
-            sub = fd.loc[fd['product_division'] == d, ['customer_id', 'order_date']]
+            sub = fd.loc[fd['product_division'].astype(str).str.strip() == normalize_division(d), ['customer_id', 'order_date']]
             last_d = sub.groupby('customer_id')['order_date'].max().reset_index()
             last_d[f'days_since_last_{d.lower()}'] = (cutoff_dt - last_d['order_date']).dt.days
             rec_div_list.append(last_d[['customer_id', f'days_since_last_{d.lower()}']])
@@ -354,7 +374,7 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
                 sku_df[ratio_col] = sku_df[ratio_col].fillna(0.0)
 
         # Past Solidworks buyer flag (historical)
-        past_swx = fd.loc[fd['product_division'] == 'Solidworks', ['customer_id']].drop_duplicates()
+        past_swx = fd.loc[fd['product_division'].astype(str).str.strip() == 'Solidworks', ['customer_id']].drop_duplicates()
         past_swx['ever_bought_solidworks'] = 1
 
         # Merge all extra frames to features_pd
@@ -504,21 +524,57 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
         # Non-fatal; proceed with base features if advanced features fail
         logger.warning(f"Advanced temporal features failed: {e}")
 
-    # Flags / indicators aggregated from sales_log: ACR and New
+    # Flags / indicators aggregated from sales_log: ACR and New (robust to missing/variant names)
     try:
-        sl_flags = pd.read_sql("SELECT CustomerId, [Rec Date] AS rec_date, ACR, [New] FROM sales_log", engine)
-        sl_flags['rec_date'] = pd.to_datetime(sl_flags['rec_date'], errors='coerce')
-        sl_flags['customer_id'] = pd.to_numeric(sl_flags['CustomerId'], errors='coerce').astype('Int64')
-        if cutoff_date:
+        # Read only needed columns, but fallback to * if not present
+        try:
+            sl_flags = pd.read_sql("SELECT CustomerId, \"Rec Date\" AS rec_date, * FROM sales_log", engine)
+        except Exception:
+            sl_flags = pd.read_sql("SELECT * FROM sales_log", engine)
+            if 'Rec Date' in sl_flags.columns:
+                sl_flags = sl_flags.rename(columns={'Rec Date': 'rec_date'})
+
+        # Coerce types early
+        sl_flags['rec_date'] = pd.to_datetime(sl_flags.get('rec_date'), errors='coerce')
+        sl_flags['customer_id'] = pd.to_numeric(
+            sl_flags.get('CustomerId', sl_flags.get('customer_id')),
+            errors='coerce'
+        ).astype('Int64')
+        if cutoff_date and 'rec_date' in sl_flags.columns:
             sl_flags = sl_flags[sl_flags['rec_date'] <= cutoff_dt]
-        agg_flags = sl_flags.groupby('customer_id').agg(
-            ever_acr=('ACR', lambda s: int(pd.to_numeric(s, errors='coerce').fillna(0).astype(int).max() > 0)),
-            ever_new_customer=('[New]', lambda s: int(pd.to_numeric(s, errors='coerce').fillna(0).astype(int).max() > 0))
-        ).reset_index()
+
+        def _normalize(col: str) -> str:
+            return str(col).strip().lower().replace('[', '').replace(']', '')
+
+        cols_norm = { _normalize(c): c for c in sl_flags.columns }
+        # Allow a few common variants
+        acr_col = cols_norm.get('acr') or cols_norm.get('is_acr') or cols_norm.get('acr_flag')
+        new_col = cols_norm.get('new') or cols_norm.get('is_new') or cols_norm.get('new_customer')
+
+        agg_parts = []
+        if isinstance(acr_col, str) and acr_col in sl_flags.columns:
+            acr_num = pd.to_numeric(sl_flags[acr_col], errors='coerce').fillna(0).astype('Int8')
+            ever_acr = acr_num.groupby(sl_flags['customer_id']).max().astype('Int8').reset_index(name='ever_acr')
+            agg_parts.append(ever_acr)
+        if isinstance(new_col, str) and new_col in sl_flags.columns:
+            new_num = pd.to_numeric(sl_flags[new_col], errors='coerce').fillna(0).astype('Int8')
+            ever_new = new_num.groupby(sl_flags['customer_id']).max().astype('Int8').reset_index(name='ever_new_customer')
+            agg_parts.append(ever_new)
+
+        if agg_parts:
+            agg_flags = agg_parts[0]
+            for ap in agg_parts[1:]:
+                agg_flags = agg_flags.merge(ap, on='customer_id', how='outer')
+        else:
+            # No flags available; create empty frame with customer_id only
+            agg_flags = sl_flags[['customer_id']].dropna().drop_duplicates().copy()
+
         features_pd = features_pd.merge(agg_flags, on='customer_id', how='left')
         for c in ['ever_acr', 'ever_new_customer']:
             if c in features_pd.columns:
-                features_pd[c] = features_pd[c].fillna(0).astype(int)
+                features_pd[c] = pd.to_numeric(features_pd[c], errors='coerce').fillna(0).astype(int)
+            else:
+                features_pd[c] = 0
     except Exception as e:
         logger.warning(f"Flag aggregation failed: {e}")
 
@@ -594,7 +650,7 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
     # Returns features (12m, target division)
     try:
         last12_mask = (fd['order_date'] > (cutoff_dt - pd.DateOffset(months=12))) & (fd['order_date'] <= cutoff_dt)
-        sub12 = fd.loc[last12_mask & (fd['product_division'] == division_name), ['customer_id', 'gross_profit']].copy()
+        sub12 = fd.loc[last12_mask & (fd['product_division'].astype(str).str.strip() == norm_division_name), ['customer_id', 'gross_profit']].copy()
         sub12['is_return'] = (pd.to_numeric(sub12['gross_profit'], errors='coerce') < 0).astype(int)
         ret_counts = sub12.groupby('customer_id')['is_return'].sum().rename('returns__div__return_tx_n__12m').reset_index()
         tx_counts = sub12.groupby('customer_id')['is_return'].count().rename('tx_n_12m_div').reset_index()
@@ -630,7 +686,8 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
             dlw = fd.loc[maskw, ['customer_id', 'product_division', 'product_sku']].copy()
             if not dlw.empty:
                 sku_all_w = dlw.groupby('customer_id')['product_sku'].nunique().rename(f'diversity__all__sku_nunique__{w}m').reset_index()
-                sku_div_w = dlw.loc[dlw['product_division'] == division_name].groupby('customer_id')['product_sku'].nunique().rename(f'diversity__div__sku_nunique__{w}m').reset_index()
+                dlw['product_division'] = dlw['product_division'].astype(str).str.strip()
+                sku_div_w = dlw.loc[dlw['product_division'] == norm_division_name].groupby('customer_id')['product_sku'].nunique().rename(f'diversity__div__sku_nunique__{w}m').reset_index()
                 feature_matrix_pd = feature_matrix_pd.merge(sku_all_w, on='customer_id', how='left').merge(sku_div_w, on='customer_id', how='left')
                 feature_matrix_pd[f'diversity__all__sku_nunique__{w}m'] = feature_matrix_pd[f'diversity__all__sku_nunique__{w}m'].fillna(0)
                 feature_matrix_pd[f'diversity__div__sku_nunique__{w}m'] = feature_matrix_pd[f'diversity__div__sku_nunique__{w}m'].fillna(0)

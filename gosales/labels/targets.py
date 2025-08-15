@@ -11,6 +11,7 @@ import polars as pl
 
 from gosales.utils.paths import OUTPUTS_DIR
 from gosales.utils import config as cfg
+from gosales.utils.normalize import normalize_division
 
 
 Mode = Literal["expansion", "all"]
@@ -56,7 +57,9 @@ def build_labels_for_division(
 
     # Window-period transactions for target division
     window_df = facts[(facts['order_date'] > cutoff_dt) & (facts['order_date'] <= win_end)].copy()
-    window_target = window_df[window_df['product_division'] == params.division].copy()
+    # Normalize division string comparisons to avoid whitespace/case issues
+    window_df['product_division'] = window_df['product_division'].astype(str).str.strip()
+    window_target = window_df[window_df['product_division'] == normalize_division(params.division)].copy()
     # Optional denylist SKUs exclusion (e.g., trials/POC)
     try:
         cfg_obj = cfg.load_config()
@@ -85,7 +88,8 @@ def build_labels_for_division(
 
     # Cohorts from feature period
     had_any = set(feature_df['customer_id'].dropna().astype('int64').tolist())
-    had_div = set(feature_df.loc[feature_df['product_division'] == params.division, 'customer_id'].dropna().astype('int64').tolist())
+    feature_df['product_division'] = feature_df['product_division'].astype(str).str.strip()
+    had_div = set(feature_df.loc[feature_df['product_division'] == normalize_division(params.division), 'customer_id'].dropna().astype('int64').tolist())
     def _cohorts(cid: int) -> tuple[int,int,int]:
         is_new_logo = 0 if cid in had_any else 1
         is_renewal_like = 1 if (cid in had_div and cid in had_any) else 0
