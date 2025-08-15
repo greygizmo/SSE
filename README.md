@@ -26,7 +26,7 @@ A division-focused Ideal Customer Profile (ICP) & Whitespace engine. The pipelin
   - LR now trains via a Pipeline: `StandardScaler(with_mean=False)` → `LogisticRegression`; calibration is applied to the entire pipeline; coefficient export unwraps the calibrated pipeline
   - LightGBM remains scale-invariant (no scaler in front)
   - Metrics: AUC, PR-AUC, Brier, lift@{5,10,20}%, revenue-weighted lift@K, calibration MAE
-  - Artifacts: `metrics.json`, `gains.csv`, `calibration.csv`, `thresholds.csv`, `model_card.json`, SHAP summaries (guarded)
+  - Artifacts: `metrics.json`, `gains.csv`, `calibration.csv`, `thresholds.csv`, `model_card.json`, SHAP summaries (optional; guarded if SHAP not installed)
   - Guardrails: degenerate classifier check, deterministic LGBM, early stopping, overfit-gap guard, capped `scale_pos_weight`
 
 - **Phase 4 — Whitespace Ranking / Next‑Best‑Action**
@@ -76,7 +76,7 @@ $env:PYTHONPATH = "$PWD"; python -m gosales.features.build --division Solidworks
 # 6) Phase 3 — Train models across cutoffs (example)
 $env:PYTHONPATH = "$PWD"; python -m gosales.models.train --division Solidworks --cutoffs "2023-06-30,2023-09-30,2023-12-31" --window-months 6 --models logreg,lgbm --calibration platt,isotonic --config gosales/config.yaml
 
-# 6) Score all available division models
+# 6) End-to-end: ingest → build star → audit labels → train per-division → score/whitespace
 $env:PYTHONPATH = "$PWD"; python gosales/pipeline/score_all.py
 
 # 7) Phase 4 — Rank whitespace (example)
@@ -157,9 +157,14 @@ graph TD
 
 ### Multi‑division support
 
-Known divisions are sourced from `etl/sku_map.division_set()`; cross-division features adapt automatically.
-Scoring auto-discovers models in `models/*_model` and scores each division with an available model.
-To add a division: extend `etl/sku_map.py` (or overrides CSV) with SKUs and division mapping; rebuild star and features; train with `--division <Name>`.
+Known divisions are sourced from `etl/sku_map.division_set()`; cross‑division features adapt automatically.
+Training and scoring auto‑discover divisions: the `score_all` pipeline now trains and audits labels for every known division, then generates scores/whitespace for any division with an available model.
+To add a division: extend `etl/sku_map.py` (or overrides CSV), rebuild the star and features, then either run `score_all` or train explicitly with `gosales/models/train.py`.
+
+#### Troubleshooting and notes
+- If training fails in the simple trainer (`gosales/models/train_division_model.py`) due to infinities or extreme values, prefer the robust trainer `gosales/models/train.py`, which sanitizes features (NaN/inf handling, low‑variance and high‑correlation pruning) and performs hyper‑search across cutoffs.
+- If a division has too few positives (e.g., `FDM` at 0 positives in the default window), widen the window, aggregate sub‑divisions, or adjust the SKU map. Label audit artifacts in `gosales/outputs/labels_*` will show prevalence.
+- SHAP artifacts are optional; if `shap` is not installed, training proceeds without explainability exports.
 
 ---
 

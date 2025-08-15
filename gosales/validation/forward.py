@@ -570,6 +570,56 @@ def main(division: str, cutoff: str, window_months: int, capacity_grid: str, acc
         artifacts['metrics.json'] = str(metrics_file)
     except Exception:
         pass
+
+    # Alerts: write alerts.json when thresholds are breached
+    try:
+        thr_cal = float(getattr(cfg.validation, 'cal_mae_threshold', 0.03))
+        thr_psi = float(getattr(cfg.validation, 'psi_threshold', 0.25))
+        thr_ks = float(getattr(cfg.validation, 'ks_threshold', 0.15))
+    except Exception:
+        thr_cal, thr_psi, thr_ks = 0.03, 0.25, 0.15
+    alerts = []
+    try:
+        # Calibration MAE alert
+        if not np.isnan(cal_mae) and float(cal_mae) >= thr_cal:
+            alerts.append({
+                'type': 'calibration_mae_high',
+                'value': float(cal_mae),
+                'threshold': thr_cal,
+                'message': f'Calibration MAE {float(cal_mae):.3f} exceeds threshold {thr_cal:.3f}'
+            })
+        # PSI EV vs holdout GP alert
+        try:
+            psi_ev = drift_report.get('psi_holdout_ev_vs_holdout_gp', drift_report.get('psi_ev_vs_holdout_gp', None))
+        except Exception:
+            psi_ev = None
+        if psi_ev is not None and isinstance(psi_ev, (int, float)) and float(psi_ev) >= thr_psi:
+            alerts.append({
+                'type': 'psi_ev_vs_holdout_gp_high',
+                'value': float(psi_ev),
+                'threshold': thr_psi,
+                'message': f'PSI(EV vs holdout GP) {float(psi_ev):.3f} exceeds threshold {thr_psi:.3f}'
+            })
+        # KS(p_hat train vs holdout) alert
+        ks_th = drift_report.get('ks_phat_train_holdout', None)
+        if ks_th is not None and isinstance(ks_th, (int, float)) and float(ks_th) >= thr_ks:
+            alerts.append({
+                'type': 'ks_p_hat_train_vs_holdout_high',
+                'value': float(ks_th),
+                'threshold': thr_ks,
+                'message': f'KS(p_hat train vs holdout) {float(ks_th):.3f} exceeds threshold {thr_ks:.3f}'
+            })
+    except Exception:
+        alerts = []
+    try:
+        alerts_file = out_dir / 'alerts.json'
+        alerts_file.write_text(json.dumps({'alerts': alerts}, indent=2), encoding='utf-8')
+        try:
+            artifacts['alerts.json'] = str(alerts_file)
+        except Exception:
+            pass
+    except Exception:
+        pass
     # Write run manifest and registry
     try:
         ctx['write_manifest'](artifacts)

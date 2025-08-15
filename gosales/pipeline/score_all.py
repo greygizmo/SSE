@@ -5,7 +5,10 @@ from gosales.models.train_division_model import train_division_model
 from gosales.pipeline.label_audit import compute_label_audit
 from gosales.pipeline.score_customers import generate_scoring_outputs
 from gosales.utils.logger import get_logger
-from gosales.utils.paths import DATA_DIR
+from gosales.utils.paths import DATA_DIR, OUTPUTS_DIR
+from gosales.etl.sku_map import division_set
+from gosales.utils.run_context import default_manifest, emit_manifest
+from gosales.pipeline.validate_holdout import validate_holdout
 
 logger = get_logger(__name__)
 
@@ -23,7 +26,10 @@ def score_all():
 
     # --- 1. Setup ---
     db_engine = get_db_connection()
-    target_division = "Solidworks"
+    try:
+        divisions = list(division_set())
+    except Exception:
+        divisions = ["Solidworks"]
 
     # --- 2. ETL Phase ---
     logger.info("--- Phase 1: ETL ---")
@@ -44,27 +50,70 @@ def score_all():
     # Training cutoff chosen so the 6-month target window is within training data (Jul–Dec 2024)
     cutoff_date = "2024-06-30"
     prediction_window_months = 6
-    compute_label_audit(db_engine, target_division, cutoff_date, prediction_window_months)
+    for div in divisions:
+        try:
+            compute_label_audit(db_engine, div, cutoff_date, prediction_window_months)
+        except Exception as e:
+            logger.warning(f"Label audit failed for {div}: {e}")
     logger.info("--- Label audit complete ---")
 
     # --- 4. Feature Library emission (catalog) ---
-    # Build a feature matrix once to emit the feature catalog before training
+    # Build a feature matrix per division to emit the feature catalog before training
     try:
         from gosales.features.engine import create_feature_matrix
-        create_feature_matrix(db_engine, target_division, cutoff_date, prediction_window_months)
-        logger.info("--- Feature catalog emitted ---")
+        for div in divisions:
+            try:
+                create_feature_matrix(db_engine, div, cutoff_date, prediction_window_months)
+            except Exception as e:
+                logger.warning(f"Feature catalog emission failed for {div} (non-blocking): {e}")
+        logger.info("--- Feature catalogs emitted ---")
     except Exception as e:
         logger.warning(f"Feature catalog emission failed (non-blocking): {e}")
 
     # --- 5. Model Training Phase ---
-    logger.info(f"--- Phase 3: Training model for {target_division} division ---")
-    train_division_model(db_engine, target_division, cutoff_date=cutoff_date, prediction_window_months=prediction_window_months)
+    logger.info("--- Phase 3: Training models for all divisions ---")
+    for div in divisions:
+        try:
+            logger.info(f"Training model for division: {div}")
+            train_division_model(db_engine, div, cutoff_date=cutoff_date, prediction_window_months=prediction_window_months)
+        except Exception as e:
+            logger.warning(f"Training failed for {div}: {e}")
     logger.info("--- Model Training Phase Complete ---")
 
     # --- 6. Scoring Phase ---
     logger.info("--- Phase 4: Generating Scores and Whitespace ---")
-    generate_scoring_outputs(db_engine)
+    # Create run manifest and record high-level context
+    run_manifest = default_manifest(pipeline_version="0.1.0")
+    run_manifest["cutoff"] = cutoff_date
+    run_manifest["window_months"] = int(prediction_window_months)
+
+    # Generate outputs; function will update manifest details (divisions scored, alerts)
+    generate_scoring_outputs(db_engine, run_manifest=run_manifest)
+
+    # Persist manifest alongside outputs
+    try:
+        manifest_path = emit_manifest(OUTPUTS_DIR, run_manifest["run_id"], run_manifest)
+        logger.info(f"Wrote run manifest to {manifest_path}")
+    except Exception as e:
+        logger.warning(f"Failed to write run manifest: {e}")
     logger.info("--- Scoring Phase Complete ---")
+
+    # --- 7. Hold-out validation & gates (Phase 5) ---
+    try:
+        from pathlib import Path as _Path
+        icp_path = OUTPUTS_DIR / "icp_scores.csv"
+        if icp_path.exists():
+            # Derive a year tag from cutoff (simple heuristic: cutoff year + 1)
+            year_tag = None
+            try:
+                y = int(str(run_manifest.get("cutoff", "")).split("-")[0]) if isinstance(run_manifest, dict) else None
+                if y:
+                    year_tag = str(y + 1)
+            except Exception:
+                year_tag = None
+            validate_holdout(icp_scores_csv=str(icp_path), year_tag=year_tag)
+    except Exception as e:
+        logger.warning(f"Hold-out validation step failed (non-blocking): {e}")
 
     logger.info("GoSales scoring pipeline finished successfully!")
 

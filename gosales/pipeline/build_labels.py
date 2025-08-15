@@ -30,12 +30,16 @@ def main(division: str, cutoff: str, window_months: int, mode: str, gp_min_thres
 
     cutoffs = [c.strip() for c in cutoff.split(",") if c.strip()]
     for cut in cutoffs:
+        # Apply per-division window override if configured
+        w_override = int(getattr(cfg.labels, 'per_division_window_months', {}).get(division.lower(), window_months))
         params = LabelParams(
             division=division,
             cutoff=cut,
-            window_months=window_months,
+            window_months=w_override,
             mode=mode,  # type: ignore[arg-type]
             gp_min_threshold=gp_min_threshold,
+            min_positive_target=getattr(cfg.labels, 'sparse_min_positive_target', None),
+            max_window_months=int(getattr(cfg.labels, 'sparse_max_window_months', 12)),
         )
 
         logger.info(f"Building labels: division={division}, cutoff={cut}, window={window_months}, mode={mode}, thresh={gp_min_threshold}")

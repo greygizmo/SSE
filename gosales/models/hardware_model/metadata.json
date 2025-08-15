@@ -1,5 +1,5 @@
 {
-  "division": "Solidworks",
+  "division": "Hardware",
   "cutoff_date": "2024-06-30",
   "prediction_window_months": 6,
   "feature_names": [
@@ -18,7 +18,7 @@
     "product_diversity_score",
     "sku_diversity_score",
     "days_since_last_order",
-    "days_since_last_Solidworks_order",
+    "days_since_last_Hardware_order",
     "tx_count_last_3m",
     "gp_sum_last_3m",
     "gp_mean_last_3m",
@@ -277,7 +277,7 @@
     "product_diversity_score_missing",
     "sku_diversity_score_missing",
     "days_since_last_order_missing",
-    "days_since_last_Solidworks_order_missing",
+    "days_since_last_Hardware_order_missing",
     "tx_count_last_3m_missing",
     "gp_sum_last_3m_missing",
     "gp_mean_last_3m_missing",
@@ -620,15 +620,15 @@
     "is_mold_tool_and_die_x_growth",
     "is_energy_x_growth"
   ],
-  "trained_at": "2025-08-14T16:55:52.897383Z",
+  "trained_at": "2025-08-14T16:43:33.615999Z",
   "best_model": "Logistic Regression",
-  "best_auc": 0.7523884035040775,
+  "best_auc": 0.9522231423957812,
   "calibration_method": "none",
-  "calibration_mae": 0.32346977602794214,
-  "brier_score": 0.19565572056975353,
+  "calibration_mae": 0.17172390045079328,
+  "brier_score": 0.08109767257122474,
   "class_balance": {
-    "positives": 1073,
-    "negatives": 19990,
-    "scale_pos_weight": 18.63000931966449
+    "positives": 895,
+    "negatives": 20168,
+    "scale_pos_weight": 22.534078212290503
   }
 }

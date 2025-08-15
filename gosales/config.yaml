@@ -62,6 +62,11 @@ whitespace:
   bias_division_max_share_topN: 0.6
   cooldown_days: 30
   cooldown_factor: 0.75
+  # Optional challenger meta-learner over [p_icp_pct, lift_norm, als_norm, EV_norm]
+  challenger_enabled: false
+  challenger_model: lr
+  # Emit legacy heuristic whitespace alongside Phase-4 outputs for comparison
+  shadow_mode: false
 
 validation:
   bootstrap_n: 1000

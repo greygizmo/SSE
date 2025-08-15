@@ -7,6 +7,7 @@ from gosales.utils.logger import get_logger
 from gosales.utils import config as cfg
 from gosales.features.utils import filter_to_cutoff, winsorize_series
 from gosales.utils.paths import OUTPUTS_DIR
+from gosales.features.als_embed import customer_als_embeddings
 from gosales.etl.sku_map import division_set
 from gosales.utils.normalize import normalize_division
 
@@ -577,6 +578,19 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
                 features_pd[c] = 0
     except Exception as e:
         logger.warning(f"Flag aggregation failed: {e}")
+
+    # Optionally join ALS embeddings (feature period <= cutoff)
+    try:
+        if cfgmod.features.use_als_embeddings and cutoff_date:
+            als_df = customer_als_embeddings(engine, cutoff_date, factors=16)
+            if not als_df.is_empty():
+                # Join on customer_id
+                als_pd = als_df.to_pandas()
+                features_pd = features_pd.merge(als_pd, on='customer_id', how='left')
+                for c in [c for c in features_pd.columns if str(c).startswith('als_f')]:
+                    features_pd[c] = pd.to_numeric(features_pd[c], errors='coerce').fillna(0.0)
+    except Exception as e:
+        logger.warning(f"ALS embedding join failed (non-blocking): {e}")
 
     # Convert back to polars
     features = pl.from_pandas(features_pd)

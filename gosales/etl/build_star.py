@@ -530,6 +530,18 @@ def build_star_schema(engine, config_path: str | Path | None = None, rebuild: bo
     fact_transactions.write_parquet(fact_parquet)
     logger.info(f"Successfully created fact_transactions table with {len(fact_transactions)} total line items.")
 
+    # Create indexes on common join/filter keys for performance
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_fact_customer ON fact_transactions(customer_id)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_fact_order_date ON fact_transactions(order_date)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_fact_division ON fact_transactions(product_division)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_dim_customer_id ON dim_customer(customer_id)"))
+            conn.commit()
+        logger.info("Created indexes on fact_transactions and dim_customer")
+    except Exception as e:
+        logger.warning(f"Failed to create indexes: {e}")
+
     # Row count audit
     try:
         row_counts = pd.DataFrame([

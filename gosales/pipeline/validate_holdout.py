@@ -1,3 +1,96 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Dict, List
+
+import numpy as np
+import pandas as pd
+from sklearn import metrics as skm
+
+from gosales.utils.logger import get_logger
+from gosales.utils.paths import OUTPUTS_DIR
+
+
+logger = get_logger(__name__)
+
+
+def _pr_auc(y_true: np.ndarray, y_score: np.ndarray) -> float:
+    if len(y_true) == 0:
+        return float("nan")
+    prec, rec, _ = skm.precision_recall_curve(y_true, y_score)
+    return float(skm.auc(rec, prec))
+
+
+def _lift_at_k(y_true: np.ndarray, y_score: np.ndarray, k_percent: int) -> float:
+    n = len(y_true)
+    if n == 0:
+        return float("nan")
+    k = max(1, int(n * (k_percent / 100.0)))
+    idx = np.argsort(-y_score)[:k]
+    top_rate = float(np.mean(y_true[idx]))
+    base = float(np.mean(y_true)) if np.mean(y_true) > 0 else 1e-9
+    return top_rate / base
+
+
+def validate_holdout(icp_scores_csv: str | Path, *, year_tag: str | None = None, gates: Dict[str, float] | None = None) -> Path:
+    df = pd.read_csv(icp_scores_csv)
+    df = df.dropna(subset=['icp_score'])
+    # Default gates
+    gates = gates or {"auc": 0.70, "lift_at_10": 2.0, "cal_mae": 0.10}
+    results: List[Dict[str, float]] = []
+    status_ok = True
+    for div, g in df.groupby('division_name'):
+        y = pd.to_numeric(g.get('bought_in_division', 0), errors='coerce').fillna(0).astype(int).to_numpy()
+        p = pd.to_numeric(g['icp_score'], errors='coerce').fillna(0.0).to_numpy()
+        if len(y) == 0:
+            continue
+        try:
+            auc = float(skm.roc_auc_score(y, p))
+        except Exception:
+            auc = float('nan')
+        try:
+            # Calibration MAE via 10 quantile bins
+            bins = pd.qcut(pd.Series(p), q=10, labels=False, duplicates='drop')
+            cal = pd.DataFrame({"y": y, "p": p, "bin": bins})
+            grp = cal.groupby('bin', observed=False).agg(mean_p=("p","mean"), frac_pos=("y","mean"), count=("y","size")).dropna()
+            cal_mae = float((grp['mean_p'].sub(grp['frac_pos']).abs() * grp['count']).sum() / max(1, grp['count'].sum()))
+        except Exception:
+            cal_mae = float('nan')
+        brier = float(np.mean((p - y) ** 2))
+        lift10 = _lift_at_k(y, p, 10)
+        res = {
+            "division_name": div,
+            "auc": auc,
+            "pr_auc": _pr_auc(y, p),
+            "brier": brier,
+            "cal_mae": cal_mae,
+            "lift_at_10": lift10,
+        }
+        results.append(res)
+        # Gate checks (ignore NaNs)
+        if not np.isnan(auc) and auc < gates["auc"]:
+            status_ok = False
+        if not np.isnan(lift10) and lift10 < gates["lift_at_10"]:
+            status_ok = False
+        if not np.isnan(cal_mae) and cal_mae > gates["cal_mae"]:
+            status_ok = False
+
+    OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+    out = OUTPUTS_DIR / (f"validation_metrics_{year_tag}.json" if year_tag else "validation_metrics.json")
+    out.write_text(json.dumps({"divisions": results, "gates": gates, "status": "ok" if status_ok else "fail"}, indent=2), encoding='utf-8')
+    logger.info(f"Wrote validation metrics to {out}")
+    return out
+
+
+if __name__ == "__main__":
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--scores", default=str(OUTPUTS_DIR / "icp_scores.csv"))
+    ap.add_argument("--year", default=None)
+    args = ap.parse_args()
+    validate_holdout(args.scores, year_tag=args.year)
+
 #!/usr/bin/env python3
 """
 Validation pipeline that tests the trained model against 2025 YTD holdout data.
@@ -14,6 +107,7 @@ from gosales.utils.db import get_db_connection
 from gosales.etl.load_csv import load_csv_to_db
 from gosales.etl.cleaners import clean_currency_value
 from gosales.etl.build_star import build_star_schema
+from gosales.etl.sku_map import get_sku_mapping
 from gosales.features.engine import create_feature_matrix
 from gosales.utils.logger import get_logger
 from gosales.utils.paths import DATA_DIR, MODELS_DIR, OUTPUTS_DIR
@@ -91,19 +185,8 @@ def validate_against_holdout():
     # Use the same unpivot logic from build_star.py but on combined data
     logger.info("Unpivoting combined sales data...")
     
-    # SKU mapping (same as in build_star.py)
-    sku_mapping = {
-        'SWX_Core': {'qty_col': 'SWX_Core_Qty', 'division': 'Solidworks'},
-        'SWX_Pro_Prem': {'qty_col': 'SWX_Pro_Prem_Qty', 'division': 'Solidworks'},
-        'Core_New_UAP': {'qty_col': 'Core_New_UAP_Qty', 'division': 'Solidworks'},
-        'Pro_Prem_New_UAP': {'qty_col': 'Pro_Prem_New_UAP_Qty', 'division': 'Solidworks'},
-        'PDM': {'qty_col': 'PDM_Qty', 'division': 'Solidworks'},
-        'Simulation': {'qty_col': 'Simulation_Qty', 'division': 'Simulation'},
-        'Services': {'qty_col': 'Services_Qty', 'division': 'Services'},
-        'Training': {'qty_col': 'Training_Qty', 'division': 'Services'},
-        'Success Plan GP': {'qty_col': 'Success_Plan_Qty', 'division': 'Services'},
-        'Supplies': {'qty_col': 'Consumables_Qty', 'division': 'Hardware'},
-    }
+    # SKU mapping: use the central mapping to preserve all divisions
+    sku_mapping = get_sku_mapping()
     
     all_transactions = []
     id_vars = ["CustomerId", "Rec Date", "Division"]
@@ -320,6 +403,14 @@ def validate_against_holdout():
         json.dump(metrics_summary, f, indent=2)
     logger.info(f"Saved validation metrics to {metrics_path}")
     
+    # Restore original curated fact_transactions for subsequent scoring runs
+    try:
+        if not original_transactions.empty:
+            pl.from_pandas(original_transactions).write_database("fact_transactions", db_engine, if_table_exists="replace")
+            logger.info("Restored original fact_transactions table after validation.")
+    except Exception as e:
+        logger.warning(f"Failed to restore original fact_transactions: {e}")
+
     logger.info("Holdout validation completed successfully!")
     return metrics_summary
 

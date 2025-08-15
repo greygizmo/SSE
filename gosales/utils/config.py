@@ -49,6 +49,11 @@ class Logging:
 class Labels:
     gp_min_threshold: float = 0.0
     denylist_skus_csv: Optional[Path] = None
+    # Per-division window overrides for sparse groups
+    per_division_window_months: Dict[str, int] = field(default_factory=dict)
+    # Sparse division label widening targets
+    sparse_min_positive_target: Optional[int] = None
+    sparse_max_window_months: int = 12
 
 
 @dataclass
@@ -73,6 +78,8 @@ class ModelingConfig:
     calibration_methods: list[str] = field(default_factory=lambda: ["platt", "isotonic"])
     top_k_percents: list[int] = field(default_factory=lambda: [5, 10, 20])
     capacity_percent: int = 10
+    # Threshold of positives above which to prefer isotonic; otherwise sigmoid
+    sparse_isotonic_threshold_pos: int = 1000
 
 
 @dataclass
@@ -95,6 +102,11 @@ class WhitespaceConfig:
     bias_division_max_share_topN: float = 0.6
     cooldown_days: int = 30
     cooldown_factor: float = 0.75
+    # Optional challenger meta-learner over [p_icp_pct, lift_norm, als_norm, EV_norm]
+    challenger_enabled: bool = False
+    challenger_model: str = "lr"  # currently only 'lr'
+    # Shadow mode emits legacy heuristic whitespace for comparison
+    shadow_mode: bool = False
 
 
 @dataclass
@@ -239,6 +251,9 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
         labels=Labels(
             gp_min_threshold=float(labels_cfg.get("gp_min_threshold", 0.0)),
             denylist_skus_csv=(Path(labels_cfg["denylist_skus_csv"]).resolve() if labels_cfg.get("denylist_skus_csv") else None),
+            per_division_window_months=dict(labels_cfg.get("per_division_window_months", {})),
+            sparse_min_positive_target=(int(labels_cfg.get("sparse_min_positive_target")) if labels_cfg.get("sparse_min_positive_target") is not None else None),
+            sparse_max_window_months=int(labels_cfg.get("sparse_max_window_months", 12)),
         ),
         features=Features(
             windows_months=list(feat_cfg.get("windows_months", [3, 6, 12, 24])),
@@ -259,6 +274,7 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
             calibration_methods=list(mdl_cfg.get("calibration_methods", ["platt", "isotonic"])),
             top_k_percents=list(mdl_cfg.get("top_k_percents", [5, 10, 20])),
             capacity_percent=int(mdl_cfg.get("capacity_percent", 10)),
+            sparse_isotonic_threshold_pos=int(mdl_cfg.get("sparse_isotonic_threshold_pos", 1000)),
         ),
         whitespace=WhitespaceConfig(
             weights=list(ws_cfg.get("weights", [0.60, 0.20, 0.10, 0.10])),
@@ -276,6 +292,9 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
             bias_division_max_share_topN=float(ws_cfg.get("bias_division_max_share_topN", 0.6)),
             cooldown_days=int(ws_cfg.get("cooldown_days", 30)),
             cooldown_factor=float(ws_cfg.get("cooldown_factor", 0.75)),
+            challenger_enabled=bool(ws_cfg.get("challenger_enabled", False)),
+            challenger_model=str(ws_cfg.get("challenger_model", "lr")),
+            shadow_mode=bool(ws_cfg.get("shadow_mode", False)),
         ),
         validation=ValidationConfig(
             bootstrap_n=int(val_cfg.get("bootstrap_n", 1000)),

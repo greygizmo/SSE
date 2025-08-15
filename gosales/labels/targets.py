@@ -24,6 +24,9 @@ class LabelParams:
     window_months: int
     mode: Mode = "expansion"
     gp_min_threshold: float = 0.0
+    # Optional: widen window for sparse divisions up to max_window_months to hit a minimum positives target
+    min_positive_target: Optional[int] = None
+    max_window_months: int = 12
 
 
 def build_labels_for_division(
@@ -79,12 +82,33 @@ def build_labels_for_division(
         pass
 
     # Net GP per customer in window
-    net_gp = window_target.groupby('customer_id')['gross_profit'].sum().rename('net_gp_window').reset_index()
-    labels = cand.merge(net_gp, on='customer_id', how='left')
-    labels['net_gp_window'] = labels['net_gp_window'].fillna(0.0)
-    # Threshold from params or fallback to config if param not provided explicitly
-    gp_thresh = float(params.gp_min_threshold if params.gp_min_threshold is not None else (cfg.load_config().labels.gp_min_threshold or 0.0))
-    labels['label'] = (labels['net_gp_window'] > gp_thresh).astype('int8')
+    def _compute_labels(df_window: pd.DataFrame) -> pd.DataFrame:
+        net_gp_local = df_window.groupby('customer_id')['gross_profit'].sum().rename('net_gp_window').reset_index()
+        lab = cand.merge(net_gp_local, on='customer_id', how='left')
+        lab['net_gp_window'] = lab['net_gp_window'].fillna(0.0)
+        thr = float(params.gp_min_threshold if params.gp_min_threshold is not None else (cfg.load_config().labels.gp_min_threshold or 0.0))
+        lab['label'] = (lab['net_gp_window'] > thr).astype('int8')
+        return lab
+
+    labels = _compute_labels(window_target)
+
+    # Auto-widening for sparse divisions, if requested
+    try:
+        if params.min_positive_target and params.min_positive_target > 0:
+            pos = int(labels['label'].sum()) if not labels.empty else 0
+            widened = int(params.window_months)
+            while pos < int(params.min_positive_target) and widened < int(params.max_window_months):
+                widened = min(int(params.max_window_months), widened + 3)
+                new_end = cutoff_dt + relativedelta(months=widened)
+                window_df_w = facts[(facts['order_date'] > cutoff_dt) & (facts['order_date'] <= new_end)].copy()
+                window_df_w['product_division'] = window_df_w['product_division'].astype(str).str.strip()
+                window_target_w = window_df_w[window_df_w['product_division'] == normalize_division(params.division)].copy()
+                labels = _compute_labels(window_target_w)
+                pos = int(labels['label'].sum()) if not labels.empty else 0
+            # Update window_end if widened
+            win_end = cutoff_dt + relativedelta(months=widened)
+    except Exception:
+        pass
 
     # Cohorts from feature period
     had_any = set(feature_df['customer_id'].dropna().astype('int64').tolist())

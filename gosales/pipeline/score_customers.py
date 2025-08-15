@@ -17,6 +17,9 @@ import numpy as np
 from gosales.features.engine import create_feature_matrix
 from gosales.pipeline.rank_whitespace import rank_whitespace, save_ranked_whitespace, RankInputs
 from gosales.validation.deciles import emit_validation_artifacts
+from gosales.validation.schema import validate_icp_scores_schema, validate_whitespace_schema, write_schema_report
+from gosales.monitoring.drift import check_drift_and_emit_alerts
+from gosales.utils.config import load_config
 
 logger = get_logger(__name__)
 
@@ -331,8 +334,21 @@ def generate_scoring_outputs(engine, *, run_manifest: dict | None = None):
             
     if all_scores:
         combined_scores = pl.concat(all_scores, how="vertical")
+        # Append run_id if available for provenance
+        try:
+            if run_manifest is not None and isinstance(run_manifest.get("run_id"), str):
+                if "run_id" not in combined_scores.columns:
+                    combined_scores = combined_scores.with_columns(pl.lit(run_manifest["run_id"]).alias("run_id"))
+        except Exception:
+            pass
         icp_scores_path = OUTPUTS_DIR / "icp_scores.csv"
         combined_scores.write_csv(str(icp_scores_path))
+        # Lightweight schema validation
+        try:
+            report = validate_icp_scores_schema(icp_scores_path)
+            write_schema_report(report, OUTPUTS_DIR / "schema_icp_scores.json")
+        except Exception:
+            pass
         logger.info(f"Saved ICP scores for {len(combined_scores)} customer-division combinations to {icp_scores_path}")
     else:
         logger.warning("No models were available for scoring.")
@@ -348,10 +364,55 @@ def generate_scoring_outputs(engine, *, run_manifest: dict | None = None):
 
         icp_path = OUTPUTS_DIR / "icp_scores.csv"
         if icp_path.exists():
-            icp_df = pd.read_csv(icp_path)
+            # Load only necessary columns for ranking to reduce memory
+            try:
+                use_cols = [
+                    'division_name','customer_id','icp_score',
+                    'rfm__all__gp_sum__12m','affinity__div__lift_topk__12m',
+                    'bought_in_division'
+                ]
+                icp_df = pd.read_csv(icp_path, usecols=lambda c: c in use_cols)
+            except Exception:
+                icp_df = pd.read_csv(icp_path)
             ranked = rank_whitespace(RankInputs(scores=icp_df))
+            # Attach run_id for schema contract if available
+            try:
+                if run_manifest is not None and isinstance(run_manifest.get('run_id'), str):
+                    if 'run_id' not in ranked.columns:
+                        ranked.insert(0, 'run_id', run_manifest['run_id'])
+            except Exception:
+                pass
             path = save_ranked_whitespace(ranked, cutoff_tag=cutoff_tag)
             logger.info(f"Saved Phase-4 ranked whitespace to {path}")
+
+            # Shadow mode: emit legacy heuristic whitespace for comparison and report overlap metrics
+            try:
+                cfg = load_config()
+                if bool(getattr(cfg.whitespace, 'shadow_mode', False)):
+                    legacy = generate_whitespace_opportunities(engine)
+                    if not legacy.is_empty():
+                        legacy_pd = legacy.to_pandas()
+                        legacy_pd.rename(columns={"whitespace_division": "division_name", "whitespace_score": "score"}, inplace=True)
+                        # Standardize required columns for comparison
+                        legacy_pd = legacy_pd[[c for c in ["customer_id", "division_name", "score", "customer_name"] if c in legacy_pd.columns]]
+                        legacy_name = f"whitespace_legacy_{cutoff_tag}.csv" if cutoff_tag else "whitespace_legacy.csv"
+                        legacy_path = OUTPUTS_DIR / legacy_name
+                        legacy_pd.to_csv(legacy_path, index=False)
+                        # Overlap metrics: Jaccard of top-N between champion and legacy
+                        try:
+                            topn = max(1, int(len(ranked) * 0.10))
+                            champ_top = set(ranked.nlargest(topn, ["score","p_icp","customer_id"])['customer_id'].astype(int).tolist())
+                            leg_top = set(legacy_pd.nlargest(topn, "score")['customer_id'].astype(int).tolist())
+                            inter = len(champ_top & leg_top)
+                            union = len(champ_top | leg_top)
+                            jacc = float(inter) / max(1, union)
+                            overlap = {"top_percent": 10, "intersection": int(inter), "union": int(union), "jaccard": jacc}
+                            ov_name = f"whitespace_overlap_{cutoff_tag}.json" if cutoff_tag else "whitespace_overlap.json"
+                            (OUTPUTS_DIR / ov_name).write_text(pd.Series(overlap).to_json(indent=2), encoding='utf-8')
+                        except Exception:
+                            pass
+            except Exception as e:
+                logger.warning(f"Shadow mode failed: {e}")
 
             # Additional Phase-4 artifacts: explanations, thresholds, metrics
             try:
@@ -390,6 +451,14 @@ def generate_scoring_outputs(engine, *, run_manifest: dict | None = None):
                 }
                 met_name = f"whitespace_metrics_{cutoff_tag}.json" if cutoff_tag else "whitespace_metrics.json"
                 (OUTPUTS_DIR / met_name).write_text(pd.Series(metrics).to_json(indent=2), encoding='utf-8')
+
+                # Lightweight schema validation for whitespace
+                try:
+                    ws_report = validate_whitespace_schema(path)
+                    ws_out = OUTPUTS_DIR / (f"schema_whitespace_{cutoff_tag}.json" if cutoff_tag else "schema_whitespace.json")
+                    write_schema_report(ws_report, ws_out)
+                except Exception:
+                    pass
 
                 # Capacity selection and bias/diversity sharing
                 try:
@@ -433,6 +502,12 @@ def generate_scoring_outputs(engine, *, run_manifest: dict | None = None):
 
             # Emit validation artifacts from scores
             emit_validation_artifacts(icp_path, cutoff_tag=cutoff_tag)
+
+            # Drift/alerts monitoring (basic): write alerts.json at top-level
+            try:
+                check_drift_and_emit_alerts(run_manifest)
+            except Exception:
+                pass
     except Exception as e:
         logger.warning(f"Phase-4 ranker failed; skipping whitespace ranking: {e}")
 

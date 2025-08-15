@@ -4,7 +4,11 @@ from sklearn.linear_model import LogisticRegression
 from lightgbm import LGBMClassifier
 from sklearn.metrics import roc_auc_score
 from sklearn.calibration import CalibratedClassifierCV, calibration_curve
-import shap
+try:
+    import shap  # type: ignore
+    _HAS_SHAP = True
+except Exception:
+    _HAS_SHAP = False
 import pandas as pd
 from gosales.utils.paths import OUTPUTS_DIR
 import mlflow
@@ -15,6 +19,7 @@ from gosales.utils.db import get_db_connection
 from gosales.features.engine import create_feature_matrix
 from gosales.utils.logger import get_logger
 from gosales.utils.paths import MODELS_DIR
+from gosales.models.metrics import calibration_bins as _calibration_bins_helper, calibration_mae as _calibration_mae_helper
 import json
 from datetime import datetime
 
@@ -53,9 +58,14 @@ def train_division_model(engine, division_name: str, cutoff_date: str = "2024-12
         logger.warning(f"Not enough positive examples ({positive_examples}) for {division_name}. Cannot train model.")
         return
 
-    # Define features (X) and target (y)
-    # The new target column is 'bought_in_division'
+    # Define features (X) and target (y) + basic sanitation to avoid numeric issues
     X = feature_matrix.drop(["customer_id", "bought_in_division"]).to_pandas()
+    # Sanitize features: coerce to numeric where possible, replace inf with NaN, then fill
+    for col in X.columns:
+        if not (pd.api.types.is_integer_dtype(X[col]) or pd.api.types.is_float_dtype(X[col])):
+            X[col] = pd.to_numeric(X[col], errors='coerce')
+    X.replace([float('inf'), float('-inf')], pd.NA, inplace=True)
+    X = X.fillna(0.0)
     y = feature_matrix["bought_in_division"].to_pandas()
     
     logger.info(f"Training with {len(X)} customers and {positive_examples} positive examples for {division_name} division.")
@@ -101,9 +111,15 @@ def train_division_model(engine, division_name: str, cutoff_date: str = "2024-12
     best_auc = max(lr_auc, lgbm_auc)
 
     # --- Probability calibration ---
-    calibration_method = "isotonic" if positive_examples >= 1000 else "sigmoid"
     try:
-        calibrator = CalibratedClassifierCV(base_estimator=best_model, method=calibration_method, cv=3)
+        from gosales.utils.config import load_config as _load_cfg
+        _cfg = _load_cfg()
+        _iso_thr = int(getattr(_cfg.modeling, 'sparse_isotonic_threshold_pos', 1000))
+    except Exception:
+        _iso_thr = 1000
+    calibration_method = "isotonic" if positive_examples >= _iso_thr else "sigmoid"
+    try:
+        calibrator = CalibratedClassifierCV(estimator=best_model, method=calibration_method, cv=3)
         calibrator.fit(X_train, y_train)
         # Replace best_model with calibrated version
         best_model = calibrator
@@ -120,13 +136,29 @@ def train_division_model(engine, division_name: str, cutoff_date: str = "2024-12
     # Save a simple model card CSV
     try:
         OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
-        pd.DataFrame([
+        model_card_rows = [
             {"metric": "auc_lr", "value": lr_auc},
             {"metric": "auc_lgbm", "value": lgbm_auc},
             {"metric": "best_model", "value": best_model_name},
             {"metric": "positives", "value": int(positive_examples)},
             {"metric": "total", "value": int(len(X))},
-        ]).to_csv(OUTPUTS_DIR / f"model_card_{division_name.lower()}.csv", index=False)
+        ]
+        try:
+            # Compute calibration diagnostics on test split
+            prob_test = best_model.predict_proba(X_test)[:, 1]
+            bins_df = _calibration_bins_helper(y_test.to_numpy(), prob_test, n_bins=10)
+            cal_mae = float(_calibration_mae_helper(bins_df, weighted=True))
+            # Brier score: mean squared error of probabilities vs outcomes
+            brier = float(((prob_test - y_test.to_numpy()) ** 2).mean())
+            # Persist bins for analysis
+            bins_df.to_csv(OUTPUTS_DIR / f"calibration_bins_{division_name.lower()}.csv", index=False)
+            # Add to model card
+            model_card_rows.append({"metric": "calibration_mae", "value": cal_mae})
+            model_card_rows.append({"metric": "brier_score", "value": brier})
+        except Exception as e:
+            logger.warning(f"Failed to compute calibration diagnostics: {e}")
+
+        pd.DataFrame(model_card_rows).to_csv(OUTPUTS_DIR / f"model_card_{division_name.lower()}.csv", index=False)
     except Exception:
         pass
     
@@ -146,30 +178,42 @@ def train_division_model(engine, division_name: str, cutoff_date: str = "2024-12
 
     # --- SHAP Explainability export ---
     try:
-        OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
-        feature_names = list(X.columns)
-        if best_model_name == "LightGBM":
-            explainer = shap.TreeExplainer(best_model)
-            shap_values = explainer.shap_values(X)
-            # For binary classification, shap_values is a list [neg, pos]
-            if isinstance(shap_values, list) and len(shap_values) == 2:
-                shap_matrix = shap_values[1]
+        if _HAS_SHAP:
+            OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+            feature_names = list(X.columns)
+            if best_model_name == "LightGBM":
+                explainer = shap.TreeExplainer(best_model)
+                shap_values = explainer.shap_values(X)
+                # For binary classification, shap_values is a list [neg, pos]
+                if isinstance(shap_values, list) and len(shap_values) == 2:
+                    shap_matrix = shap_values[1]
+                else:
+                    shap_matrix = shap_values
             else:
-                shap_matrix = shap_values
-        else:
-            # Linear model SHAP
-            explainer = shap.LinearExplainer(best_model, X_train)
-            shap_matrix = explainer.shap_values(X)
+                # Linear model SHAP
+                explainer = shap.LinearExplainer(best_model, X_train)
+                shap_matrix = explainer.shap_values(X)
 
-        shap_df = pd.DataFrame(shap_matrix, columns=feature_names)
-        shap_df.insert(0, 'customer_id', feature_matrix['customer_id'].to_pandas().values)
-        shap_df.to_csv(OUTPUTS_DIR / f"shap_values_{division_name.lower()}.csv", index=False)
-        logger.info("Exported SHAP values for explainability.")
+            shap_df = pd.DataFrame(shap_matrix, columns=feature_names)
+            shap_df.insert(0, 'customer_id', feature_matrix['customer_id'].to_pandas().values)
+            shap_df.to_csv(OUTPUTS_DIR / f"shap_values_{division_name.lower()}.csv", index=False)
+            logger.info("Exported SHAP values for explainability.")
     except Exception as e:
         logger.warning(f"Failed to compute/export SHAP values: {e}")
 
     # --- Persist feature metadata for safe scoring alignment ---
     try:
+        # Enrich metadata with calibration diagnostics if available
+        cal_mae_val = None
+        brier_val = None
+        try:
+            prob_test = best_model.predict_proba(X_test)[:, 1]
+            bins_df = _calibration_bins_helper(y_test.to_numpy(), prob_test, n_bins=10)
+            cal_mae_val = float(_calibration_mae_helper(bins_df, weighted=True))
+            brier_val = float(((prob_test - y_test.to_numpy()) ** 2).mean())
+        except Exception:
+            pass
+
         metadata = {
             "division": division_name,
             "cutoff_date": cutoff_date,
@@ -179,6 +223,8 @@ def train_division_model(engine, division_name: str, cutoff_date: str = "2024-12
             "best_model": best_model_name,
             "best_auc": float(best_auc),
             "calibration_method": calibration_method,
+            "calibration_mae": cal_mae_val,
+            "brier_score": brier_val,
             "class_balance": {
                 "positives": positive_count,
                 "negatives": negative_count,
@@ -191,20 +237,15 @@ def train_division_model(engine, division_name: str, cutoff_date: str = "2024-12
     except Exception as e:
         logger.warning(f"Failed to write model metadata: {e}")
 
-    # --- Export calibration curve on test split ---
+    # --- Export calibration bins on test split (already covered above) ---
     try:
         prob_pos = best_model.predict_proba(X_test)[:, 1]
-        frac_pos, mean_pred = calibration_curve(y_test, prob_pos, n_bins=10, strategy='quantile')
-        calib_df = pd.DataFrame({
-            'bin': list(range(1, len(frac_pos) + 1)),
-            'mean_predicted': mean_pred,
-            'fraction_positives': frac_pos,
-        })
+        bins_df = _calibration_bins_helper(y_test.to_numpy(), prob_pos, n_bins=10)
         OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
-        calib_df.to_csv(OUTPUTS_DIR / f"calibration_{division_name.lower()}.csv", index=False)
-        logger.info("Exported calibration curve CSV.")
+        bins_df.to_csv(OUTPUTS_DIR / f"calibration_bins_{division_name.lower()}.csv", index=False)
+        logger.info("Exported calibration bins CSV.")
     except Exception as e:
-        logger.warning(f"Failed to export calibration curve: {e}")
+        logger.warning(f"Failed to export calibration bins: {e}")
 
 @click.command()
 @click.option('--division', default='Solidworks', help='The division to train a model for.')

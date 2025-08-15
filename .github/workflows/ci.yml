@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+    branches: [ master, main ]
+
+jobs:
+  lint-test-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r gosales/requirements.txt
+
+      - name: Lint (ruff)
+        run: |
+          ruff --version
+          ruff check .
+
+      - name: Run unit tests
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          pytest -q
+
+      - name: CI Gate (schema/validation)
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          python -m gosales.validation.ci_gate
+

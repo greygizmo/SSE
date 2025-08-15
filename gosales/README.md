@@ -24,16 +24,16 @@ A division-focused Ideal Customer Profile (ICP) & Whitespace engine. The pipelin
   - Config-driven modeling grids and seeds
   - Training CLI for LR (elastic-net) and LGBM across multiple cutoffs, with calibration (Platt/Isotonic) and selection by mean lift@10 (tie-breaker Brier)
   - Metrics: AUC, PR-AUC, Brier, lift@{5,10,20}%, revenue-weighted lift@K, calibration MAE
-  - Artifacts: `metrics.json`, `gains.csv`, `calibration.csv`, `thresholds.csv`, `model_card.json`, SHAP summaries (guarded if SHAP not installed)
+  - Artifacts: `metrics.json`, `gains.csv`, `calibration.csv`, `thresholds.csv`, `model_card.json`, SHAP summaries (optional; guarded if SHAP not installed)
   - Guardrails: degenerate classifier check, deterministic LGBM, early stopping, overfit-gap guard, capped `scale_pos_weight`
 
 - **Phase 4 — Whitespace Ranking / Next‑Best‑Action**
   - Signals: calibrated probability (`p_icp` + per‑division percentile), market‑basket affinity (`mb_lift_max`, `mb_lift_mean`), ALS similarity (explicit or embedding‑centroid), expected value proxy (segment‑blended and capped)
   - Normalization: per‑division percentile (default) or pooled across divisions
-  - Blending: configurable weights (default `0.60,0.20,0.10,0.10`) → single actionable score
+  - Blending: configurable weights (default `0.60,0.20,0.10,0.10`) → single actionable score; optional challenger meta‑learner (`score_challenger`)
   - Capacity: top‑percent, per‑rep, or hybrid diversification (round‑robin interleave)
   - Gating: ownership, region, recent contact, open deal; cooldown de‑emphasis; structured JSONL logs
-  - Artifacts: `whitespace_<cutoff>.csv`, `whitespace_explanations_<cutoff>.csv`, `thresholds_whitespace_<cutoff>.csv`, `whitespace_metrics_<cutoff>.json`, `whitespace_log_<cutoff>.jsonl`, `mb_rules_<division>_<cutoff>.csv`
+  - Artifacts: `whitespace_<cutoff>.csv` (includes `score` and `score_challenger`), `whitespace_explanations_<cutoff>.csv`, `thresholds_whitespace_<cutoff>.csv`, `whitespace_metrics_<cutoff>.json`, `whitespace_log_<cutoff>.jsonl`, `mb_rules_<division>_<cutoff>.csv`, optional `whitespace_legacy_<cutoff>.csv` (shadow), `whitespace_overlap_<cutoff>.json`
 
 - **Phase 5 — Forward Validation / Holdout**
   - CLI: `python -m gosales.validation.forward --division Solidworks --cutoff 2024-12-31 --window-months 6 --capacity-grid 5,10,20 --accounts-per-rep-grid 10,25`
@@ -77,7 +77,7 @@ $env:PYTHONPATH = "$PWD"; python -m gosales.features.build --division Solidworks
 # 5) Phase 3 — Train across cutoffs (example)
 $env:PYTHONPATH = "$PWD"; python -m gosales.models.train --division Solidworks --cutoffs "2023-06-30,2023-09-30,2023-12-31" --window-months 6 --models logreg,lgbm --calibration platt,isotonic --config gosales/config.yaml
 
-# 6) Score all available division models
+# 6) End-to-end: ingest → build star → audit → train all divisions → score/whitespace
 $env:PYTHONPATH = "$PWD"; python gosales/pipeline/score_all.py
 
 # 7) Phase 4 — Rank whitespace (example)
@@ -144,6 +144,8 @@ $env:PYTHONPATH = "$PWD"; python -m gosales.validation.forward --division Solidw
 | `gosales/outputs/labels_<division>_<cutoff>.parquet` | Labels per (customer, division, cutoff) | `gosales/pipeline/build_labels.py`
 | `gosales/outputs/prevalence_<division>.csv` | Label prevalence summary | `gosales/pipeline/build_labels.py`
 | `gosales/outputs/cutoffs_<division>.json` | Cutoff metadata summary | `gosales/pipeline/build_labels.py`
+| `gosales/outputs/schema_icp_scores.json` | Schema validation report for `icp_scores.csv` | `gosales/pipeline/score_customers.py`
+| `gosales/outputs/schema_whitespace*.json` | Schema validation report for whitespace outputs | `gosales/pipeline/score_customers.py`
 
 ---
 
@@ -221,4 +223,8 @@ $env:PYTHONPATH = "$PWD"; python -m gosales.validation.forward --division Solidw
 
 ### Multi-division support
 
-Known divisions are sourced from `etl/sku_map.division_set()`; cross-division features adapt automatically. Scoring auto-discovers models in `models/*_model` and scores each division with an available model. To add a division, update `etl/sku_map.py` (or overrides CSV), rebuild star and features, then train with `--division <Name>`.
+Known divisions are sourced from `etl/sku_map.division_set()`; cross-division features adapt automatically. The `score_all` pipeline trains/audits for every known division, and scores any division with an available model. To add a division, update `etl/sku_map.py` (or overrides CSV), rebuild star and features, then run `score_all` or train explicitly via `gosales/models/train.py`.
+
+#### Troubleshooting
+- If a division has very low prevalence, widen the window or aggregate sub-divisions; inspect `labels_summary.csv` and `labels_positive_<division>.csv` for prevalence.
+- If simple training fails with numeric issues (inf/NaN), use the robust trainer `gosales/models/train.py` which sanitizes features and searches hyperparameters across cutoffs.
