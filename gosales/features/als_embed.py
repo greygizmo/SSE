@@ -21,7 +21,9 @@ def _als_with_implicit(mat: coo_matrix, factors: int, reg: float, alpha: float) 
     try:
         import implicit
         # Use fixed random_state for deterministic embeddings across runs
-        model = implicit.als.AlternatingLeastSquares(factors=factors, regularization=reg, random_state=42)
+        model = implicit.als.AlternatingLeastSquares(
+            factors=factors, regularization=reg, random_state=42
+        )
         model.fit((mat * alpha).astype('double'))
         return pd.DataFrame(model.user_factors)
     except Exception:
