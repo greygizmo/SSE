@@ -4,9 +4,9 @@ Customer scoring pipeline that generates ICP scores and whitespace analysis for 
 """
 import polars as pl
 import pandas as pd
-import mlflow.sklearn
 import json
 from pathlib import Path
+import joblib
 
 from gosales.utils.db import get_db_connection
 from gosales.utils.logger import get_logger
@@ -54,23 +54,14 @@ def score_customers_for_division(engine, division_name: str, model_path: Path, *
     """
     logger.info(f"Scoring customers for division: {division_name}")
     
-    # Load model: support MLflow directory or joblib pickle fallback
-    model = None
+    # Load model via joblib pickle
+    pkl = model_path / "model.pkl"
     try:
-        model = mlflow.sklearn.load_model(str(model_path))
-        logger.info(f"Loaded MLflow model from {model_path}")
+        model = joblib.load(pkl)
+        logger.info(f"Loaded joblib model from {pkl}")
     except Exception as e:
-        try:
-            import joblib
-            pkl = model_path / "model.pkl"
-            if pkl.exists():
-                model = joblib.load(pkl)
-                logger.info(f"Loaded joblib model from {pkl}")
-            else:
-                raise FileNotFoundError(f"Missing model.pkl at {pkl}")
-        except Exception as e2:
-            logger.error(f"Failed to load model from {model_path}: {e2}")
-            return pl.DataFrame()
+        logger.error(f"Failed to load model from {pkl}: {e}")
+        return pl.DataFrame()
     
     # Get feature matrix for all customers for the specified division
     # Enforce presence of cutoff and window in metadata; if missing, fail fast
