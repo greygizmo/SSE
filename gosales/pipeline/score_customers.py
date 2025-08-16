@@ -64,9 +64,20 @@ def _sanitize_features(X: pd.DataFrame) -> pd.DataFrame:
 
 
 def _score_p_icp(model, X: pd.DataFrame) -> np.ndarray:
-    """Predict calibrated probability after sanitizing features."""
+    """Predict calibrated probability after sanitizing features.
+
+    Falls back to decision_function (logistic transform) or predict() when
+    predict_proba is unavailable.
+    """
     Xc = _sanitize_features(X)
-    return model.predict_proba(Xc)[:, 1]
+    import numpy as _np
+    if hasattr(model, "predict_proba"):
+        return model.predict_proba(Xc)[:, 1]
+    if hasattr(model, "decision_function"):
+        margins = model.decision_function(Xc)
+        return 1 / (1 + _np.exp(-margins))
+    preds = model.predict(Xc)
+    return _np.asarray(preds, dtype=float)
 
 def score_customers_for_division(engine, division_name: str, model_path: Path, *, run_manifest: dict | None = None):
     """
