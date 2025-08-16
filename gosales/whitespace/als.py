@@ -7,12 +7,14 @@ from gosales.utils.paths import OUTPUTS_DIR
 
 logger = get_logger(__name__)
 
-def build_als(engine, output_path):
+
+def build_als(engine, output_path, top_n: int = 10):
     """Uses alternating least squares to find whitespace opportunities.
 
     Args:
         engine (sqlalchemy.engine.base.Engine): The database engine.
         output_path (str): The path to the output CSV file.
+        top_n (int, optional): Number of recommendations to generate per user.
     """
     logger.info("Building ALS model...")
 
@@ -27,27 +29,42 @@ def build_als(engine, output_path):
         .collect()
     )
 
-    # Create a sparse matrix
+    # Build mappings between ids and indices
+    user_ids = user_item["customer_id"].unique().to_list()
+    product_ids = user_item["product_name"].unique().to_list()
+    user_mapping = {uid: idx for idx, uid in enumerate(user_ids)}
+    product_mapping = {pid: idx for idx, pid in enumerate(product_ids)}
+
+    user_item = user_item.with_columns(
+        pl.col("customer_id").map_elements(user_mapping.get).alias("user_idx"),
+        pl.col("product_name").map_elements(product_mapping.get).alias("item_idx"),
+    )
+
+    # Create a sparse matrix (users x items)
     sparse_matrix = coo_matrix(
         (
             user_item["count"],
-            (
-                user_item["customer_id"].cast(pl.Categorical).to_physical(),
-                user_item["product_name"].cast(pl.Categorical).to_physical(),
-            ),
-        )
-    )
+            (user_item["user_idx"], user_item["item_idx"]),
+        ),
+        shape=(len(user_ids), len(product_ids)),
+    ).tocsr()
 
     # Train the ALS model
     model = implicit.als.AlternatingLeastSquares(factors=50)
     model.fit(sparse_matrix)
 
-    # Get the user and item factors
-    user_factors = model.user_factors
-    item_factors = model.item_factors
-
-    # Get the recommendations
-    recommendations = model.recommend_all(sparse_matrix)
+    # Generate top-N recommendations per user
+    recommendations = []
+    for user_idx, user_id in enumerate(user_ids):
+        item_indices, scores = model.recommend(user_idx, sparse_matrix[user_idx], N=top_n)
+        for item_idx, score in zip(item_indices, scores):
+            recommendations.append(
+                {
+                    "customer_id": user_id,
+                    "product_name": product_ids[item_idx],
+                    "score": float(score),
+                }
+            )
 
     # Save the recommendations to a CSV file
     pl.DataFrame(recommendations).write_csv(output_path)
