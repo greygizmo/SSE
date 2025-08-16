@@ -35,16 +35,17 @@ def discover_available_models(models_dir: Path | None = None) -> dict[str, Path]
     root = models_dir or MODELS_DIR
     available: dict[str, Path] = {}
     for p in root.glob("*_model"):
-        meta_div = None
+        div = p.name.replace("_model", "")
+        meta_path = p / "metadata.json"
         try:
-            meta_path = p / "metadata.json"
             if meta_path.exists():
                 with open(meta_path, "r", encoding="utf-8") as f:
                     meta = json.load(f)
                     meta_div = normalize_division(meta.get("division"))
+                    if meta_div:
+                        div = meta_div
         except Exception:
-            meta_div = None
-        div = meta_div if meta_div else p.name.replace("_model", "")
+            pass
         available[div] = p
     return available
 
