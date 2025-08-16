@@ -172,7 +172,6 @@ def _score_p_icp(df: pd.DataFrame, model, feat_cols: Iterable[str] | None = None
             X = num
     X = X.apply(pd.to_numeric, errors="coerce").fillna(0.0)
     return pd.Series(model.predict_proba(X)[:, 1], index=df.index)
-
 def _apply_eligibility(df: pd.DataFrame, cfg) -> tuple[pd.DataFrame, dict]:
     """Apply whitespace eligibility rules and track exclusion counts.
 
