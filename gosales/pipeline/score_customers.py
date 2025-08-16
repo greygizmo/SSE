@@ -429,12 +429,13 @@ def generate_scoring_outputs(engine, *, run_manifest: dict | None = None):
                     for k in [5, 10, 20]:
                         thresholds.append({"mode": "top_percent", "k_percent": k, "threshold": None, "count": 0})
                     if scores_num.size > 0:
-                        for i, k in enumerate([5, 10, 20]):
-                            kk = max(1, int(scores_num.size * (k / 100.0)))
-                            thr = float(np.sort(scores_num)[-kk])
-                            count = int((pd.to_numeric(ranked['score'], errors='coerce') >= thr).sum())
-                            thresholds[i]["threshold"] = thr
-                            thresholds[i]["count"] = count
+                    sort_cols = [c for c in ['score', 'p_icp', 'EV_norm', 'customer_id'] if c in ranked.columns]
+                    for i, k in enumerate([5, 10, 20]):
+                        kk = max(1, int(scores_num.size * (k / 100.0)))
+                        topk = ranked.nlargest(kk, sort_cols) if sort_cols else ranked.head(0)
+                        thr = float(topk['score'].min()) if len(topk) else float('nan')
+                        thresholds[i]["threshold"] = thr
+                        thresholds[i]["count"] = int(len(topk))
                 thr_name = f"thresholds_whitespace_{cutoff_tag}.csv" if cutoff_tag else "thresholds_whitespace.csv"
                 pd.DataFrame(thresholds).to_csv(OUTPUTS_DIR / thr_name, index=False)
 
@@ -465,18 +466,17 @@ def generate_scoring_outputs(engine, *, run_manifest: dict | None = None):
                     cfg = load_config()
                     mode = str(cfg.whitespace.capacity_mode)
                     selected = ranked
+                    sort_cols = [c for c in ['score', 'p_icp', 'EV_norm', 'customer_id'] if c in ranked.columns]
                     if mode == 'top_percent':
                         if len(ranked) > 0:
                             ksel = max(1, int(len(ranked) * (cfg.modeling.capacity_percent / 100.0)))
-                            thr_sel = float(np.sort(ranked['score'].values)[-ksel])
-                            selected = ranked[ranked['score'] >= thr_sel].copy()
+                            selected = ranked.nlargest(ksel, sort_cols).copy() if sort_cols else ranked.head(0)
                         else:
-                            selected = ranked
-                    elif mode in ('per_rep','hybrid'):
+                            selected = ranked.head(0)
+                    elif mode in ('per_rep', 'hybrid'):
                         # Fallback to top_percent until rep attribution/interleave available
                         ksel = max(1, int(len(ranked) * (cfg.modeling.capacity_percent / 100.0)))
-                        thr_sel = float(np.sort(ranked['score'].values)[-ksel]) if len(ranked) else float('nan')
-                        selected = ranked[ranked['score'] >= thr_sel].copy()
+                        selected = ranked.nlargest(ksel, sort_cols).copy() if len(ranked) and sort_cols else ranked.head(0)
 
                     sel_name = f"whitespace_selected_{cutoff_tag}.csv" if cutoff_tag else "whitespace_selected.csv"
                     selected.to_csv(OUTPUTS_DIR / sel_name, index=False)
