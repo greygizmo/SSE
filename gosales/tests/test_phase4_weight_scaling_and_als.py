@@ -1,6 +1,5 @@
 import numpy as np
 import pandas as pd
-import pytest
 
 from gosales.pipeline.rank_whitespace import _scale_weights_by_coverage, _compute_als_norm, _compute_affinity_lift
 
@@ -19,8 +18,8 @@ def test_scale_weights_by_coverage_scales_and_normalizes():
 def test_als_norm_fallback_centroid_prefers_owned_centroid():
     # Build a tiny embedding space where owned centroid is near (1,1)
     df = pd.DataFrame({
-        'als_f0': [1.0, 0.9, 0.1, 0.0],
-        'als_f1': [1.0, 0.8, 0.1, 0.0],
+        'als_f0': [1.0, 0.9, -0.5, 0.0],
+        'als_f1': [1.0, 0.8, -0.5, 0.0],
         'owned_division_pre_cutoff': [True, True, False, False],
     })
     s = _compute_als_norm(df, cfg=None)
@@ -34,5 +33,17 @@ def test_affinity_lift_consumption_prefers_higher_values():
     norm = _compute_affinity_lift(df)
     # Monotonic with respect to input ordering after normalization
     assert norm.iloc[0] < norm.iloc[1] < norm.iloc[2]
+
+
+def test_als_norm_invariant_to_scaling():
+    df = pd.DataFrame({
+        'als_f0': [1.0, 0.5, 0.1],
+        'als_f1': [0.0, 0.5, 0.2],
+    })
+    baseline = _compute_als_norm(df)
+    scaled = df.copy()
+    scaled[['als_f0', 'als_f1']] *= 10.0
+    scaled_scores = _compute_als_norm(scaled)
+    assert np.allclose(baseline.to_numpy(), scaled_scores.to_numpy())
 
 
