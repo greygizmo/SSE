@@ -278,7 +278,15 @@ def generate_whitespace_opportunities(engine):
             ])
         )
         
-        all_divisions = transactions.select("product_division").unique()["product_division"].to_list()
+        all_divisions = (
+            transactions
+            .filter(
+                pl.col("product_division").is_not_null()
+                & (pl.col("product_division").str.strip_chars() != "")
+            )
+            .select("product_division")
+            .unique()["product_division"].to_list()
+        )
         
         opportunities = []
         for row in customer_summary.iter_rows(named=True):

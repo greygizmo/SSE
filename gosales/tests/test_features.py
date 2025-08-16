@@ -11,9 +11,9 @@ from gosales.utils.paths import OUTPUTS_DIR
 
 def _seed(engine):
     fact = pd.DataFrame([
-        {"customer_id": 1, "order_date": "2024-01-01", "product_division": "Solidworks", "product_sku": "SWX_Core", "gross_profit": 100},
-        {"customer_id": 1, "order_date": "2024-02-01", "product_division": "Services", "product_sku": "Training", "gross_profit": 5},
-        {"customer_id": 2, "order_date": "2023-12-15", "product_division": "Simulation", "product_sku": "Simulation", "gross_profit": 50},
+        {"customer_id": 1, "order_date": "2024-01-01", "product_division": "Solidworks", "product_sku": "SWX_Core", "gross_profit": 100, "quantity": 1},
+        {"customer_id": 1, "order_date": "2024-02-01", "product_division": "Services", "product_sku": "Training", "gross_profit": 5, "quantity": 1},
+        {"customer_id": 2, "order_date": "2023-12-15", "product_division": "Simulation", "product_sku": "Simulation", "gross_profit": 50, "quantity": 1},
     ])
     fact.to_sql("fact_transactions", engine, if_exists="replace", index=False)
     pd.DataFrame({"customer_id": [1, 2]}).to_sql("dim_customer", engine, if_exists="replace", index=False)
@@ -34,6 +34,10 @@ def test_feature_cli_checksum(tmp_path, monkeypatch):
     # Use temp output dir by monkeypatching OUTPUTS_DIR if needed
     eng = create_engine(f"sqlite:///{tmp_path}/test_features_cli.db")
     _seed(eng)
+    # Seed the default database used by the CLI
+    from gosales.utils.db import get_db_connection
+
+    _seed(get_db_connection())
     # Build via engine first
     fm = create_feature_matrix(eng, "Solidworks", cutoff_date="2024-01-31", prediction_window_months=1)
     assert not fm.is_empty()
