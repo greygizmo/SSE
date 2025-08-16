@@ -10,6 +10,8 @@ import pandas as pd
 
 from gosales.utils.logger import get_logger
 from gosales.utils.paths import OUTPUTS_DIR
+from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.preprocessing import normalize
 
 
 logger = get_logger(__name__)
@@ -56,8 +58,10 @@ def _compute_als_norm(df: pd.DataFrame, cfg=None) -> pd.Series:
     else:
         centroid_vec = mat.mean(axis=0).to_numpy(dtype=float)
     m = mat.to_numpy(dtype=float)
-    norms = np.linalg.norm(m, axis=1) * (np.linalg.norm(centroid_vec) + 1e-9) + 1e-9
-    sims = (m @ centroid_vec) / norms
+    # Normalize embeddings and centroid to unit length prior to similarity calc
+    m_norm = normalize(m, axis=1)
+    centroid_norm = normalize(centroid_vec.reshape(1, -1), axis=1)
+    sims = cosine_similarity(m_norm, centroid_norm).ravel()
     return _percentile_normalize(pd.Series(sims, index=df.index))
 
 
