@@ -78,9 +78,7 @@ def _apply_eligibility_and_centroid(df: pd.DataFrame) -> Tuple[pd.DataFrame, np.
 def _compute_als_norm(df: pd.DataFrame, cfg=None, owner_centroid: np.ndarray | None = None) -> pd.Series:
     """Compute ALS similarity normalized to [0,1].
 
-    - If ``owner_centroid`` is provided, use it for similarity.
-    - Else, prefer centroid of rows where ``owned_division_pre_cutoff`` is True.
-      Fall back to global centroid if no owned rows.
+    - If owner_centroid is provided, use it; else derive from owned-pre-cutoff when available.
     """
     als_cols = [c for c in df.columns if c.startswith("als_f")]
     if not als_cols:
@@ -92,14 +90,10 @@ def _compute_als_norm(df: pd.DataFrame, cfg=None, owner_centroid: np.ndarray | N
     if owner_centroid is not None:
         centroid_vec = np.asarray(owner_centroid, dtype=float)
     else:
-        # Prefer owned-pre-cutoff centroid when available
         if 'owned_division_pre_cutoff' in df.columns:
             try:
                 base = mat[df['owned_division_pre_cutoff'].astype(bool)]
-                if not base.empty:
-                    centroid_vec = base.mean(axis=0).to_numpy(dtype=float)
-                else:
-                    centroid_vec = mat.mean(axis=0).to_numpy(dtype=float)
+                centroid_vec = (base.mean(axis=0) if not base.empty else mat.mean(axis=0)).to_numpy(dtype=float)
             except Exception:
                 centroid_vec = mat.mean(axis=0).to_numpy(dtype=float)
         else:
@@ -172,6 +166,8 @@ def _score_p_icp(df: pd.DataFrame, model, feat_cols: Iterable[str] | None = None
             X = num
     X = X.apply(pd.to_numeric, errors="coerce").fillna(0.0)
     return pd.Series(model.predict_proba(X)[:, 1], index=df.index)
+
+
 def _apply_eligibility(df: pd.DataFrame, cfg) -> tuple[pd.DataFrame, dict]:
     """Apply whitespace eligibility rules and track exclusion counts.
 
@@ -196,7 +192,7 @@ def _apply_eligibility(df: pd.DataFrame, cfg) -> tuple[pd.DataFrame, dict]:
             mask &= ~cond
         if getattr(elig, "exclude_if_recent_contact_days", 0) and "days_since_last_contact" in df.columns:
             rc = pd.to_numeric(df["days_since_last_contact"], errors="coerce").fillna(1e9) <= int(
-                elig.exclude_if_recent_contact_days
+                getattr(elig, "exclude_if_recent_contact_days", 0)
             )
             cond = rc & mask
             counts["recent_contact_excluded"] = int(cond.sum())
