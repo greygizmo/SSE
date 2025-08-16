@@ -214,6 +214,26 @@ def rank_whitespace(inputs: RankInputs, *, weights: Iterable[float] = (0.60, 0.2
     # Stable tie-breakers on champion score
     df = df.sort_values(by=['division_name', 'score', 'p_icp', 'customer_id'], ascending=[True, False, False, True], kind='mergesort')
 
+    # Cooldown: de-emphasize accounts surfaced recently without action
+    try:
+        cooldown_days = int(getattr(getattr(cfg, 'whitespace', object()), 'cooldown_days', 0))
+        cooldown_factor = float(getattr(getattr(cfg, 'whitespace', object()), 'cooldown_factor', 1.0))
+    except Exception:
+        cooldown_days = 0
+        cooldown_factor = 1.0
+
+    if (
+        cooldown_days > 0
+        and cooldown_factor < 1.0
+        and 'days_since_last_surfaced' in df.columns
+    ):
+        days = pd.to_numeric(df['days_since_last_surfaced'], errors='coerce').fillna(cooldown_days + 1)
+        mask = days < cooldown_days
+        if mask.any():
+            df.loc[mask, 'score'] = df.loc[mask, 'score'] * cooldown_factor
+            # Refresh ordering after score adjustment
+            df = df.sort_values(by=['division_name', 'score', 'p_icp', 'customer_id'], ascending=[True, False, False, True], kind='mergesort')
+
     # Explanations
     df['nba_reason'] = df.apply(_explain, axis=1)
     # Output columns
