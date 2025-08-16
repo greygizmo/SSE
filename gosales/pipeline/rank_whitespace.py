@@ -95,16 +95,27 @@ def _scale_weights_by_coverage(base_weights: Iterable[float], als_norm: pd.Serie
         return min(1.0, cov / max(1e-9, threshold))
     f_lift = factor(cov_lift)
     f_als = factor(cov_als)
-    adjustments['aff_weight_factor'] = f_lift
-    adjustments['als_weight_factor'] = f_als
-    w_adj = [w[0], w[1] * f_lift, w[2] * f_als, w[3]]
-    s = sum(w_adj)
-    if s <= 0:
-        # fallback to all on p_icp
-        w_adj = [1.0, 0.0, 0.0, 0.0]
+    adjustments["aff_weight_factor"] = f_lift
+    adjustments["als_weight_factor"] = f_als
+    w_scaled = [w[0], w[1] * f_lift, w[2] * f_als, w[3]]
+    s = sum(w_scaled)
+    if s > 0:
+        w_div = [wi / s for wi in w_scaled]
     else:
-        w_adj = [wi / s for wi in w_adj]
-    return w_adj, adjustments
+        w_div = [0.0] * len(w_scaled)
+    if sum(w_div) == 0:
+        base_sum = sum(w)
+        if w[0] > 0 or w[3] > 0:
+            w_div = [wi / base_sum for wi in w]
+            logger.warning(
+                "Weight scaling resulted in zero weights; falling back to base weights"
+            )
+        else:
+            w_div = [1.0 / len(w)] * len(w)
+            logger.warning(
+                "Weight scaling resulted in zero weights; falling back to uniform weights"
+            )
+    return w_div, adjustments
 
 
 def _explain(row: pd.Series) -> str:
