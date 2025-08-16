@@ -78,6 +78,44 @@ def _compute_expected_value(df: pd.DataFrame, cfg=None) -> pd.Series:
     return _percentile_normalize(raw)
 
 
+def _score_p_icp(df: pd.DataFrame, model, feat_cols: Iterable[str] | None = None) -> pd.Series:
+    """Score calibrated ICP probabilities using ``model``.
+
+    When ``feat_cols`` is ``None`` the function falls back to using all numeric
+    columns present in ``df`` but explicitly drops common label/score columns
+    (e.g. ``label``, ``score``). Any remaining extra numeric columns are
+    ignored based on the model's ``n_features_in_`` attribute.
+    """
+
+    if feat_cols:
+        for c in feat_cols:
+            if c not in df.columns:
+                df[c] = 0.0
+        X = df.reindex(columns=feat_cols)
+    else:
+        num = df.select_dtypes(include=[np.number]).copy()
+        known = {
+            "label",
+            "labels",
+            "score",
+            "scores",
+            "icp_score",
+            "p_icp",
+            "p_icp_pct",
+            "p_hat",
+            "score_challenger",
+        }
+        drop_cols = [c for c in num.columns if c.lower() in known]
+        if drop_cols:
+            num = num.drop(columns=drop_cols)
+        if hasattr(model, "n_features_in_") and num.shape[1] > int(model.n_features_in_):
+            X = num.iloc[:, : int(model.n_features_in_)]
+        else:
+            X = num
+    X = X.apply(pd.to_numeric, errors="coerce").fillna(0.0)
+    return pd.Series(model.predict_proba(X)[:, 1], index=df.index)
+
+
 def _scale_weights_by_coverage(base_weights: Iterable[float], als_norm: pd.Series, lift_norm: pd.Series, threshold: float = 0.30) -> Tuple[List[float], Dict[str, float]]:
     w = list(base_weights)
     if len(w) != 4:
