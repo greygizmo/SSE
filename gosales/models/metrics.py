@@ -35,7 +35,7 @@ def compute_lift_at_k(
         return zero_division
 
     k = max(1, int(n * (k_percent / 100.0)))
-    idx = np.argsort(-y_score)[:k]
+    idx = np.argsort(-y_score, kind="stable")[:k]
     topk_rate = float(np.mean(y_true[idx]))
     base_rate = float(np.mean(y_true))
     if base_rate == 0:
@@ -65,7 +65,7 @@ def compute_weighted_lift_at_k(
         return zero_division
 
     k = max(1, int(n * (k_percent / 100.0)))
-    idx = np.argsort(-y_score)[:k]
+    idx = np.argsort(-y_score, kind="stable")[:k]
     top_y = y_true[idx]
     top_w = weights[idx]
 
