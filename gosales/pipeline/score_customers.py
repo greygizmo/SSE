@@ -19,7 +19,6 @@ from gosales.pipeline.rank_whitespace import rank_whitespace, save_ranked_whites
 from gosales.validation.deciles import emit_validation_artifacts
 from gosales.validation.schema import validate_icp_scores_schema, validate_whitespace_schema, write_schema_report
 from gosales.monitoring.drift import check_drift_and_emit_alerts
-from gosales.utils.config import load_config
 
 logger = get_logger(__name__)
 
@@ -59,7 +58,7 @@ def score_customers_for_division(engine, division_name: str, model_path: Path, *
     try:
         model = mlflow.sklearn.load_model(str(model_path))
         logger.info(f"Loaded MLflow model from {model_path}")
-    except Exception as e:
+    except Exception:
         try:
             import joblib
             pkl = model_path / "model.pkl"
@@ -173,9 +172,12 @@ def score_customers_for_division(engine, division_name: str, model_path: Path, *
     if feature_matrix.is_empty():
         logger.warning(f"No feature matrix for {division_name}")
         return pl.DataFrame()
-    
+
     # Prepare features for scoring (must match training)
     X = feature_matrix.drop(["customer_id", "bought_in_division"]).to_pandas()
+    if X.shape[1] == 0:
+        logger.error(f"No features remain after dropping identifiers for {division_name}")
+        return pl.DataFrame()
     # Sanitize features for scoring: numeric only, coerce non-numeric, replace infs and NaNs
     try:
         for col in X.columns:
@@ -284,9 +286,11 @@ def generate_whitespace_opportunities(engine):
         for row in customer_summary.iter_rows(named=True):
             not_bought = [div for div in all_divisions if div not in row["divisions_bought"]]
             for division in not_bought:
-                score = 0.5 # Placeholder logic
-                if row["total_gp"] > 10000: score = 0.8
-                elif row["total_gp"] > 1000: score = 0.6
+                score = 0.5  # Placeholder logic
+                if row["total_gp"] > 10000:
+                    score = 0.8
+                elif row["total_gp"] > 1000:
+                    score = 0.6
                 
                 opportunities.append({
                     "customer_id": row["customer_id"],
