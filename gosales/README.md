@@ -80,6 +80,11 @@ $env:PYTHONPATH = "$PWD"; python -m gosales.models.train --division Solidworks -
 # 6) End-to-end: ingest → build star → audit → train all divisions → score/whitespace
 $env:PYTHONPATH = "$PWD"; python gosales/pipeline/score_all.py
 
+# When scoring directly, `gosales/pipeline/score_customers.py` expects each model folder
+# to include `metadata.json` with `cutoff_date` and `prediction_window_months`. If those
+# fields are missing, supply them via `--cutoff-date` and `--window-months` arguments or
+# the scoring run will error.
+
 # 7) Phase 4 — Rank whitespace (example)
 $env:PYTHONPATH = "$PWD"; python -m gosales.pipeline.rank_whitespace --cutoff "2024-06-30" --window-months 6 --normalize percentile --capacity-mode top_percent --config gosales/config.yaml
 

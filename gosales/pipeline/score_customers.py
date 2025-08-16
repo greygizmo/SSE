@@ -52,8 +52,7 @@ def discover_available_models(models_dir: Path | None = None) -> dict[str, Path]
             pass
         available[div] = p
     return available
-
-
+ 
 def _sanitize_features(X: pd.DataFrame) -> pd.DataFrame:
     """Ensure numeric float dtype; replace infs/NaNs with 0.0 for scoring."""
     Xc = X.copy()
@@ -66,8 +65,7 @@ def _sanitize_features(X: pd.DataFrame) -> pd.DataFrame:
 def _score_p_icp(model, X: pd.DataFrame) -> np.ndarray:
     """Predict calibrated probability after sanitizing features.
 
-    Falls back to decision_function (logistic transform) or predict() when
-    predict_proba is unavailable.
+    Falls back to decision_function (logistic transform) or predict() if needed.
     """
     Xc = _sanitize_features(X)
     import numpy as _np
@@ -79,9 +77,20 @@ def _score_p_icp(model, X: pd.DataFrame) -> np.ndarray:
     preds = model.predict(Xc)
     return _np.asarray(preds, dtype=float)
 
-def score_customers_for_division(engine, division_name: str, model_path: Path, *, run_manifest: dict | None = None):
-    """
-    Score all customers for a specific division using a trained ML model.
+
+def score_customers_for_division(
+    engine,
+    division_name: str,
+    model_path: Path,
+    *,
+    run_manifest: dict | None = None,
+    cutoff_date: str | None = None,
+    prediction_window_months: int | None = None,
+):
+    """Score all customers for a specific division using a trained ML model.
+
+    Requires ``cutoff_date`` and ``prediction_window_months`` in the model's
+    ``metadata.json``; raises ``MissingModelMetadataError`` if absent.
     """
     logger.info(f"Scoring customers for division: {division_name}")
     
@@ -114,7 +123,9 @@ def score_customers_for_division(engine, division_name: str, model_path: Path, *
     cutoff = meta.get("cutoff_date")
     window_months = meta.get("prediction_window_months")
     if cutoff is None or window_months is None:
-        msg = f"Required metadata fields missing for {division_name}: cutoff_date or prediction_window_months"
+        msg = (
+            f"Required metadata fields missing for {division_name}: cutoff_date or prediction_window_months"
+        )
         logger.error(msg)
         if run_manifest is not None:
             run_manifest.setdefault("alerts", []).append({
@@ -356,9 +367,17 @@ def generate_whitespace_opportunities(engine):
         logger.error(f"Failed to generate whitespace opportunities: {e}")
         return pl.DataFrame()
 
-def generate_scoring_outputs(engine, *, run_manifest: dict | None = None):
-    """
-    Generate and save ICP scores and whitespace analysis.
+def generate_scoring_outputs(
+    engine,
+    *,
+    run_manifest: dict | None = None,
+    cutoff_date: str | None = None,
+    prediction_window_months: int | None = None,
+):
+    """Generate and save ICP scores and whitespace analysis.
+
+    ``cutoff_date`` and ``prediction_window_months`` act as fallbacks when the
+    model metadata is missing these fields.
     """
     logger.info("Starting customer scoring and whitespace analysis...")
     OUTPUTS_DIR.mkdir(exist_ok=True)
@@ -372,7 +391,14 @@ def generate_scoring_outputs(engine, *, run_manifest: dict | None = None):
             logger.warning(f"Model not found for {division_name}: {model_path}")
             continue
         try:
-            scores = score_customers_for_division(engine, division_name, model_path, run_manifest=run_manifest)
+            scores = score_customers_for_division(
+                engine,
+                division_name,
+                model_path,
+                run_manifest=run_manifest,
+                cutoff_date=cutoff_date,
+                prediction_window_months=prediction_window_months,
+            )
         except MissingModelMetadataError:
             # Already logged and alerted; skip this division
             continue
@@ -563,5 +589,25 @@ def generate_scoring_outputs(engine, *, run_manifest: dict | None = None):
     logger.info("Scoring pipeline completed successfully!")
 
 if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Score customers across divisions")
+    parser.add_argument(
+        "--cutoff-date",
+        dest="cutoff_date",
+        help="Cutoff date to use when model metadata lacks it",
+    )
+    parser.add_argument(
+        "--window-months",
+        dest="window_months",
+        type=int,
+        help="Prediction window in months when metadata is missing",
+    )
+    args = parser.parse_args()
+
     db_engine = get_db_connection()
-    generate_scoring_outputs(db_engine)
+    generate_scoring_outputs(
+        db_engine,
+        cutoff_date=args.cutoff_date,
+        prediction_window_months=args.window_months,
+    )
