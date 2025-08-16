@@ -41,7 +41,12 @@ def main(division: str, cutoff: str, windows: str, config: str, with_eb: bool, w
             fm = create_feature_matrix(engine, division, cut, cfg.run.prediction_window_months)
             # Optional ALS embeddings
             if cfg.features.use_als_embeddings:
-                als_df = customer_als_embeddings(engine, cut, factors=16)
+                als_df = customer_als_embeddings(
+                    engine,
+                    cut,
+                    factors=16,
+                    lookback_months=cfg.features.als_lookback_months,
+                )
                 if not als_df.is_empty():
                     fm = fm.join(als_df, on='customer_id', how='left').fill_null(0)
             if fm.is_empty():

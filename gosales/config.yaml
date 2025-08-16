@@ -28,6 +28,7 @@ features:
   use_eb_smoothing: true
   use_market_basket: true
   use_als_embeddings: true
+  als_lookback_months: 12
   use_item2vec: false
   use_text_tags: false
 modeling:

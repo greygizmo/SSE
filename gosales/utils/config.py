@@ -64,6 +64,7 @@ class Features:
     use_eb_smoothing: bool = True
     use_market_basket: bool = True
     use_als_embeddings: bool = False
+    als_lookback_months: int = 12
     use_item2vec: bool = False
     use_text_tags: bool = False
 
@@ -262,6 +263,7 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
             use_eb_smoothing=bool(feat_cfg.get("use_eb_smoothing", True)),
             use_market_basket=bool(feat_cfg.get("use_market_basket", True)),
             use_als_embeddings=bool(feat_cfg.get("use_als_embeddings", False)),
+            als_lookback_months=int(feat_cfg.get("als_lookback_months", 12)),
             use_item2vec=bool(feat_cfg.get("use_item2vec", False)),
             use_text_tags=bool(feat_cfg.get("use_text_tags", False)),
         ),
