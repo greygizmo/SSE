@@ -1,8 +1,12 @@
-import numpy as np
 import pandas as pd
-import pytest
 
-from gosales.pipeline.rank_whitespace import _scale_weights_by_coverage, _compute_als_norm, _compute_affinity_lift
+from gosales.pipeline.rank_whitespace import (
+    _scale_weights_by_coverage,
+    _compute_als_norm,
+    _compute_affinity_lift,
+    RankInputs,
+    rank_whitespace,
+)
 
 
 def test_scale_weights_by_coverage_scales_and_normalizes():
@@ -34,5 +38,18 @@ def test_affinity_lift_consumption_prefers_higher_values():
     norm = _compute_affinity_lift(df)
     # Monotonic with respect to input ordering after normalization
     assert norm.iloc[0] < norm.iloc[1] < norm.iloc[2]
+
+
+def test_scores_nonzero_when_signals_zero_coverage():
+    df = pd.DataFrame(
+        {
+            "division_name": ["A", "A", "A"],
+            "customer_id": ["c1", "c2", "c3"],
+            "icp_score": [0.2, 0.4, 0.6],
+        }
+    )
+    inputs = RankInputs(scores=df)
+    result = rank_whitespace(inputs, weights=(0.0, 0.5, 0.5, 0.0))
+    assert result["score"].sum() > 0
 
 
