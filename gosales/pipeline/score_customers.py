@@ -213,10 +213,21 @@ def score_customers_for_division(engine, division_name: str, model_path: Path, *
     
     try:
         # Get the probability of buying from the division
-        # Replace deprecated silent downcasting with explicit inference + fillna
+        # Coerce inputs to numeric, sanitize, and align dtypes to training metadata
         import numpy as _np
+        X = X.apply(pd.to_numeric, errors="coerce")
         X.replace([_np.inf, -_np.inf], _np.nan, inplace=True)
-        X = X.infer_objects(copy=False).fillna(0.0)
+        X = X.fillna(0.0)
+        try:
+            train_dtypes = (meta or {}).get("feature_dtypes") or {}
+            for col, dtype in train_dtypes.items():
+                if col in X.columns:
+                    try:
+                        X[col] = X[col].astype(dtype)
+                    except Exception:
+                        X[col] = X[col].astype(float)
+        except Exception:
+            pass
         probabilities = model.predict_proba(X)[:, 1]
 
         # Build scores_df and carry select auxiliary features for ranker
