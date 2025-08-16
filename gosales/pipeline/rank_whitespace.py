@@ -88,6 +88,7 @@ def _compute_expected_value(df: pd.DataFrame, cfg=None) -> pd.Series:
     return _percentile_normalize(raw)
 
 
+<<<<<<< HEAD
 def _score_p_icp(df: pd.DataFrame, model, feat_cols: Iterable[str] | None = None) -> pd.Series:
     """Score calibrated ICP probabilities using ``model``.
 
@@ -124,6 +125,63 @@ def _score_p_icp(df: pd.DataFrame, model, feat_cols: Iterable[str] | None = None
             X = num
     X = X.apply(pd.to_numeric, errors="coerce").fillna(0.0)
     return pd.Series(model.predict_proba(X)[:, 1], index=df.index)
+=======
+def _apply_eligibility(df: pd.DataFrame, cfg) -> tuple[pd.DataFrame, dict]:
+    """Apply whitespace eligibility rules and track exclusion counts.
+
+    Each rule is evaluated on the current mask of remaining rows so that the
+    per-rule exclusion counts are disjoint. A boolean ``_eligible`` column is
+    added to the returned frame indicating per-row eligibility.
+    """
+    mask = pd.Series(True, index=df.index)
+    elig = getattr(getattr(cfg, "whitespace", object()), "eligibility", None)
+    counts = {
+        "start_rows": int(len(df)),
+        "owned_excluded": 0,
+        "recent_contact_excluded": 0,
+        "open_deal_excluded": 0,
+        "region_mismatch_excluded": 0,
+    }
+    if elig:
+        if getattr(elig, "exclude_if_owned_ever", False) and "owned_division_pre_cutoff" in df.columns:
+            owned_mask = df["owned_division_pre_cutoff"].astype(bool)
+            cond = owned_mask & mask
+            counts["owned_excluded"] = int(cond.sum())
+            mask &= ~cond
+        if getattr(elig, "exclude_if_recent_contact_days", 0) and "days_since_last_contact" in df.columns:
+            rc = pd.to_numeric(df["days_since_last_contact"], errors="coerce").fillna(1e9) <= int(
+                elig.exclude_if_recent_contact_days
+            )
+            cond = rc & mask
+            counts["recent_contact_excluded"] = int(cond.sum())
+            mask &= ~cond
+        if getattr(elig, "exclude_if_open_deal", False) and "has_open_deal" in df.columns:
+            od = df["has_open_deal"].astype(bool)
+            cond = od & mask
+            counts["open_deal_excluded"] = int(cond.sum())
+            mask &= ~cond
+        if getattr(elig, "require_region_match", False) and "region_match" in df.columns:
+            mismatch = (~df["region_match"].astype(bool)) & mask
+            counts["region_mismatch_excluded"] = int(mismatch.sum())
+            mask &= ~mismatch
+    df = df.copy()
+    df["_eligible"] = mask
+    counts["kept_rows"] = int(mask.sum())
+    total_excluded = (
+        counts["owned_excluded"]
+        + counts["recent_contact_excluded"]
+        + counts["open_deal_excluded"]
+        + counts["region_mismatch_excluded"]
+    )
+    dropped = counts["start_rows"] - counts["kept_rows"]
+    if total_excluded != dropped:
+        logger.warning(
+            "Eligibility counts mismatch: exclusions=%s dropped=%s", total_excluded, dropped
+        )
+    else:
+        logger.info("Eligibility applied: %s kept, %s dropped", counts["kept_rows"], dropped)
+    return df[mask].copy(), counts
+>>>>>>> a42de1b (test: verify eligibility counts add up)
 
 
 def _scale_weights_by_coverage(base_weights: Iterable[float], als_norm: pd.Series, lift_norm: pd.Series, threshold: float = 0.30) -> Tuple[List[float], Dict[str, float]]:
