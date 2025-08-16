@@ -27,7 +27,7 @@ def _lift_at_k(y_true: np.ndarray, y_score: np.ndarray, k_percent: int) -> float
     if n == 0:
         return float("nan")
     k = max(1, int(n * (k_percent / 100.0)))
-    idx = np.argsort(-y_score)[:k]
+    idx = np.argsort(-y_score, kind="stable")[:k]
     top_rate = float(np.mean(y_true[idx]))
     base = float(np.mean(y_true)) if np.mean(y_true) > 0 else 1e-9
     return top_rate / base
