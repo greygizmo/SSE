@@ -18,52 +18,45 @@ def build_als(engine, output_path, top_n: int = 10):
     """
     logger.info("Building ALS model...")
 
-    # Read the fact_orders table from the database
-    fact_orders = pl.read_database("select * from fact_orders", engine)
+    # Read the fact_transactions table from the database
+    fact_transactions = pl.read_database(
+        "SELECT customer_id, product_sku FROM fact_transactions",
+        engine,
+    )
 
     # Create a user-item matrix
     user_item = (
-        fact_orders.lazy()
-        .group_by(["customer_id", "product_name"])
+        fact_transactions.lazy()
+        .group_by(["customer_id", "product_sku"])
         .agg(pl.len().alias("count"))
         .collect()
     )
 
-    # Build mappings between ids and indices (deterministic order via unique())
-    user_ids = user_item["customer_id"].unique().to_list()
-    product_names = user_item["product_name"].unique().to_list()
-    user_id_to_idx = {uid: idx for idx, uid in enumerate(user_ids)}
-    item_name_to_idx = {pname: idx for idx, pname in enumerate(product_names)}
-    idx_to_user_id = {idx: uid for uid, idx in user_id_to_idx.items()}
-    idx_to_product_name = {idx: pname for pname, idx in item_name_to_idx.items()}
-
-    user_item = user_item.with_columns(
-        pl.col("customer_id").map_elements(user_id_to_idx.get).alias("user_idx"),
-        pl.col("product_name").map_elements(item_name_to_idx.get).alias("item_idx"),
-    )
-
-    # Create a sparse matrix (users x items)
+    # Create a sparse matrix directly from categorical encodings
     sparse_matrix = coo_matrix(
         (
-            user_item["count"].to_list(),
-            (user_item["user_idx"].to_list(), user_item["item_idx"].to_list()),
-        ),
-        shape=(len(user_ids), len(product_names)),
+            user_item["count"],
+            (
+                user_item["customer_id"].cast(pl.Categorical).to_physical(),
+                user_item["product_sku"].cast(pl.Categorical).to_physical(),
+            ),
+        )
     ).tocsr()
 
     # Train the ALS model (deterministic)
     model = implicit.als.AlternatingLeastSquares(factors=50, random_state=42)
     model.fit(sparse_matrix)
 
-    # Generate top-N recommendations per user
+    # Generate top-N recommendations per user index
     records = []
-    for user_idx, user_id in enumerate(user_ids):
+    n_users = sparse_matrix.shape[0]
+    for user_idx in range(n_users):
         item_indices, scores = model.recommend(user_idx, sparse_matrix[user_idx], N=top_n)
         for item_idx, score in zip(item_indices, scores):
             records.append(
                 {
-                    "customer_id": idx_to_user_id.get(user_idx, user_id),
-                    "product_name": idx_to_product_name.get(item_idx, product_names[item_idx]),
+                    "customer_id": int(user_idx),
+                    "product_name": int(item_idx),
                     "score": float(score),
                 }
             )
