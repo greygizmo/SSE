@@ -48,6 +48,21 @@ def discover_available_models(models_dir: Path | None = None) -> dict[str, Path]
         available[div] = p
     return available
 
+
+def _sanitize_features(X: pd.DataFrame) -> pd.DataFrame:
+    """Ensure numeric float dtype; replace infs/NaNs with 0.0 for scoring."""
+    Xc = X.copy()
+    for col in Xc.columns:
+        Xc[col] = pd.to_numeric(Xc[col], errors="coerce")
+    Xc.replace([np.inf, -np.inf], np.nan, inplace=True)
+    return Xc.fillna(0.0).astype(float)
+
+
+def _score_p_icp(model, X: pd.DataFrame) -> np.ndarray:
+    """Predict calibrated probability after sanitizing features."""
+    Xc = _sanitize_features(X)
+    return model.predict_proba(Xc)[:, 1]
+
 def score_customers_for_division(engine, division_name: str, model_path: Path, *, run_manifest: dict | None = None):
     """
     Score all customers for a specific division using a trained ML model.
@@ -176,15 +191,6 @@ def score_customers_for_division(engine, division_name: str, model_path: Path, *
     
     # Prepare features for scoring (must match training)
     X = feature_matrix.drop(["customer_id", "bought_in_division"]).to_pandas()
-    # Sanitize features for scoring: numeric only, coerce non-numeric, replace infs and NaNs
-    try:
-        for col in X.columns:
-            if not (pd.api.types.is_integer_dtype(X[col]) or pd.api.types.is_float_dtype(X[col])):
-                X[col] = pd.to_numeric(X[col], errors='coerce')
-        X.replace([float('inf'), float('-inf')], pd.NA, inplace=True)
-        X = X.fillna(0.0)
-    except Exception:
-        pass
     # Align columns to training feature order using saved metadata or feature_list.json
     try:
         train_cols = []
@@ -212,12 +218,7 @@ def score_customers_for_division(engine, division_name: str, model_path: Path, *
         pass
     
     try:
-        # Get the probability of buying from the division
-        # Replace deprecated silent downcasting with explicit inference + fillna
-        import numpy as _np
-        X.replace([_np.inf, -_np.inf], _np.nan, inplace=True)
-        X = X.infer_objects(copy=False).fillna(0.0)
-        probabilities = model.predict_proba(X)[:, 1]
+        probabilities = _score_p_icp(model, X)
 
         # Build scores_df and carry select auxiliary features for ranker
         feature_matrix_pd = feature_matrix.to_pandas()
