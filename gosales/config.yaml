@@ -48,7 +48,7 @@ modeling:
   capacity_percent: 10
 
 whitespace:
-  weights: [0.60, 0.20, 0.10, 0.10]   # [p_icp_pct, lift_norm, als_norm, EV_norm]
+  weights: [0.60, 0.20, 0.10, 0.10]   # [p_icp_pct, lift_norm, als_norm, EV_norm]; non-negative, auto-normalized
   normalize: percentile               # percentile | pooled
   eligibility:
     exclude_if_owned_ever: true
