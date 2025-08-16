@@ -15,22 +15,25 @@ def build_lift(engine, output_path):
     """
     logger.info("Building lift...")
 
-    # Read the fact_orders table from the database
-    fact_orders = pl.read_database("select * from fact_orders", engine)
+    # Read the fact_transactions table from the database
+    fact_transactions = pl.read_database(
+        "SELECT customer_id, product_sku FROM fact_transactions",
+        engine,
+    )
 
     # Create a basket for each customer
     basket = (
-        fact_orders.lazy()
-        .group_by(["customer_id", "product_name"])
+        fact_transactions.lazy()
+        .group_by(["customer_id", "product_sku"])
         .agg(pl.count().alias("count"))
         .collect()
     )
 
     # Create a one-hot encoded matrix
     basket_plus = (
-        basket.to_dummies(columns=["product_name"])
+        basket.to_dummies(columns=["product_sku"])
         .group_by("customer_id")
-        .agg(pl.sum(col) for col in basket.columns if col.startswith("product_name_"))
+        .agg(pl.sum(col) for col in basket.columns if col.startswith("product_sku_"))
     )
 
     # Perform market basket analysis

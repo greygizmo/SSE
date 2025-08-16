@@ -16,13 +16,16 @@ def build_als(engine, output_path):
     """
     logger.info("Building ALS model...")
 
-    # Read the fact_orders table from the database
-    fact_orders = pl.read_database("select * from fact_orders", engine)
+    # Read the fact_transactions table from the database
+    fact_transactions = pl.read_database(
+        "SELECT customer_id, product_sku FROM fact_transactions",
+        engine,
+    )
 
     # Create a user-item matrix
     user_item = (
-        fact_orders.lazy()
-        .group_by(["customer_id", "product_name"])
+        fact_transactions.lazy()
+        .group_by(["customer_id", "product_sku"])
         .agg(pl.len().alias("count"))
         .collect()
     )
@@ -33,7 +36,7 @@ def build_als(engine, output_path):
             user_item["count"],
             (
                 user_item["customer_id"].cast(pl.Categorical).to_physical(),
-                user_item["product_name"].cast(pl.Categorical).to_physical(),
+                user_item["product_sku"].cast(pl.Categorical).to_physical(),
             ),
         )
     )

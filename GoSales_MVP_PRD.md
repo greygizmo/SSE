@@ -112,7 +112,7 @@ gosales/
 |------|---------|--------------|
 | `etl/load_csv.py` | Load sample CSV into SQL table with dtype from stats CSV. | Shows agent how to cast numeric vs. text. |
 | `etl/inspect_db.py` | Auto‑probe Azure SQL, spit YAML manifest. | Decouples us from unknown schemas. |
-| `etl/build_star.py` | Build `fact_orders`, `dim_customer`, `dim_product`. | Uses SQLAlchemy Core; okay if some columns missing. |
+| `etl/build_star.py` | Build `fact_transactions`, `dim_customer`, `dim_product`. | Uses SQLAlchemy Core; okay if some columns missing. |
 | `features/engine.py` | SQL → Pandas pipeline producing model matrix. | Each feature explained in docstrings. |
 | `models/train_<product>.py` | Train baseline + LightGBM, save via MLflow. | Code picks best by AUC. |
 | `whitespace/build_lift.py` | Apriori rules, outputs CSV of lifts. | Simple thresholds configurable. |
