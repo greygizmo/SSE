@@ -22,7 +22,7 @@ def build_lift(engine, output_path):
     basket = (
         fact_orders.lazy()
         .group_by(["customer_id", "product_name"])
-        .agg(pl.count().alias("count"))
+        .agg(pl.len().alias("count"))
         .collect()
     )
 
@@ -30,7 +30,9 @@ def build_lift(engine, output_path):
     basket_plus = (
         basket.to_dummies(columns=["product_name"])
         .group_by("customer_id")
-        .agg(pl.sum(col) for col in basket.columns if col.startswith("product_name_"))
+        .agg(pl.all().exclude(["customer_id"]).sum())
+        .drop("count")
+        .with_columns(pl.all().exclude("customer_id").clip(upper_bound=1))
     )
 
     # Perform market basket analysis
