@@ -43,11 +43,17 @@ def calibration_bins(y_true: np.ndarray, y_score: np.ndarray, n_bins: int = 10) 
     if len(y_true) == 0:
         return pd.DataFrame(columns=["mean_predicted", "fraction_positives", "count"])  # empty
     df = pd.DataFrame({"y": y_true, "p": y_score})
-    try:
+    unique_scores = df["p"].nunique(dropna=False)
+    if unique_scores >= n_bins:
         bins = pd.qcut(df["p"], q=n_bins, duplicates="drop")
-    except Exception:
-        # If not enough unique values, fall back to equal-width bins
-        bins = pd.cut(df["p"], bins=n_bins, include_lowest=True, duplicates="drop")
+    else:
+        # If not enough unique values, fall back to equal-width bins with reduced count
+        bins = pd.cut(
+            df["p"],
+            bins=max(1, min(n_bins, unique_scores)),
+            include_lowest=True,
+            duplicates="drop",
+        )
     grouped = df.assign(bin=bins).groupby("bin", observed=False).agg(
         mean_predicted=("p", "mean"),
         fraction_positives=("y", "mean"),

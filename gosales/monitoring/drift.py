@@ -29,10 +29,17 @@ def _cal_mae(df: pd.DataFrame, n_bins: int = 10) -> float:
         return float('nan')
     y = pd.to_numeric(df['bought_in_division'], errors='coerce').fillna(0).astype(int)
     p = pd.to_numeric(df['icp_score'], errors='coerce').fillna(0.0).astype(float)
-    try:
+    unique_scores = pd.Series(p).nunique(dropna=False)
+    if unique_scores >= n_bins:
         bins = pd.qcut(p, q=n_bins, labels=False, duplicates='drop')
-    except Exception:
-        bins = pd.cut(p, bins=n_bins, include_lowest=True, duplicates='drop', labels=False)
+    else:
+        bins = pd.cut(
+            p,
+            bins=max(1, min(n_bins, unique_scores)),
+            include_lowest=True,
+            duplicates='drop',
+            labels=False,
+        )
     grp = pd.DataFrame({'y': y, 'p': p, 'bin': bins}).dropna().groupby('bin', observed=False).agg(
         mean_p=( 'p', 'mean'), frac_pos=('y', 'mean'), count=('y','size')
     )

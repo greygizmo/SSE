@@ -92,12 +92,20 @@ def _gains_deciles(y: np.ndarray, p: np.ndarray) -> pd.DataFrame:
 
 def _calibration_bins(y: np.ndarray, p: np.ndarray, n_bins: int = 10) -> pd.DataFrame:
     df = pd.DataFrame({'y': y, 'p': p})
-    try:
+    uniq = df['p'].nunique(dropna=False)
+    if uniq >= n_bins:
         bins = pd.qcut(df['p'], q=n_bins, duplicates='drop')
-    except Exception:
-        bins = pd.cut(df['p'], bins=n_bins, include_lowest=True, duplicates='drop')
+    else:
+        bins = pd.cut(
+            df['p'],
+            bins=max(1, min(n_bins, uniq)),
+            include_lowest=True,
+            duplicates='drop',
+        )
     return df.assign(bin=bins).groupby('bin', observed=False).agg(
-        mean_predicted=('p','mean'), fraction_positives=('y','mean'), count=('y','size')
+        mean_predicted=('p', 'mean'),
+        fraction_positives=('y', 'mean'),
+        count=('y', 'size'),
     ).reset_index(drop=True)
 
 
