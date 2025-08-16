@@ -48,9 +48,30 @@ def discover_available_models(models_dir: Path | None = None) -> dict[str, Path]
         available[div] = p
     return available
 
-def score_customers_for_division(engine, division_name: str, model_path: Path, *, run_manifest: dict | None = None):
-    """
-    Score all customers for a specific division using a trained ML model.
+def score_customers_for_division(
+    engine,
+    division_name: str,
+    model_path: Path,
+    *,
+    customer_names: pd.DataFrame,
+    run_manifest: dict | None = None,
+):
+    """Score all customers for a specific division using a trained ML model.
+
+    Parameters
+    ----------
+    engine:
+        Database connection/engine.
+    division_name:
+        Division to score.
+    model_path:
+        Path to the trained model.
+    customer_names:
+        DataFrame mapping ``customer_id`` to ``customer_name``.  This is
+        provided by the caller so it can be loaded once and reused across
+        divisions.
+    run_manifest:
+        Optional manifest used for logging/alerting.
     """
     logger.info(f"Scoring customers for division: {division_name}")
     
@@ -244,7 +265,8 @@ def score_customers_for_division(engine, division_name: str, model_path: Path, *
         except Exception:
             pass
         
-        customer_names = pd.read_sql("select customer_id, customer_name from dim_customer", engine)
+        if customer_names is None:
+            raise ValueError("customer_names dataframe must be provided")
         scores_df = scores_df.merge(customer_names, on='customer_id', how='left')
         
         logger.info(f"Successfully scored {len(scores_df)} customers for {division_name}")
@@ -313,9 +335,14 @@ def generate_scoring_outputs(engine, *, run_manifest: dict | None = None):
     """
     logger.info("Starting customer scoring and whitespace analysis...")
     OUTPUTS_DIR.mkdir(exist_ok=True)
-    
+
     # Discover available models by folder convention *_model
     available_models = discover_available_models()
+
+    # Load customer names once to avoid repeated queries inside the loop
+    customer_names = pd.read_sql(
+        "select customer_id, customer_name from dim_customer", engine
+    )
     
     all_scores = []
     for division_name, model_path in available_models.items():
@@ -323,7 +350,13 @@ def generate_scoring_outputs(engine, *, run_manifest: dict | None = None):
             logger.warning(f"Model not found for {division_name}: {model_path}")
             continue
         try:
-            scores = score_customers_for_division(engine, division_name, model_path, run_manifest=run_manifest)
+            scores = score_customers_for_division(
+                engine,
+                division_name,
+                model_path,
+                customer_names=customer_names,
+                run_manifest=run_manifest,
+            )
         except MissingModelMetadataError:
             # Already logged and alerted; skip this division
             continue
