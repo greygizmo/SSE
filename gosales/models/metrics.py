@@ -35,8 +35,9 @@ def compute_topk_threshold(y_score: np.ndarray, k_percent: int) -> float:
     if n == 0:
         return float("nan")
     k = max(1, int(n * (k_percent / 100.0)))
-    sorted_scores = np.sort(y_score)
-    return float(sorted_scores[-k])
+    # Use partition to avoid full O(n log n) sort
+    threshold = np.partition(y_score, -k)[-k]
+    return float(threshold)
 
 
 def calibration_bins(y_true: np.ndarray, y_score: np.ndarray, n_bins: int = 10) -> pd.DataFrame:

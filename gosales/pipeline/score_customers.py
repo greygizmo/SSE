@@ -431,7 +431,7 @@ def generate_scoring_outputs(engine, *, run_manifest: dict | None = None):
                     if scores_num.size > 0:
                         for i, k in enumerate([5, 10, 20]):
                             kk = max(1, int(scores_num.size * (k / 100.0)))
-                            thr = float(np.sort(scores_num)[-kk])
+                            thr = float(np.partition(scores_num, -kk)[-kk])
                             count = int((pd.to_numeric(ranked['score'], errors='coerce') >= thr).sum())
                             thresholds[i]["threshold"] = thr
                             thresholds[i]["count"] = count
@@ -468,14 +468,14 @@ def generate_scoring_outputs(engine, *, run_manifest: dict | None = None):
                     if mode == 'top_percent':
                         if len(ranked) > 0:
                             ksel = max(1, int(len(ranked) * (cfg.modeling.capacity_percent / 100.0)))
-                            thr_sel = float(np.sort(ranked['score'].values)[-ksel])
+                            thr_sel = float(np.partition(ranked['score'].values, -ksel)[-ksel])
                             selected = ranked[ranked['score'] >= thr_sel].copy()
                         else:
                             selected = ranked
                     elif mode in ('per_rep','hybrid'):
                         # Fallback to top_percent until rep attribution/interleave available
                         ksel = max(1, int(len(ranked) * (cfg.modeling.capacity_percent / 100.0)))
-                        thr_sel = float(np.sort(ranked['score'].values)[-ksel]) if len(ranked) else float('nan')
+                        thr_sel = float(np.partition(ranked['score'].values, -ksel)[-ksel]) if len(ranked) else float('nan')
                         selected = ranked[ranked['score'] >= thr_sel].copy()
 
                     sel_name = f"whitespace_selected_{cutoff_tag}.csv" if cutoff_tag else "whitespace_selected.csv"
