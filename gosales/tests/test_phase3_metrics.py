@@ -47,7 +47,6 @@ def test_lift_at_k_monotonic():
     assert lift10 > 1.0
 
 
-<<<<<<< HEAD
 def test_lift_at_k_zero_base_nan_default():
     y = np.zeros(50)
     scores = np.linspace(0, 1, 50)
@@ -80,14 +79,5 @@ def test_weighted_lift_handles_nan_and_zero_base():
     weights = np.array([1.0, np.nan, 2.0, 1.0])
     result = compute_weighted_lift_at_k(y, scores, weights, 50)
     assert np.isnan(result)
-=======
-def test_lift_at_k_ties_consistent():
-    """Tied scores should yield deterministic lift values across runs."""
-    y = np.array([1, 0, 1, 0, 1, 0])
-    scores = np.array([0.5, 0.5, 0.5, 0.5, 0.2, 0.1])
-    first = compute_lift_at_k(y, scores, 50)
-    for _ in range(5):
-        assert compute_lift_at_k(y, scores, 50) == first
->>>>>>> 7fbc5bf (Ensure deterministic lift with stable sorting)
 
 
