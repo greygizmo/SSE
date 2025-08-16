@@ -217,7 +217,24 @@ def score_customers_for_division(engine, division_name: str, model_path: Path, *
         import numpy as _np
         X.replace([_np.inf, -_np.inf], _np.nan, inplace=True)
         X = X.infer_objects(copy=False).fillna(0.0)
-        probabilities = model.predict_proba(X)[:, 1]
+
+        if hasattr(model, "predict_proba"):
+            probabilities = model.predict_proba(X)[:, 1]
+        elif hasattr(model, "decision_function"):
+            # Calibrate decision_function scores to pseudo probabilities using a
+            # logistic transform. This makes the deterministic margin roughly
+            # comparable to probability estimates when a classifier does not
+            # expose predict_proba.
+            margins = model.decision_function(X)
+            probabilities = 1 / (1 + _np.exp(-margins))
+            logger.info("Model lacks predict_proba; used decision_function with logistic calibration")
+        else:
+            # Fall back to hard predictions. These are interpreted as
+            # already-calibrated 0/1 probabilities; callers should be aware that
+            # this lacks proper probabilistic calibration.
+            preds = model.predict(X)
+            probabilities = _np.asarray(preds, dtype=float)
+            logger.info("Model lacks predict_proba and decision_function; using predict outputs as probabilities")
 
         # Build scores_df and carry select auxiliary features for ranker
         feature_matrix_pd = feature_matrix.to_pandas()
