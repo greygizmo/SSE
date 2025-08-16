@@ -175,7 +175,7 @@ def score_customers_for_division(engine, division_name: str, model_path: Path, *
         return pl.DataFrame()
     
     # Prepare features for scoring (must match training)
-    X = feature_matrix.drop(["customer_id", "bought_in_division"]).to_pandas()
+    X = feature_matrix.drop(["customer_id", "bought_in_division"], strict=False).to_pandas()
     # Sanitize features for scoring: numeric only, coerce non-numeric, replace infs and NaNs
     try:
         for col in X.columns:
@@ -221,7 +221,12 @@ def score_customers_for_division(engine, division_name: str, model_path: Path, *
 
         # Build scores_df and carry select auxiliary features for ranker
         feature_matrix_pd = feature_matrix.to_pandas()
-        scores_df = feature_matrix_pd[["customer_id", "bought_in_division"]].copy()
+        base_cols = ["customer_id"]
+        if "bought_in_division" in feature_matrix_pd.columns:
+            base_cols.append("bought_in_division")
+        scores_df = feature_matrix_pd[base_cols].copy()
+        if "bought_in_division" not in scores_df.columns:
+            scores_df["bought_in_division"] = 0
         scores_df['division_name'] = division_name
         scores_df['icp_score'] = probabilities
         # Optional EV and affinity signals
