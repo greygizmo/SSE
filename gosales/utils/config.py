@@ -80,6 +80,8 @@ class ModelingConfig:
     capacity_percent: int = 10
     # Threshold of positives above which to prefer isotonic; otherwise sigmoid
     sparse_isotonic_threshold_pos: int = 1000
+    # Max rows allowed for SHAP computation; skip if exceeded
+    shap_max_rows: int = 50000
 
 
 @dataclass

@@ -20,12 +20,20 @@ from gosales.features.engine import create_feature_matrix
 from gosales.utils.logger import get_logger
 from gosales.utils.paths import MODELS_DIR
 from gosales.models.metrics import calibration_bins as _calibration_bins_helper, calibration_mae as _calibration_mae_helper
+from gosales.utils.config import load_config as _load_config
 import json
 from datetime import datetime
 
 logger = get_logger(__name__)
 
-def train_division_model(engine, division_name: str, cutoff_date: str = "2024-12-31", prediction_window_months: int = 6):
+def train_division_model(
+    engine,
+    division_name: str,
+    cutoff_date: str = "2024-12-31",
+    prediction_window_months: int = 6,
+    shap_sample: int = 0,
+    shap_max_rows: int | None = None,
+):
     """
     Trains a model to predict which customers are likely to buy from a specific division.
 
@@ -44,6 +52,9 @@ def train_division_model(engine, division_name: str, cutoff_date: str = "2024-12
     """
     logger.info(f"Starting model training for division: {division_name}...")
     logger.info(f"Training cutoff: {cutoff_date}, prediction window: {prediction_window_months} months")
+    cfg = _load_config()
+    if shap_max_rows is None:
+        shap_max_rows = getattr(cfg.modeling, "shap_max_rows", 50000)
 
     # Create the feature matrix using the new engine with time-based split
     feature_matrix = create_feature_matrix(engine, division_name, cutoff_date, prediction_window_months)
@@ -179,25 +190,37 @@ def train_division_model(engine, division_name: str, cutoff_date: str = "2024-12
     # --- SHAP Explainability export ---
     try:
         if _HAS_SHAP:
-            OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
-            feature_names = list(X.columns)
-            if best_model_name == "LightGBM":
-                explainer = shap.TreeExplainer(best_model)
-                shap_values = explainer.shap_values(X)
-                # For binary classification, shap_values is a list [neg, pos]
-                if isinstance(shap_values, list) and len(shap_values) == 2:
-                    shap_matrix = shap_values[1]
-                else:
-                    shap_matrix = shap_values
+            if shap_sample <= 0:
+                logger.warning("SHAP sample N is zero; skipping SHAP computation")
+            elif len(X) > shap_max_rows:
+                logger.warning(
+                    "Skipping SHAP: dataset has %d rows exceeding threshold %d",
+                    len(X),
+                    shap_max_rows,
+                )
             else:
-                # Linear model SHAP
-                explainer = shap.LinearExplainer(best_model, X_train)
-                shap_matrix = explainer.shap_values(X)
+                OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+                feature_names = list(X.columns)
+                rng = np.random.RandomState(cfg.modeling.seed)
+                sample_n = min(shap_sample, len(X))
+                sample_idx = rng.choice(len(X), size=sample_n, replace=False)
+                X_sample = X.iloc[sample_idx]
+                cust_ids = feature_matrix['customer_id'].to_pandas().iloc[sample_idx].values
+                if best_model_name == "LightGBM":
+                    explainer = shap.TreeExplainer(best_model)
+                    shap_values = explainer.shap_values(X_sample)
+                    if isinstance(shap_values, list) and len(shap_values) == 2:
+                        shap_matrix = shap_values[1]
+                    else:
+                        shap_matrix = shap_values
+                else:
+                    explainer = shap.LinearExplainer(best_model, X_sample)
+                    shap_matrix = explainer.shap_values(X_sample)
 
-            shap_df = pd.DataFrame(shap_matrix, columns=feature_names)
-            shap_df.insert(0, 'customer_id', feature_matrix['customer_id'].to_pandas().values)
-            shap_df.to_csv(OUTPUTS_DIR / f"shap_values_{division_name.lower()}.csv", index=False)
-            logger.info("Exported SHAP values for explainability.")
+                shap_df = pd.DataFrame(shap_matrix, columns=feature_names)
+                shap_df.insert(0, 'customer_id', cust_ids)
+                shap_df.to_csv(OUTPUTS_DIR / f"shap_values_{division_name.lower()}.csv", index=False)
+                logger.info("Exported SHAP values for explainability.")
     except Exception as e:
         logger.warning(f"Failed to compute/export SHAP values: {e}")
 
@@ -249,10 +272,11 @@ def train_division_model(engine, division_name: str, cutoff_date: str = "2024-12
 
 @click.command()
 @click.option('--division', default='Solidworks', help='The division to train a model for.')
-def main(division):
+@click.option('--shap-sample', default=0, type=int, help='Rows to sample for SHAP; 0 disables')
+def main(division, shap_sample):
     """Main function to run the training script from the command line."""
     db_engine = get_db_connection()
-    train_division_model(db_engine, division)
+    train_division_model(db_engine, division, shap_sample=shap_sample)
 
 if __name__ == "__main__":
     main()
