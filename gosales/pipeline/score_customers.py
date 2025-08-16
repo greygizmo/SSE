@@ -548,7 +548,7 @@ def generate_scoring_outputs(
                             selected = ranked.nlargest(ksel, sort_cols).copy() if sort_cols else ranked.head(0)
                         else:
                             selected = ranked.head(0)
-                    elif mode in ('per_rep','hybrid'):
+                    elif mode in ('per_rep', 'hybrid'):
                         # Fallback to top_percent until rep attribution/interleave available
                         ksel = max(1, int(len(ranked) * (cfg.modeling.capacity_percent / 100.0)))
                         selected = ranked.nlargest(ksel, sort_cols).copy() if len(ranked) and sort_cols else ranked.head(0)
