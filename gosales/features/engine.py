@@ -581,7 +581,12 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
     # Optionally join ALS embeddings (feature period <= cutoff)
     try:
         if cfgmod.features.use_als_embeddings and cutoff_date:
-            als_df = customer_als_embeddings(engine, cutoff_date, factors=16)
+            als_df = customer_als_embeddings(
+                engine,
+                cutoff_date,
+                factors=16,
+                lookback_months=cfgmod.features.als_lookback_months,
+            )
             if not als_df.is_empty():
                 # Join on customer_id
                 als_pd = als_df.to_pandas()
