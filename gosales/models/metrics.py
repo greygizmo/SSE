@@ -6,28 +6,80 @@ from typing import List, Tuple
 from sklearn.metrics import roc_auc_score
 
 
-def compute_lift_at_k(y_true: np.ndarray, y_score: np.ndarray, k_percent: int) -> float:
+def compute_lift_at_k(
+    y_true: np.ndarray,
+    y_score: np.ndarray,
+    k_percent: int,
+    zero_division: float = float("nan"),
+) -> float:
+    """Compute lift at a given percentile.
+
+    Parameters
+    ----------
+    y_true : np.ndarray
+        Ground truth binary labels.
+    y_score : np.ndarray
+        Predicted scores.
+    k_percent : int
+        Percentile cutoff in [0, 100].
+    zero_division : float, default nan
+        Value to return if the base rate is zero.
+    """
+
+    if not 0 <= k_percent <= 100:
+        raise ValueError("k_percent must be between 0 and 100")
+
+    y_score = np.nan_to_num(y_score)
     n = len(y_true)
     if n == 0:
-        return 0.0
+        return zero_division
+
     k = max(1, int(n * (k_percent / 100.0)))
     idx = np.argsort(-y_score)[:k]
     topk_rate = float(np.mean(y_true[idx]))
-    base_rate = float(np.mean(y_true)) if np.mean(y_true) > 0 else 1e-9
+    base_rate = float(np.mean(y_true))
+    if base_rate == 0:
+        return zero_division
     return topk_rate / base_rate
 
 
-def compute_weighted_lift_at_k(y_true: np.ndarray, y_score: np.ndarray, weights: np.ndarray, k_percent: int) -> float:
+def compute_weighted_lift_at_k(
+    y_true: np.ndarray,
+    y_score: np.ndarray,
+    weights: np.ndarray,
+    k_percent: int,
+    zero_division: float = float("nan"),
+) -> float:
+    """Compute weighted lift at a given percentile.
+
+    Returns ``zero_division`` when the base rate or required weight sums are zero."""
+
+    if not 0 <= k_percent <= 100:
+        raise ValueError("k_percent must be between 0 and 100")
+
+    y_score = np.nan_to_num(y_score)
+    weights = np.nan_to_num(weights)
+
     n = len(y_true)
     if n == 0:
-        return 0.0
+        return zero_division
+
     k = max(1, int(n * (k_percent / 100.0)))
     idx = np.argsort(-y_score)[:k]
     top_y = y_true[idx]
     top_w = weights[idx]
-    base = (y_true * weights).sum() / max(1e-9, weights.sum())
-    top = (top_y * top_w).sum() / max(1e-9, top_w.sum())
-    return float(top / max(1e-9, base))
+
+    weights_sum = float(weights.sum())
+    top_w_sum = float(top_w.sum())
+    if weights_sum == 0 or top_w_sum == 0:
+        return zero_division
+
+    base = (y_true * weights).sum() / weights_sum
+    if base == 0:
+        return zero_division
+
+    top = (top_y * top_w).sum() / top_w_sum
+    return float(top / base)
 
 
 def compute_topk_threshold(y_score: np.ndarray, k_percent: int) -> float:
