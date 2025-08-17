@@ -31,9 +31,9 @@ def build_als(engine, output_path, top_n: int = 10):
 
     # Build mappings between ids and indices
     user_ids = user_item["customer_id"].unique().to_list()
-    product_ids = user_item["product_name"].unique().to_list()
+    product_names = user_item["product_name"].unique().to_list()
     user_mapping = {uid: idx for idx, uid in enumerate(user_ids)}
-    product_mapping = {pid: idx for idx, pid in enumerate(product_ids)}
+    product_mapping = {pname: idx for idx, pname in enumerate(product_names)}
 
     user_item = user_item.with_columns(
         pl.col("customer_id").map_elements(user_mapping.get).alias("user_idx"),
@@ -46,7 +46,7 @@ def build_als(engine, output_path, top_n: int = 10):
             user_item["count"],
             (user_item["user_idx"], user_item["item_idx"]),
         ),
-        shape=(len(user_ids), len(product_ids)),
+        shape=(len(user_ids), len(product_names)),
     ).tocsr()
 
     # Train the ALS model
@@ -61,7 +61,7 @@ def build_als(engine, output_path, top_n: int = 10):
             recommendations.append(
                 {
                     "customer_id": user_id,
-                    "product_name": product_ids[item_idx],
+                    "product_name": product_names[item_idx],
                     "score": float(score),
                 }
             )
