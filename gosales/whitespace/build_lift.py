@@ -30,7 +30,7 @@ def build_lift(engine, output_path):
     basket_plus = (
         basket.to_dummies(columns=["product_name"])
         .group_by("customer_id")
-        .agg(pl.sum(col) for col in basket.columns if col.startswith("product_name_"))
+        .agg(pl.all().exclude(["customer_id", "count"]).sum())
     )
 
     # Perform market basket analysis
