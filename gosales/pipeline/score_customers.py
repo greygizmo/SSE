@@ -255,51 +255,72 @@ def score_customers_for_division(engine, division_name: str, model_path: Path, *
         return pl.DataFrame()
 
 def generate_whitespace_opportunities(engine):
-    """
-    Generate whitespace opportunities based on division purchase patterns.
-    This is a simplified version and can be enhanced.
+    """Generate whitespace opportunities with a lightweight scoring heuristic.
+
+    This heuristic blends normalized purchase frequency, recency and total
+    gross profit to produce a ``whitespace_score`` in ``[0, 1]``.  Each
+    feature is scaled to ``[0, 1]`` across all customers and combined using
+    weights ``0.5, 0.3, 0.2`` respectively.
     """
     logger.info("Generating whitespace opportunities...")
     try:
-        transactions = pl.from_pandas(pd.read_sql("SELECT * FROM fact_transactions", engine))
+        transactions = pl.from_pandas(
+            pd.read_sql("SELECT * FROM fact_transactions", engine, parse_dates=["order_date"])
+        )
         customers = pl.from_pandas(pd.read_sql("SELECT * FROM dim_customer", engine))
-        # Align join key dtypes
         if "customer_id" in transactions.columns:
             transactions = transactions.with_columns(pl.col("customer_id").cast(pl.Int64, strict=False))
         if "customer_id" in customers.columns:
             customers = customers.with_columns(pl.col("customer_id").cast(pl.Int64, strict=False))
-        
+
         customer_summary = (
             transactions
             .group_by("customer_id")
             .agg([
                 pl.col("product_division").unique().alias("divisions_bought"),
+                pl.len().alias("purchase_count"),
+                pl.max("order_date").alias("last_purchase"),
                 pl.sum("gross_profit").alias("total_gp"),
             ])
         )
-        
+
+        if customer_summary.is_empty():
+            return pl.DataFrame()
+
+        freq_max = max(customer_summary["purchase_count"].max(), 1)
+        gp_max = max(customer_summary["total_gp"].max(), 1.0)
+        ref_date = transactions["order_date"].max()
+        min_date = transactions["order_date"].min()
+        max_days = max((ref_date - min_date).days, 1)
+        customer_summary = customer_summary.with_columns([
+            (pl.col("purchase_count") / freq_max).alias("freq_norm"),
+            (1 - ((pl.lit(ref_date) - pl.col("last_purchase")).dt.total_days() / max_days)).clip(0.0, 1.0).alias("recency_norm"),
+            (pl.col("total_gp") / gp_max).alias("gp_norm"),
+        ])
+
         all_divisions = transactions.select("product_division").unique()["product_division"].to_list()
-        
+
         opportunities = []
         for row in customer_summary.iter_rows(named=True):
             not_bought = [div for div in all_divisions if div not in row["divisions_bought"]]
+            base_score = 0.5 * row["freq_norm"] + 0.3 * row["recency_norm"] + 0.2 * row["gp_norm"]
+            score = float(max(0.0, min(1.0, base_score)))
             for division in not_bought:
-                score = 0.5 # Placeholder logic
-                if row["total_gp"] > 10000: score = 0.8
-                elif row["total_gp"] > 1000: score = 0.6
-                
                 opportunities.append({
                     "customer_id": row["customer_id"],
                     "whitespace_division": division,
                     "whitespace_score": score,
-                    "reason": f"Customer has high engagement but has not bought from the {division} division."
+                    "reason": f"Customer has high engagement but has not bought from the {division} division.",
                 })
-        
+
         if not opportunities:
             return pl.DataFrame()
 
-        whitespace_df = pl.DataFrame(opportunities).with_columns(pl.col("customer_id").cast(pl.Int64, strict=False))\
+        whitespace_df = (
+            pl.DataFrame(opportunities)
+            .with_columns(pl.col("customer_id").cast(pl.Int64, strict=False))
             .join(customers, on="customer_id", how="left")
+        )
         logger.info(f"Generated {len(whitespace_df)} whitespace opportunities")
         return whitespace_df
 
