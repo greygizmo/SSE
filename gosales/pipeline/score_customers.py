@@ -9,8 +9,6 @@ import mlflow.sklearn
 import json
 from pathlib import Path
 import joblib
-import mlflow
-import mlflow.sklearn
 
 from gosales.utils.db import get_db_connection
 from gosales.utils.logger import get_logger
@@ -63,20 +61,17 @@ def _sanitize_features(X: pd.DataFrame) -> pd.DataFrame:
 
 
 def _score_p_icp(model, X: pd.DataFrame) -> np.ndarray:
-    """Predict calibrated probability after sanitizing features.
-
-    Falls back to decision_function (logistic transform) or predict() if needed.
-    """
+    """Predict calibrated probability after sanitizing features."""
     Xc = _sanitize_features(X)
-    import numpy as _np
+    # Prefer predict_proba; fallback to decision_function if unavailable
     if hasattr(model, "predict_proba"):
         return model.predict_proba(Xc)[:, 1]
     if hasattr(model, "decision_function"):
         margins = model.decision_function(Xc)
-        return 1 / (1 + _np.exp(-margins))
-    preds = model.predict(Xc)
-    return _np.asarray(preds, dtype=float)
-
+        return 1.0 / (1.0 + np.exp(-margins))
+    # Final fallback: predict() then cast to float
+    preds = getattr(model, "predict", lambda Z: np.zeros(len(Z)))(Xc)
+    return np.asarray(preds, dtype=float)
 
 def score_customers_for_division(
     engine,
@@ -286,27 +281,29 @@ def generate_whitespace_opportunities(engine):
     """
     logger.info("Generating whitespace opportunities...")
     try:
-        transactions = pl.from_pandas(
-            pd.read_sql("SELECT * FROM fact_transactions", engine, parse_dates=["order_date"])
-        )
+        # Read transactions with graceful handling when order_date is missing
+        tx_pd = pd.read_sql("SELECT * FROM fact_transactions", engine)
+        if "order_date" in tx_pd.columns:
+            tx_pd["order_date"] = pd.to_datetime(tx_pd["order_date"], errors="coerce")
+        else:
+            # Provide a neutral recency anchor if date not available
+            tx_pd["order_date"] = pd.Timestamp("1970-01-01")
+        transactions = pl.from_pandas(tx_pd)
         customers = pl.from_pandas(pd.read_sql("SELECT * FROM dim_customer", engine))
         if "customer_id" in transactions.columns:
             transactions = transactions.with_columns(pl.col("customer_id").cast(pl.Int64, strict=False))
         if "customer_id" in customers.columns:
             customers = customers.with_columns(pl.col("customer_id").cast(pl.Int64, strict=False))
 
-        has_dates = "order_date" in transactions.columns
-        agg_exprs = [
-            pl.col("product_division").unique().alias("divisions_bought"),
-            pl.len().alias("purchase_count"),
-            pl.sum("gross_profit").alias("total_gp"),
-        ]
-        if has_dates:
-            agg_exprs.append(pl.max("order_date").alias("last_purchase"))
         customer_summary = (
             transactions
             .group_by("customer_id")
-            .agg(agg_exprs)
+            .agg([
+                pl.col("product_division").unique().alias("divisions_bought"),
+                pl.len().alias("purchase_count"),
+                pl.max("order_date").alias("last_purchase"),
+                pl.sum("gross_profit").alias("total_gp"),
+            ])
         )
 
         if customer_summary.is_empty():
@@ -314,31 +311,22 @@ def generate_whitespace_opportunities(engine):
 
         freq_max = max(customer_summary["purchase_count"].max(), 1)
         gp_max = max(customer_summary["total_gp"].max(), 1.0)
-        if has_dates:
-            ref_date = transactions["order_date"].max()
-            min_date = transactions["order_date"].min()
-            max_days = max((ref_date - min_date).days, 1)
-            customer_summary = customer_summary.with_columns([
-                (pl.col("purchase_count") / freq_max).alias("freq_norm"),
-                (1 - ((pl.lit(ref_date) - pl.col("last_purchase")).dt.total_days() / max_days)).clip(0.0, 1.0).alias("recency_norm"),
-                (pl.col("total_gp") / gp_max).alias("gp_norm"),
-            ])
-        else:
-            customer_summary = customer_summary.with_columns([
-                (pl.col("purchase_count") / freq_max).alias("freq_norm"),
-                pl.lit(1.0).alias("recency_norm"),
-                (pl.col("total_gp") / gp_max).alias("gp_norm"),
-            ])
+        ref_date = transactions["order_date"].max()
+        min_date = transactions["order_date"].min()
+        max_days = max((ref_date - min_date).days, 1)
+        customer_summary = customer_summary.with_columns([
+            (pl.col("purchase_count") / freq_max).alias("freq_norm"),
+            (1 - ((pl.lit(ref_date) - pl.col("last_purchase")).dt.total_days() / max_days)).clip(0.0, 1.0).alias("recency_norm"),
+            (pl.col("total_gp") / gp_max).alias("gp_norm"),
+        ])
 
+        # Only valid, non-empty divisions
         all_divisions = (
             transactions
-            .filter(
-                pl.col("product_division").is_not_null()
-                & (pl.col("product_division").str.strip_chars() != "")
-            )
-            .select("product_division")
-            .unique()["product_division"].to_list()
+            .filter(pl.col("product_division").is_not_null() & (pl.col("product_division").cast(pl.Utf8).str.strip_chars() != ""))
+            .select("product_division").unique()["product_division"].to_list()
         )
+
         opportunities = []
         for row in customer_summary.iter_rows(named=True):
             not_bought = [div for div in all_divisions if div not in row["divisions_bought"]]
@@ -507,8 +495,9 @@ def generate_scoring_outputs(
                         sort_cols = [c for c in ['score', 'p_icp', 'EV_norm', 'customer_id'] if c in ranked.columns]
                         for i, k in enumerate([5, 10, 20]):
                             kk = max(1, int(scores_num.size * (k / 100.0)))
-                            topk = ranked.nlargest(kk, sort_cols) if sort_cols else ranked.head(0)
-                            thr = float(topk['score'].min()) if len(topk) else float('nan')
+                            pos = scores_num.size - kk
+                            thr = float(np.partition(scores_num, pos)[pos])
+                            count = int((pd.to_numeric(ranked['score'], errors='coerce') >= thr).sum())
                             thresholds[i]["threshold"] = thr
                             thresholds[i]["count"] = int(len(topk))
                 thr_name = f"thresholds_whitespace_{cutoff_tag}.csv" if cutoff_tag else "thresholds_whitespace.csv"
