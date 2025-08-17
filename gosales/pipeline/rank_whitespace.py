@@ -19,6 +19,8 @@ def _percentile_normalize(s: pd.Series) -> pd.Series:
     """Map values in s to [0,1] by rank-percentile with stable handling of ties."""
     if s is None or len(s) == 0:
         return pd.Series([], dtype=float)
+    if s.nunique(dropna=True) <= 1:
+        return pd.Series(np.zeros(len(s)), index=s.index, dtype=float)
     # Use average rank method to be stable across runs
     ranks = s.rank(method="average", pct=True)
     return ranks.astype(float)
