@@ -15,6 +15,10 @@ from gosales.utils.paths import OUTPUTS_DIR
 logger = get_logger(__name__)
 
 
+# Features used by challenger meta-learner. Tests may monkeypatch this list.
+CHALLENGER_FEAT_COLS = ["p_icp_pct", "lift_norm", "als_norm", "EV_norm"]
+
+
 def _percentile_normalize(s: pd.Series) -> pd.Series:
     """Map values in s to [0,1] by rank-percentile with stable handling of ties."""
     if s is None or len(s) == 0:
@@ -243,7 +247,12 @@ def rank_whitespace(inputs: RankInputs, *, weights: Iterable[float] = (0.60, 0.2
     if challenger_on and challenger_model == 'lr':
         try:
             from sklearn.linear_model import LogisticRegression
-            Xmeta = df[['p_icp_pct', 'lift_norm', 'als_norm', 'EV_norm']].to_numpy(dtype=float)
+
+            feat_cols = list(CHALLENGER_FEAT_COLS)
+            missing = [c for c in feat_cols if c not in df]
+            for c in missing:
+                df[c] = 0.0
+            Xmeta = df[feat_cols].to_numpy(dtype=float)
             # Pseudo-label: use p_icp as soft target for ranking consistency; this is a heuristic challenger
             ysoft = df['p_icp'].to_numpy(dtype=float)
             # Fit Platt-like logistic on the normalized components to approximate p_icp ordering
