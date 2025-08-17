@@ -30,7 +30,7 @@ A division-focused Ideal Customer Profile (ICP) & Whitespace engine. The pipelin
 - **Phase 4 — Whitespace Ranking / Next‑Best‑Action**
   - Signals: calibrated probability (`p_icp` + per‑division percentile), market‑basket affinity (`mb_lift_max`, `mb_lift_mean`), ALS similarity (explicit or embedding‑centroid), expected value proxy (segment‑blended and capped)
   - Normalization: per‑division percentile (default) or pooled across divisions
-  - Blending: configurable weights (default `0.60,0.20,0.10,0.10`) → single actionable score; optional challenger meta‑learner (`score_challenger`)
+  - Blending: configurable weights (default `0.60,0.20,0.10,0.10`) → single actionable score; weights must be four non‑negative numbers and are normalized to sum to 1; optional challenger meta‑learner (`score_challenger`)
   - Capacity: top‑percent, per‑rep, or hybrid diversification (round‑robin interleave)
   - Gating: ownership, region, recent contact, open deal; cooldown de‑emphasis; structured JSONL logs
   - Artifacts: `whitespace_<cutoff>.csv` (includes `score` and `score_challenger`), `whitespace_explanations_<cutoff>.csv`, `thresholds_whitespace_<cutoff>.csv`, `whitespace_metrics_<cutoff>.json`, `whitespace_log_<cutoff>.jsonl`, `mb_rules_<division>_<cutoff>.csv`, optional `whitespace_legacy_<cutoff>.csv` (shadow), `whitespace_overlap_<cutoff>.json`
