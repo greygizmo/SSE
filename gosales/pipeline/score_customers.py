@@ -245,8 +245,11 @@ def score_customers_for_division(engine, division_name: str, model_path: Path, *
         except Exception:
             pass
         
-        customer_names = pd.read_sql("select customer_id, customer_name from dim_customer", engine)
-        scores_df = scores_df.merge(customer_names, on='customer_id', how='left')
+        customer_names = (
+            pd.read_sql("select customer_id, customer_name from dim_customer", engine)
+            .drop_duplicates(subset="customer_id")
+        )
+        scores_df = scores_df.merge(customer_names, on="customer_id", how="left")
         
         logger.info(f"Successfully scored {len(scores_df)} customers for {division_name}")
         return pl.from_pandas(scores_df)
