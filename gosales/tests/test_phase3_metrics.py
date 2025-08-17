@@ -30,6 +30,15 @@ def test_calibration_bins_and_mae():
     assert mae < 0.02  # near-perfect calibration should have very small MAE
 
 
+def test_calibration_bins_constant_scores():
+    y = np.array([0, 1, 0, 1, 0])
+    p = np.array([0.5] * 5)
+    bins = calibration_bins(y, p, n_bins=10)
+    # With constant scores we should fall back to a single bin
+    assert len(bins) == 1
+    assert bins['count'].iloc[0] == 5
+
+
 def test_lift_at_k_monotonic():
     # Higher scores correspond to higher y_prob → lift should be > 1
     y = np.array([0]*90 + [1]*10)
