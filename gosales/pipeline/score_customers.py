@@ -174,9 +174,17 @@ def score_customers_for_division(engine, division_name: str, model_path: Path, *
         return pl.DataFrame()
 
     # Prepare features for scoring (must match training)
-    X = feature_matrix.drop(["customer_id", "bought_in_division"]).to_pandas()
+    X = feature_matrix.drop(["customer_id", "bought_in_division"], strict=False).to_pandas()
     if X.shape[1] == 0:
-        logger.error(f"No features remain after dropping identifiers for {division_name}")
+        msg = f"No features remain after dropping identifiers for {division_name}"
+        logger.error(msg)
+        if run_manifest is not None:
+            run_manifest.setdefault("alerts", []).append({
+                "division": division_name,
+                "severity": "error",
+                "code": "NO_FEATURE_COLUMNS",
+                "message": msg,
+            })
         return pl.DataFrame()
     # Sanitize features for scoring: numeric only, coerce non-numeric, replace infs and NaNs
     try:

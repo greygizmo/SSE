@@ -27,6 +27,10 @@ def test_score_customers_no_features(monkeypatch, tmp_path):
     feature_df = pl.DataFrame({"customer_id": [1, 2], "bought_in_division": [0, 0]})
     monkeypatch.setattr(score_customers, "create_feature_matrix", lambda *a, **k: feature_df)
 
-    result = score_customers.score_customers_for_division(None, "division", model_dir)
+    run_manifest = {}
+    result = score_customers.score_customers_for_division(
+        None, "division", model_dir, run_manifest=run_manifest
+    )
     assert result.is_empty()
+    assert run_manifest["alerts"][0]["code"] == "NO_FEATURE_COLUMNS"
 
