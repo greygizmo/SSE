@@ -48,17 +48,26 @@ def gains_and_capture(icp_scores_csv: Path | str) -> Tuple[pd.DataFrame, pd.Data
     cap_rows = []
     for div, g in df.groupby('division_name'):
         g = g.copy()
-        # Use qcut with labels only if it creates exactly 10 bins; otherwise assign decile by rank
+        # Use qcut only when sufficient unique scores; otherwise reduce bins
         scores = pd.to_numeric(g['icp_score'], errors='coerce').fillna(0.0)
-        try:
-            g['decile'] = pd.qcut(scores, q=10, labels=list(range(10, 0, -1)), duplicates='drop')
-            # If labels mismatch due to dropped duplicates, fall back to rank-based deciles
-            if g['decile'].nunique(dropna=True) < 10:
-                raise ValueError("insufficient unique bins")
-        except Exception:
-            ranks = scores.rank(method='average', pct=True)
-            # Highest scores should get decile 10
-            g['decile'] = (np.ceil(ranks * 10)).clip(1, 10).astype(int)
+        uniq = scores.nunique(dropna=False)
+        if uniq >= 10:
+            try:
+                g['decile'] = pd.qcut(scores, q=10, labels=list(range(10, 0, -1)), duplicates='drop')
+                if g['decile'].nunique(dropna=True) < 10:
+                    raise ValueError("insufficient unique bins")
+            except Exception:
+                ranks = scores.rank(method='average', pct=True)
+                g['decile'] = (np.ceil(ranks * 10)).clip(1, 10).astype(int)
+        else:
+            bins = max(1, int(uniq))
+            g['decile'] = pd.cut(
+                scores,
+                bins=bins,
+                labels=list(range(bins, 0, -1)),
+                include_lowest=True,
+                duplicates='drop',
+            ).astype(int)
         gains = g.groupby('decile', observed=False)['bought_in_division'].mean().reset_index()
         gains['division_name'] = div
         gains_rows.append(gains)

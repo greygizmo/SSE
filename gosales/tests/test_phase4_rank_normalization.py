@@ -18,3 +18,9 @@ def test_percentile_normalize_uniform_like():
     assert p2.std() > 0.15
 
 
+def test_percentile_normalize_constant_values():
+    s = pd.Series([5.0] * 10)
+    p = _percentile_normalize(s)
+    assert (p == 0).all()
+
+

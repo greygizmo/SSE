@@ -28,6 +28,7 @@ features:
   use_eb_smoothing: true
   use_market_basket: true
   use_als_embeddings: true
+  als_lookback_months: 12
   use_item2vec: false
   use_text_tags: false
 modeling:
@@ -46,9 +47,10 @@ modeling:
   calibration_methods: [platt, isotonic]
   top_k_percents: [5, 10, 20]
   capacity_percent: 10
+  shap_max_rows: 50000
 
 whitespace:
-  weights: [0.60, 0.20, 0.10, 0.10]   # [p_icp_pct, lift_norm, als_norm, EV_norm]
+  weights: [0.60, 0.20, 0.10, 0.10]   # [p_icp_pct, lift_norm, als_norm, EV_norm]; non-negative, auto-normalized
   normalize: percentile               # percentile | pooled
   eligibility:
     exclude_if_owned_ever: true

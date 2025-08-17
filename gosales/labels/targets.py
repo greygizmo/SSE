@@ -111,22 +111,32 @@ def build_labels_for_division(
         pass
 
     # Cohorts from feature period
-    had_any = set(feature_df['customer_id'].dropna().astype('int64').tolist())
     feature_df['product_division'] = feature_df['product_division'].astype(str).str.strip()
-    had_div = set(feature_df.loc[feature_df['product_division'] == normalize_division(params.division), 'customer_id'].dropna().astype('int64').tolist())
-    def _cohorts(cid: int) -> tuple[int,int,int]:
-        is_new_logo = 0 if cid in had_any else 1
-        is_renewal_like = 1 if (cid in had_div and cid in had_any) else 0
-        is_expansion = 1 if (cid in had_any and cid not in had_div) else 0
-        return is_new_logo, is_expansion, is_renewal_like
 
-    tmp = []
-    for r in labels['customer_id'].dropna().astype('int64').tolist():
-        n, e, rl = _cohorts(r)
-        tmp.append((r, n, e, rl))
-    cohorts = pd.DataFrame(tmp, columns=['customer_id', 'is_new_logo', 'is_expansion', 'is_renewal_like'])
-    labels = labels.merge(cohorts, on='customer_id', how='left')
-    labels[['is_new_logo', 'is_expansion', 'is_renewal_like']] = labels[['is_new_logo', 'is_expansion', 'is_renewal_like']].fillna(0).astype('int8')
+    had_any_df = (
+        feature_df[['customer_id']]
+        .dropna()
+        .drop_duplicates()
+        .assign(had_any=1)
+    )
+
+    had_div_df = (
+        feature_df[feature_df['product_division'] == normalize_division(params.division)][['customer_id']]
+        .dropna()
+        .drop_duplicates()
+        .assign(had_div=1)
+    )
+
+    labels = (
+        labels.merge(had_any_df, on='customer_id', how='left')
+        .merge(had_div_df, on='customer_id', how='left')
+    )
+
+    labels[['had_any', 'had_div']] = labels[['had_any', 'had_div']].fillna(0).astype('int8')
+    labels['is_new_logo'] = (1 - labels['had_any']).astype('int8')
+    labels['is_renewal_like'] = ((labels['had_any'] == 1) & (labels['had_div'] == 1)).astype('int8')
+    labels['is_expansion'] = ((labels['had_any'] == 1) & (labels['had_div'] == 0)).astype('int8')
+    labels.drop(columns=['had_any', 'had_div'], inplace=True)
 
     # Censoring detection
     max_seen = pd.to_datetime(facts['order_date'].max(), errors='coerce')

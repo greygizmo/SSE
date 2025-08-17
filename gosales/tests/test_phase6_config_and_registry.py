@@ -1,4 +1,3 @@
-import json
 from pathlib import Path
 
 import pytest
@@ -31,5 +30,23 @@ def test_run_registry_and_manifest(tmp_path, monkeypatch):
     latest_run = sorted([p for p in runs_dir.iterdir() if p.is_dir()], reverse=True)[0]
     assert (latest_run / 'manifest.json').exists()
     assert (latest_run / 'config_resolved.yaml').exists()
+
+
+def test_whitespace_weights_normalized(tmp_path):
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text("whitespace:\n  weights: [2, 2, 1, 1]\n", encoding="utf-8")
+    cfg = load_config(cfg_path)
+    assert abs(sum(cfg.whitespace.weights) - 1.0) < 1e-9
+
+
+@pytest.mark.parametrize(
+    "weights",
+    ["[0.5, -0.1, 0.2, 0.4]", "[0.5, .nan, 0.2, 0.3]", "[0.5, .inf, 0.2, 0.3]"],
+)
+def test_whitespace_weights_malformed_raise(tmp_path, weights):
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(f"whitespace:\n  weights: {weights}\n", encoding="utf-8")
+    with pytest.raises(ValueError):
+        load_config(cfg_path)
 
 

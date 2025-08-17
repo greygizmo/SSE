@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
@@ -64,6 +65,7 @@ class Features:
     use_eb_smoothing: bool = True
     use_market_basket: bool = True
     use_als_embeddings: bool = False
+    als_lookback_months: int = 12
     use_item2vec: bool = False
     use_text_tags: bool = False
 
@@ -80,6 +82,8 @@ class ModelingConfig:
     capacity_percent: int = 10
     # Threshold of positives above which to prefer isotonic; otherwise sigmoid
     sparse_isotonic_threshold_pos: int = 1000
+    # Max rows allowed for SHAP computation; skip if exceeded
+    shap_max_rows: int = 50000
 
 
 @dataclass
@@ -227,6 +231,21 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
 
     ws_eligibility_cfg = ws_cfg.get("eligibility", {})
 
+    # Parse and validate whitespace weights
+    raw_ws_weights = ws_cfg.get("weights", [0.60, 0.20, 0.10, 0.10])
+    try:
+        ws_weights = [float(w) for w in raw_ws_weights]
+    except Exception as e:  # pragma: no cover - defensive
+        raise ValueError("whitespace.weights must be a list of numbers") from e
+    if len(ws_weights) != 4:
+        raise ValueError("whitespace.weights must have 4 entries")
+    if any((not math.isfinite(w)) or w < 0 for w in ws_weights):
+        raise ValueError("whitespace.weights must be finite and non-negative")
+    total_w = sum(ws_weights)
+    if total_w <= 0:
+        raise ValueError("whitespace.weights must sum to a positive number")
+    ws_weights = [w / total_w for w in ws_weights]
+
     cfg = Config(
         paths=_paths_from_dict(paths_dict),
         database=Database(
@@ -262,6 +281,7 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
             use_eb_smoothing=bool(feat_cfg.get("use_eb_smoothing", True)),
             use_market_basket=bool(feat_cfg.get("use_market_basket", True)),
             use_als_embeddings=bool(feat_cfg.get("use_als_embeddings", False)),
+            als_lookback_months=int(feat_cfg.get("als_lookback_months", 12)),
             use_item2vec=bool(feat_cfg.get("use_item2vec", False)),
             use_text_tags=bool(feat_cfg.get("use_text_tags", False)),
         ),
@@ -277,7 +297,7 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
             sparse_isotonic_threshold_pos=int(mdl_cfg.get("sparse_isotonic_threshold_pos", 1000)),
         ),
         whitespace=WhitespaceConfig(
-            weights=list(ws_cfg.get("weights", [0.60, 0.20, 0.10, 0.10])),
+            weights=ws_weights,
             normalize=str(ws_cfg.get("normalize", "percentile")),
             eligibility=WhitespaceEligibilityConfig(
                 exclude_if_owned_ever=bool(ws_eligibility_cfg.get("exclude_if_owned_ever", True)),
@@ -309,15 +329,13 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
     )
 
     try:
-        if len(cfg.whitespace.weights) != 4:
-            raise ValueError("whitespace.weights must have 4 entries")
-        if str(cfg.whitespace.normalize).lower() not in {"percentile","pooled"}:
+        if str(cfg.whitespace.normalize).lower() not in {"percentile", "pooled"}:
             raise ValueError("whitespace.normalize must be 'percentile' or 'pooled'")
         if any(k <= 0 or k > 100 for k in cfg.modeling.top_k_percents):
             raise ValueError("modeling.top_k_percents must be integers in (0,100]")
         if not (0.0 < cfg.validation.ev_cap_percentile <= 1.0):
             raise ValueError("validation.ev_cap_percentile must be in (0,1]")
-    except Exception as e:
+    except Exception:
         raise
 
     for p in [cfg.paths.raw, cfg.paths.staging, cfg.paths.curated, cfg.paths.outputs]:

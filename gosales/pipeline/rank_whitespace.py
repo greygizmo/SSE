@@ -15,10 +15,16 @@ from gosales.utils.paths import OUTPUTS_DIR
 logger = get_logger(__name__)
 
 
+# Features used by challenger meta-learner. Tests may monkeypatch this list.
+CHALLENGER_FEAT_COLS = ["p_icp_pct", "lift_norm", "als_norm", "EV_norm"]
+
+
 def _percentile_normalize(s: pd.Series) -> pd.Series:
     """Map values in s to [0,1] by rank-percentile with stable handling of ties."""
     if s is None or len(s) == 0:
         return pd.Series([], dtype=float)
+    if s.nunique(dropna=True) <= 1:
+        return pd.Series(np.zeros(len(s)), index=s.index, dtype=float)
     # Use average rank method to be stable across runs
     ranks = s.rank(method="average", pct=True)
     return ranks.astype(float)
@@ -78,6 +84,44 @@ def _compute_expected_value(df: pd.DataFrame, cfg=None) -> pd.Series:
     return _percentile_normalize(raw)
 
 
+def _score_p_icp(df: pd.DataFrame, model, feat_cols: Iterable[str] | None = None) -> pd.Series:
+    """Score calibrated ICP probabilities using ``model``.
+
+    When ``feat_cols`` is ``None`` the function falls back to using all numeric
+    columns present in ``df`` but explicitly drops common label/score columns
+    (e.g. ``label``, ``score``). Any remaining extra numeric columns are
+    ignored based on the model's ``n_features_in_`` attribute.
+    """
+
+    if feat_cols:
+        for c in feat_cols:
+            if c not in df.columns:
+                df[c] = 0.0
+        X = df.reindex(columns=feat_cols)
+    else:
+        num = df.select_dtypes(include=[np.number]).copy()
+        known = {
+            "label",
+            "labels",
+            "score",
+            "scores",
+            "icp_score",
+            "p_icp",
+            "p_icp_pct",
+            "p_hat",
+            "score_challenger",
+        }
+        drop_cols = [c for c in num.columns if c.lower() in known]
+        if drop_cols:
+            num = num.drop(columns=drop_cols)
+        if hasattr(model, "n_features_in_") and num.shape[1] > int(model.n_features_in_):
+            X = num.iloc[:, : int(model.n_features_in_)]
+        else:
+            X = num
+    X = X.apply(pd.to_numeric, errors="coerce").fillna(0.0)
+    return pd.Series(model.predict_proba(X)[:, 1], index=df.index)
+
+
 def _scale_weights_by_coverage(base_weights: Iterable[float], als_norm: pd.Series, lift_norm: pd.Series, threshold: float = 0.30) -> Tuple[List[float], Dict[str, float]]:
     w = list(base_weights)
     if len(w) != 4:
@@ -95,16 +139,27 @@ def _scale_weights_by_coverage(base_weights: Iterable[float], als_norm: pd.Serie
         return min(1.0, cov / max(1e-9, threshold))
     f_lift = factor(cov_lift)
     f_als = factor(cov_als)
-    adjustments['aff_weight_factor'] = f_lift
-    adjustments['als_weight_factor'] = f_als
-    w_adj = [w[0], w[1] * f_lift, w[2] * f_als, w[3]]
-    s = sum(w_adj)
-    if s <= 0:
-        # fallback to all on p_icp
-        w_adj = [1.0, 0.0, 0.0, 0.0]
+    adjustments["aff_weight_factor"] = f_lift
+    adjustments["als_weight_factor"] = f_als
+    w_scaled = [w[0], w[1] * f_lift, w[2] * f_als, w[3]]
+    s = sum(w_scaled)
+    if s > 0:
+        w_div = [wi / s for wi in w_scaled]
     else:
-        w_adj = [wi / s for wi in w_adj]
-    return w_adj, adjustments
+        w_div = [0.0] * len(w_scaled)
+    if sum(w_div) == 0:
+        base_sum = sum(w)
+        if w[0] > 0 or w[3] > 0:
+            w_div = [wi / base_sum for wi in w]
+            logger.warning(
+                "Weight scaling resulted in zero weights; falling back to base weights"
+            )
+        else:
+            w_div = [1.0 / len(w)] * len(w)
+            logger.warning(
+                "Weight scaling resulted in zero weights; falling back to uniform weights"
+            )
+    return w_div, adjustments
 
 
 def _explain(row: pd.Series) -> str:
@@ -192,7 +247,12 @@ def rank_whitespace(inputs: RankInputs, *, weights: Iterable[float] = (0.60, 0.2
     if challenger_on and challenger_model == 'lr':
         try:
             from sklearn.linear_model import LogisticRegression
-            Xmeta = df[['p_icp_pct', 'lift_norm', 'als_norm', 'EV_norm']].to_numpy(dtype=float)
+
+            feat_cols = list(CHALLENGER_FEAT_COLS)
+            missing = [c for c in feat_cols if c not in df]
+            for c in missing:
+                df[c] = 0.0
+            Xmeta = df[feat_cols].to_numpy(dtype=float)
             # Pseudo-label: use p_icp as soft target for ranking consistency; this is a heuristic challenger
             ysoft = df['p_icp'].to_numpy(dtype=float)
             # Fit Platt-like logistic on the normalized components to approximate p_icp ordering
@@ -213,6 +273,26 @@ def rank_whitespace(inputs: RankInputs, *, weights: Iterable[float] = (0.60, 0.2
 
     # Stable tie-breakers on champion score
     df = df.sort_values(by=['division_name', 'score', 'p_icp', 'customer_id'], ascending=[True, False, False, True], kind='mergesort')
+
+    # Cooldown: de-emphasize accounts surfaced recently without action
+    try:
+        cooldown_days = int(getattr(getattr(cfg, 'whitespace', object()), 'cooldown_days', 0))
+        cooldown_factor = float(getattr(getattr(cfg, 'whitespace', object()), 'cooldown_factor', 1.0))
+    except Exception:
+        cooldown_days = 0
+        cooldown_factor = 1.0
+
+    if (
+        cooldown_days > 0
+        and cooldown_factor < 1.0
+        and 'days_since_last_surfaced' in df.columns
+    ):
+        days = pd.to_numeric(df['days_since_last_surfaced'], errors='coerce').fillna(cooldown_days + 1)
+        mask = days < cooldown_days
+        if mask.any():
+            df.loc[mask, 'score'] = df.loc[mask, 'score'] * cooldown_factor
+            # Refresh ordering after score adjustment
+            df = df.sort_values(by=['division_name', 'score', 'p_icp', 'customer_id'], ascending=[True, False, False, True], kind='mergesort')
 
     # Explanations
     df['nba_reason'] = df.apply(_explain, axis=1)

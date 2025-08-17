@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List, Tuple, Callable
 
 import click
 import numpy as np
@@ -22,7 +21,7 @@ logger = get_logger(__name__)
 
 
 def _load_model_and_features(division: str):
-    import joblib, json
+    import joblib
     model_dir = MODELS_DIR / f"{division.lower()}_model"
     model_path = model_dir / "model.pkl"
     feat_path = model_dir / "feature_list.json"
@@ -92,12 +91,20 @@ def _gains_deciles(y: np.ndarray, p: np.ndarray) -> pd.DataFrame:
 
 def _calibration_bins(y: np.ndarray, p: np.ndarray, n_bins: int = 10) -> pd.DataFrame:
     df = pd.DataFrame({'y': y, 'p': p})
-    try:
+    uniq = df['p'].nunique(dropna=False)
+    if uniq >= n_bins:
         bins = pd.qcut(df['p'], q=n_bins, duplicates='drop')
-    except Exception:
-        bins = pd.cut(df['p'], bins=n_bins, include_lowest=True, duplicates='drop')
+    else:
+        bins = pd.cut(
+            df['p'],
+            bins=max(1, min(n_bins, uniq)),
+            include_lowest=True,
+            duplicates='drop',
+        )
     return df.assign(bin=bins).groupby('bin', observed=False).agg(
-        mean_predicted=('p','mean'), fraction_positives=('y','mean'), count=('y','size')
+        mean_predicted=('p', 'mean'),
+        fraction_positives=('y', 'mean'),
+        count=('y', 'size'),
     ).reset_index(drop=True)
 
 
@@ -132,10 +139,9 @@ def main(division: str, cutoff: str, window_months: int, capacity_grid: str, acc
             artifacts['planned_validation_frame.parquet'] = str(out_dir / 'validation_frame.parquet')
             for name in ['gains.csv','calibration.csv','topk_scenarios.csv','topk_scenarios_sorted.csv','segment_performance.csv','metrics.json','drift.json','alerts.json']:
                 artifacts[f'planned_{name}'] = str(out_dir / name)
-            ctx = run_context("phase5_validation").__enter__()
             ctx['write_manifest'](artifacts)
             ctx['append_registry']({'phase': 'phase5_validation', 'division': division, 'cutoff': cutoff, 'artifact_count': len(artifacts), 'status': 'dry-run'})
-            run_context("phase5_validation").__exit__(None, None, None)
+            ctx_cm.__exit__(None, None, None)
         except Exception:
             pass
         return

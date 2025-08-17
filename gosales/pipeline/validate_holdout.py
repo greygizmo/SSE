@@ -61,9 +61,24 @@ def validate_holdout(icp_scores_csv: str | Path, *, year_tag: str | None = None,
             auc = float('nan')
         try:
             # Calibration MAE via 10 quantile bins
-            bins = pd.qcut(pd.Series(p), q=10, labels=False, duplicates='drop')
+            ps = pd.Series(p)
+            uniq = ps.nunique(dropna=False)
+            if uniq >= 10:
+                bins = pd.qcut(ps, q=10, labels=False, duplicates='drop')
+            else:
+                bins = pd.cut(
+                    ps,
+                    bins=max(1, min(10, uniq)),
+                    labels=False,
+                    include_lowest=True,
+                    duplicates='drop',
+                )
             cal = pd.DataFrame({"y": y, "p": p, "bin": bins})
-            grp = cal.groupby('bin', observed=False).agg(mean_p=("p","mean"), frac_pos=("y","mean"), count=("y","size")).dropna()
+            grp = cal.groupby('bin', observed=False).agg(
+                mean_p=("p", "mean"),
+                frac_pos=("y", "mean"),
+                count=("y", "size"),
+            ).dropna()
             cal_mae = float((grp['mean_p'].sub(grp['frac_pos']).abs() * grp['count']).sum() / max(1, grp['count'].sum()))
         except Exception:
             cal_mae = float('nan')

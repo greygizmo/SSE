@@ -5,7 +5,6 @@ from datetime import datetime
 from gosales.utils.db import get_db_connection
 from gosales.utils.logger import get_logger
 from gosales.utils import config as cfg
-from gosales.features.utils import filter_to_cutoff, winsorize_series
 from gosales.utils.paths import OUTPUTS_DIR
 from gosales.features.als_embed import customer_als_embeddings
 from gosales.etl.sku_map import division_set
@@ -44,24 +43,40 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
 
     # --- 1. Load Base Data ---
     try:
-        transactions_pd = pd.read_sql("SELECT * FROM fact_transactions", engine)
-        # Ensure order_date is properly converted to datetime
-        transactions_pd['order_date'] = pd.to_datetime(transactions_pd['order_date'])
-        
-        # Filter data for time-based split if cutoff_date is provided
+        division_filter = ", ".join(f"'{d}'" for d in division_set())
+        base_cols = "customer_id, order_date, product_division, product_sku, gross_profit"
+
+        def _read_sql(sql: str, params: dict | None = None) -> pd.DataFrame:
+            chunks = pd.read_sql_query(sql, engine, params=params, chunksize=100_000)
+            frames = [chunk for chunk in chunks]
+            if not frames:
+                return pd.DataFrame()
+            return pd.concat(frames, ignore_index=True)
+
         if cutoff_date:
-            cutoff_dt = pd.to_datetime(cutoff_date)
-            # Split data into feature period (<=cutoff) and prediction period (after cutoff)
-            feature_data = transactions_pd[transactions_pd['order_date'] <= cutoff_dt].copy()
-            prediction_data = transactions_pd[transactions_pd['order_date'] > cutoff_dt].copy()
-            
-            # Calculate prediction window end date
+            feature_sql = (
+                f"SELECT {base_cols} FROM fact_transactions "
+                f"WHERE order_date <= :cutoff AND product_division IN ({division_filter})"
+            )
+            feature_data = _read_sql(feature_sql, {"cutoff": cutoff_date})
+            feature_data["order_date"] = pd.to_datetime(feature_data["order_date"])
+
             from dateutil.relativedelta import relativedelta
-            prediction_end = cutoff_dt + relativedelta(months=prediction_window_months)
-            prediction_data = prediction_data[prediction_data['order_date'] <= prediction_end]
+
+            cutoff_dt = pd.to_datetime(cutoff_date)
+            prediction_end = (cutoff_dt + relativedelta(months=prediction_window_months)).strftime("%Y-%m-%d")
+            pred_sql = (
+                "SELECT customer_id, order_date, product_division FROM fact_transactions "
+                "WHERE order_date > :cutoff AND order_date <= :pred_end "
+                f"AND product_division IN ({division_filter})"
+            )
+            prediction_data = _read_sql(
+                pred_sql, {"cutoff": cutoff_date, "pred_end": prediction_end}
+            )
+            prediction_data["order_date"] = pd.to_datetime(prediction_data["order_date"])
             try:
                 top_divs = (
-                    prediction_data['product_division']
+                    prediction_data["product_division"]
                     .astype(str)
                     .str.rstrip()
                     .value_counts()
@@ -70,22 +85,37 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
                 logger.info("Top product_division in window:\n%s", top_divs.to_string())
             except Exception:
                 pass
-            
-            logger.info(f"Feature data: {len(feature_data)} transactions <= {cutoff_date}")
-            logger.info(f"Prediction data: {len(prediction_data)} transactions in {prediction_window_months}-month window")
+
+            logger.info(
+                f"Feature data: {len(feature_data)} transactions <= {cutoff_date}"
+            )
+            logger.info(
+                f"Prediction data: {len(prediction_data)} transactions in {prediction_window_months}-month window"
+            )
         else:
-            # Use all data for features and target (original behavior)
-            feature_data = transactions_pd.copy()
-            prediction_data = transactions_pd.copy()
-        
-        # Enforce consistent dtypes for join keys
+            feature_sql = (
+                f"SELECT {base_cols} FROM fact_transactions "
+                f"WHERE product_division IN ({division_filter})"
+            )
+            feature_data = _read_sql(feature_sql)
+            feature_data["order_date"] = pd.to_datetime(feature_data["order_date"])
+            prediction_data = feature_data.copy()
+
         transactions = pl.from_pandas(feature_data)
         if "customer_id" in transactions.columns:
-            transactions = transactions.with_columns(pl.col("customer_id").cast(pl.Int64, strict=False))
+            transactions = transactions.with_columns(
+                pl.col("customer_id").cast(pl.Int64, strict=False)
+            )
 
-        customers_pd = pd.read_sql("SELECT customer_id FROM dim_customer", engine)
-        customers_pd["customer_id"] = pd.to_numeric(customers_pd["customer_id"], errors="coerce").astype("Int64")
-        customers = pl.from_pandas(customers_pd).with_columns(pl.col("customer_id").cast(pl.Int64, strict=False))
+        customers_pd = pd.read_sql_query(
+            "SELECT customer_id FROM dim_customer", engine
+        )
+        customers_pd["customer_id"] = pd.to_numeric(
+            customers_pd["customer_id"], errors="coerce"
+        ).astype("Int64")
+        customers = pl.from_pandas(customers_pd).with_columns(
+            pl.col("customer_id").cast(pl.Int64, strict=False)
+        )
     except Exception as e:
         logger.error(f"Failed to read necessary tables from the database: {e}")
         return pl.DataFrame()
@@ -582,7 +612,12 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
     # Optionally join ALS embeddings (feature period <= cutoff)
     try:
         if cfgmod.features.use_als_embeddings and cutoff_date:
-            als_df = customer_als_embeddings(engine, cutoff_date, factors=16)
+            als_df = customer_als_embeddings(
+                engine,
+                cutoff_date,
+                factors=16,
+                lookback_months=cfgmod.features.als_lookback_months,
+            )
             if not als_df.is_empty():
                 # Join on customer_id
                 als_pd = als_df.to_pandas()
@@ -837,7 +872,6 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
     
     # Emit feature catalog artifact for auditing
     try:
-        from gosales.utils.paths import OUTPUTS_DIR
         OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
         fm_pd = feature_matrix.to_pandas()
         catalog = []

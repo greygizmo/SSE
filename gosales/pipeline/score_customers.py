@@ -4,9 +4,9 @@ Customer scoring pipeline that generates ICP scores and whitespace analysis for 
 """
 import polars as pl
 import pandas as pd
-import mlflow.sklearn
 import json
 from pathlib import Path
+import joblib
 
 from gosales.utils.db import get_db_connection
 from gosales.utils.logger import get_logger
@@ -35,18 +35,34 @@ def discover_available_models(models_dir: Path | None = None) -> dict[str, Path]
     root = models_dir or MODELS_DIR
     available: dict[str, Path] = {}
     for p in root.glob("*_model"):
-        meta_div = None
+        div = p.name.replace("_model", "")
+        meta_path = p / "metadata.json"
         try:
-            meta_path = p / "metadata.json"
             if meta_path.exists():
                 with open(meta_path, "r", encoding="utf-8") as f:
                     meta = json.load(f)
                     meta_div = normalize_division(meta.get("division"))
+                    if meta_div:
+                        div = meta_div
         except Exception:
-            meta_div = None
-        div = meta_div if meta_div else p.name.replace("_model", "")
+            pass
         available[div] = p
     return available
+
+
+def _sanitize_features(X: pd.DataFrame) -> pd.DataFrame:
+    """Ensure numeric float dtype; replace infs/NaNs with 0.0 for scoring."""
+    Xc = X.copy()
+    for col in Xc.columns:
+        Xc[col] = pd.to_numeric(Xc[col], errors="coerce")
+    Xc.replace([np.inf, -np.inf], np.nan, inplace=True)
+    return Xc.fillna(0.0).astype(float)
+
+
+def _score_p_icp(model, X: pd.DataFrame) -> np.ndarray:
+    """Predict calibrated probability after sanitizing features."""
+    Xc = _sanitize_features(X)
+    return model.predict_proba(Xc)[:, 1]
 
 def score_customers_for_division(engine, division_name: str, model_path: Path, *, run_manifest: dict | None = None):
     """
@@ -54,23 +70,14 @@ def score_customers_for_division(engine, division_name: str, model_path: Path, *
     """
     logger.info(f"Scoring customers for division: {division_name}")
     
-    # Load model: support MLflow directory or joblib pickle fallback
-    model = None
+    # Load model via joblib pickle
+    pkl = model_path / "model.pkl"
     try:
-        model = mlflow.sklearn.load_model(str(model_path))
-        logger.info(f"Loaded MLflow model from {model_path}")
+        model = joblib.load(pkl)
+        logger.info(f"Loaded joblib model from {pkl}")
     except Exception as e:
-        try:
-            import joblib
-            pkl = model_path / "model.pkl"
-            if pkl.exists():
-                model = joblib.load(pkl)
-                logger.info(f"Loaded joblib model from {pkl}")
-            else:
-                raise FileNotFoundError(f"Missing model.pkl at {pkl}")
-        except Exception as e2:
-            logger.error(f"Failed to load model from {model_path}: {e2}")
-            return pl.DataFrame()
+        logger.error(f"Failed to load model from {pkl}: {e}")
+        return pl.DataFrame()
     
     # Get feature matrix for all customers for the specified division
     # Enforce presence of cutoff and window in metadata; if missing, fail fast
@@ -176,15 +183,6 @@ def score_customers_for_division(engine, division_name: str, model_path: Path, *
     
     # Prepare features for scoring (must match training)
     X = feature_matrix.drop(["customer_id", "bought_in_division"]).to_pandas()
-    # Sanitize features for scoring: numeric only, coerce non-numeric, replace infs and NaNs
-    try:
-        for col in X.columns:
-            if not (pd.api.types.is_integer_dtype(X[col]) or pd.api.types.is_float_dtype(X[col])):
-                X[col] = pd.to_numeric(X[col], errors='coerce')
-        X.replace([float('inf'), float('-inf')], pd.NA, inplace=True)
-        X = X.fillna(0.0)
-    except Exception:
-        pass
     # Align columns to training feature order using saved metadata or feature_list.json
     try:
         train_cols = []
@@ -212,12 +210,7 @@ def score_customers_for_division(engine, division_name: str, model_path: Path, *
         pass
     
     try:
-        # Get the probability of buying from the division
-        # Replace deprecated silent downcasting with explicit inference + fillna
-        import numpy as _np
-        X.replace([_np.inf, -_np.inf], _np.nan, inplace=True)
-        X = X.infer_objects(copy=False).fillna(0.0)
-        probabilities = model.predict_proba(X)[:, 1]
+        probabilities = _score_p_icp(model, X)
 
         # Build scores_df and carry select auxiliary features for ranker
         feature_matrix_pd = feature_matrix.to_pandas()
@@ -244,8 +237,11 @@ def score_customers_for_division(engine, division_name: str, model_path: Path, *
         except Exception:
             pass
         
-        customer_names = pd.read_sql("select customer_id, customer_name from dim_customer", engine)
-        scores_df = scores_df.merge(customer_names, on='customer_id', how='left')
+        customer_names = (
+            pd.read_sql("select customer_id, customer_name from dim_customer", engine)
+            .drop_duplicates(subset="customer_id")
+        )
+        scores_df = scores_df.merge(customer_names, on="customer_id", how="left")
         
         logger.info(f"Successfully scored {len(scores_df)} customers for {division_name}")
         return pl.from_pandas(scores_df)
@@ -255,51 +251,72 @@ def score_customers_for_division(engine, division_name: str, model_path: Path, *
         return pl.DataFrame()
 
 def generate_whitespace_opportunities(engine):
-    """
-    Generate whitespace opportunities based on division purchase patterns.
-    This is a simplified version and can be enhanced.
+    """Generate whitespace opportunities with a lightweight scoring heuristic.
+
+    This heuristic blends normalized purchase frequency, recency and total
+    gross profit to produce a ``whitespace_score`` in ``[0, 1]``.  Each
+    feature is scaled to ``[0, 1]`` across all customers and combined using
+    weights ``0.5, 0.3, 0.2`` respectively.
     """
     logger.info("Generating whitespace opportunities...")
     try:
-        transactions = pl.from_pandas(pd.read_sql("SELECT * FROM fact_transactions", engine))
+        transactions = pl.from_pandas(
+            pd.read_sql("SELECT * FROM fact_transactions", engine, parse_dates=["order_date"])
+        )
         customers = pl.from_pandas(pd.read_sql("SELECT * FROM dim_customer", engine))
-        # Align join key dtypes
         if "customer_id" in transactions.columns:
             transactions = transactions.with_columns(pl.col("customer_id").cast(pl.Int64, strict=False))
         if "customer_id" in customers.columns:
             customers = customers.with_columns(pl.col("customer_id").cast(pl.Int64, strict=False))
-        
+
         customer_summary = (
             transactions
             .group_by("customer_id")
             .agg([
                 pl.col("product_division").unique().alias("divisions_bought"),
+                pl.len().alias("purchase_count"),
+                pl.max("order_date").alias("last_purchase"),
                 pl.sum("gross_profit").alias("total_gp"),
             ])
         )
-        
+
+        if customer_summary.is_empty():
+            return pl.DataFrame()
+
+        freq_max = max(customer_summary["purchase_count"].max(), 1)
+        gp_max = max(customer_summary["total_gp"].max(), 1.0)
+        ref_date = transactions["order_date"].max()
+        min_date = transactions["order_date"].min()
+        max_days = max((ref_date - min_date).days, 1)
+        customer_summary = customer_summary.with_columns([
+            (pl.col("purchase_count") / freq_max).alias("freq_norm"),
+            (1 - ((pl.lit(ref_date) - pl.col("last_purchase")).dt.total_days() / max_days)).clip(0.0, 1.0).alias("recency_norm"),
+            (pl.col("total_gp") / gp_max).alias("gp_norm"),
+        ])
+
         all_divisions = transactions.select("product_division").unique()["product_division"].to_list()
-        
+
         opportunities = []
         for row in customer_summary.iter_rows(named=True):
             not_bought = [div for div in all_divisions if div not in row["divisions_bought"]]
+            base_score = 0.5 * row["freq_norm"] + 0.3 * row["recency_norm"] + 0.2 * row["gp_norm"]
+            score = float(max(0.0, min(1.0, base_score)))
             for division in not_bought:
-                score = 0.5 # Placeholder logic
-                if row["total_gp"] > 10000: score = 0.8
-                elif row["total_gp"] > 1000: score = 0.6
-                
                 opportunities.append({
                     "customer_id": row["customer_id"],
                     "whitespace_division": division,
                     "whitespace_score": score,
-                    "reason": f"Customer has high engagement but has not bought from the {division} division."
+                    "reason": f"Customer has high engagement but has not bought from the {division} division.",
                 })
-        
+
         if not opportunities:
             return pl.DataFrame()
 
-        whitespace_df = pl.DataFrame(opportunities).with_columns(pl.col("customer_id").cast(pl.Int64, strict=False))\
+        whitespace_df = (
+            pl.DataFrame(opportunities)
+            .with_columns(pl.col("customer_id").cast(pl.Int64, strict=False))
             .join(customers, on="customer_id", how="left")
+        )
         logger.info(f"Generated {len(whitespace_df)} whitespace opportunities")
         return whitespace_df
 
@@ -431,7 +448,8 @@ def generate_scoring_outputs(engine, *, run_manifest: dict | None = None):
                     if scores_num.size > 0:
                         for i, k in enumerate([5, 10, 20]):
                             kk = max(1, int(scores_num.size * (k / 100.0)))
-                            thr = float(np.sort(scores_num)[-kk])
+                            pos = scores_num.size - kk
+                            thr = float(np.partition(scores_num, pos)[pos])
                             count = int((pd.to_numeric(ranked['score'], errors='coerce') >= thr).sum())
                             thresholds[i]["threshold"] = thr
                             thresholds[i]["count"] = count
@@ -468,14 +486,16 @@ def generate_scoring_outputs(engine, *, run_manifest: dict | None = None):
                     if mode == 'top_percent':
                         if len(ranked) > 0:
                             ksel = max(1, int(len(ranked) * (cfg.modeling.capacity_percent / 100.0)))
-                            thr_sel = float(np.sort(ranked['score'].values)[-ksel])
+                            pos = len(ranked) - ksel
+                            thr_sel = float(np.partition(ranked['score'].values, pos)[pos])
                             selected = ranked[ranked['score'] >= thr_sel].copy()
                         else:
                             selected = ranked
                     elif mode in ('per_rep','hybrid'):
                         # Fallback to top_percent until rep attribution/interleave available
                         ksel = max(1, int(len(ranked) * (cfg.modeling.capacity_percent / 100.0)))
-                        thr_sel = float(np.sort(ranked['score'].values)[-ksel]) if len(ranked) else float('nan')
+                        pos = len(ranked) - ksel
+                        thr_sel = float(np.partition(ranked['score'].values, pos)[pos]) if len(ranked) else float('nan')
                         selected = ranked[ranked['score'] >= thr_sel].copy()
 
                     sel_name = f"whitespace_selected_{cutoff_tag}.csv" if cutoff_tag else "whitespace_selected.csv"

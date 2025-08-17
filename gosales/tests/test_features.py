@@ -6,7 +6,10 @@ from sqlalchemy import create_engine
 from gosales.features.engine import create_feature_matrix
 from gosales.features.build import main as build_cli
 from click.testing import CliRunner
-from gosales.utils.paths import OUTPUTS_DIR
+from gosales.utils.config import load_config
+import json
+import yaml
+import polars as pl
 
 
 def _seed(engine):
@@ -31,14 +34,63 @@ def test_feature_window_and_target(tmp_path):
 
 
 def test_feature_cli_checksum(tmp_path, monkeypatch):
-    # Use temp output dir by monkeypatching OUTPUTS_DIR if needed
     eng = create_engine(f"sqlite:///{tmp_path}/test_features_cli.db")
     _seed(eng)
-    # Build via engine first
+    monkeypatch.setattr("gosales.features.build.get_db_connection", lambda: eng)
+    out_dir = tmp_path / "out_cli"
+    monkeypatch.setattr("gosales.features.build.OUTPUTS_DIR", out_dir)
+    monkeypatch.setattr("gosales.ops.run.OUTPUTS_DIR", out_dir)
     fm = create_feature_matrix(eng, "Solidworks", cutoff_date="2024-01-31", prediction_window_months=1)
     assert not fm.is_empty()
-    # Run CLI
     runner = CliRunner()
-    result = runner.invoke(build_cli, ["--division","Solidworks","--cutoff","2024-01-31"]) 
+    cfg = load_config()
+    cfg.features.use_als_embeddings = False
+    cfg_path = tmp_path / "config_cli.yaml"
+    with open(cfg_path, "w", encoding="utf-8") as f:
+        yaml.safe_dump(cfg.to_dict(), f)
+    result = runner.invoke(
+        build_cli,
+        ["--division", "Solidworks", "--cutoff", "2024-01-31", "--config", str(cfg_path)],
+    )
     assert result.exit_code == 0
+
+
+def test_cli_config_override_persist(tmp_path, monkeypatch):
+    out_dir = tmp_path / "out"
+    monkeypatch.setattr("gosales.features.build.OUTPUTS_DIR", out_dir)
+    monkeypatch.setattr("gosales.ops.run.OUTPUTS_DIR", out_dir)
+    monkeypatch.setattr("gosales.features.build.get_db_connection", lambda: None)
+
+    def fake_create_feature_matrix(engine, division, cut, pred_win):
+        return pl.DataFrame(
+            {
+                "customer_id": [1, 2],
+                "rfm__div__gp_sum__3m": [100.0, 50.0],
+                "rfm__div__gp_sum__6m": [100.0, 50.0],
+                "rfm__div__gp_sum__12m": [100.0, 50.0],
+                "rfm__div__gp_sum__24m": [100.0, 50.0],
+            }
+        )
+
+    monkeypatch.setattr("gosales.features.build.create_feature_matrix", fake_create_feature_matrix)
+
+    cfg = load_config()
+    cfg.features.gp_winsor_p = 0.5
+    cfg.features.use_als_embeddings = False
+    cfg_path = tmp_path / "config.yaml"
+    with open(cfg_path, "w", encoding="utf-8") as f:
+        yaml.safe_dump(cfg.to_dict(), f)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        build_cli,
+        ["--division", "Solidworks", "--cutoff", "2024-01-31", "--config", str(cfg_path)],
+    )
+    assert result.exit_code == 0
+
+    stats_path = out_dir / "feature_stats_solidworks_2024-01-31.json"
+    assert stats_path.exists()
+    with open(stats_path, "r", encoding="utf-8") as f:
+        stats = json.load(f)
+    assert stats["winsor_caps"]["rfm__div__gp_sum__3m"]["upper"] == 75.0
 

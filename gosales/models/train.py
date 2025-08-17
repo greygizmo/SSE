@@ -110,6 +110,82 @@ def _drop_high_correlation(X: pd.DataFrame, threshold: float = 0.995) -> tuple[p
         return X, dropped_pairs
 
 
+def _maybe_export_shap(
+    model,
+    X_final: pd.DataFrame,
+    df_final: pd.DataFrame,
+    division: str,
+    feature_names: list[str],
+    shap_sample: int,
+    shap_max_rows: int,
+    seed: int,
+) -> dict[str, str]:
+    """Compute and export SHAP summaries if enabled.
+
+    Returns a mapping of artifact filenames to their paths. When ``shap_sample`` is
+    0 or the dataset size exceeds ``shap_max_rows`` the computation is skipped and a
+    warning logged.
+    """
+    artifacts: dict[str, str] = {}
+    if shap_sample <= 0:
+        logger.warning("SHAP sample N is zero; skipping SHAP computation")
+        return artifacts
+    if len(X_final) > shap_max_rows:
+        logger.warning(
+            "Skipping SHAP: dataset has %d rows exceeding threshold %d",
+            len(X_final),
+            shap_max_rows,
+        )
+        return artifacts
+    if not _HAS_SHAP:
+        logger.warning("SHAP library not available; skipping SHAP computation")
+        return artifacts
+
+    base = getattr(model, "base_estimator", None)
+    if base is None and hasattr(model, "estimator"):
+        base = model.estimator
+    if base is None:
+        base = model
+    if not hasattr(base, "predict_proba"):
+        logger.warning("Model does not support SHAP; skipping")
+        return artifacts
+
+    sample_n = min(shap_sample, len(X_final))
+    rng = np.random.RandomState(seed)
+    sample_idx = rng.choice(len(X_final), size=sample_n, replace=False)
+    X_sample = X_final.iloc[sample_idx]
+    cust_ids = df_final.iloc[sample_idx]["customer_id"].values
+
+    try:
+        if isinstance(base, LGBMClassifier):
+            explainer = shap.TreeExplainer(base)
+            shap_vals = explainer.shap_values(X_sample)
+            vals = shap_vals[1] if isinstance(shap_vals, list) and len(shap_vals) == 2 else shap_vals
+        elif isinstance(base, LogisticRegression):
+            explainer = shap.LinearExplainer(base, X_sample)
+            vals = explainer.shap_values(X_sample)
+        else:
+            logger.warning("Unsupported model type for SHAP; skipping")
+            return artifacts
+
+        OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+        mean_abs = np.mean(np.abs(vals), axis=0)
+        shap_global = OUTPUTS_DIR / f"shap_global_{division.lower()}.csv"
+        pd.DataFrame({"feature": feature_names, "mean_abs_shap": mean_abs})\
+            .sort_values("mean_abs_shap", ascending=False)\
+            .to_csv(shap_global, index=False)
+        artifacts[shap_global.name] = str(shap_global)
+
+        sample_df = pd.DataFrame(vals, columns=feature_names)
+        sample_df.insert(0, "customer_id", cust_ids)
+        shap_sample_path = OUTPUTS_DIR / f"shap_sample_{division.lower()}.csv"
+        sample_df.to_csv(shap_sample_path, index=False)
+        artifacts[shap_sample_path.name] = str(shap_sample_path)
+    except Exception as e:
+        logger.warning(f"Failed SHAP export: {e}")
+    return artifacts
+
+
 def _emit_diagnostics(out_dir: Path, division: str, context: dict) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     try:
@@ -131,9 +207,10 @@ def _calibrate(clf, X_train: pd.DataFrame, y_train: pd.Series, X_valid: pd.DataF
 @click.option("--window-months", default=6, type=int)
 @click.option("--models", default="logreg,lgbm")
 @click.option("--calibration", default="platt,isotonic")
+@click.option("--shap-sample", default=0, type=int, help="Rows to sample for SHAP; 0 disables")
 @click.option("--config", default=str((Path(__file__).parents[1] / "config.yaml").resolve()))
 @click.option("--dry-run/--no-dry-run", default=False, help="Skip training; only verify inputs and emit planned artifacts to manifest")
-def main(division: str, cutoffs: str, window_months: int, models: str, calibration: str, config: str, dry_run: bool) -> None:
+def main(division: str, cutoffs: str, window_months: int, models: str, calibration: str, shap_sample: int, config: str, dry_run: bool) -> None:
     cfg = load_config(config)
     cut_list = [c.strip() for c in cutoffs.split(",") if c.strip()]
     OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -493,38 +570,18 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
         except Exception:
             pass
 
-        # SHAP summaries
-        try:
-            # Use base estimator if present
-            base = getattr(model, "base_estimator", None)
-            if base is None and hasattr(model, "estimator"):
-                base = model.estimator
-            if _HAS_SHAP and base is not None and hasattr(base, 'predict_proba'):
-                if isinstance(base, LGBMClassifier):
-                    explainer = shap.TreeExplainer(base)
-                    shap_vals = explainer.shap_values(X_final)
-                    vals = shap_vals[1] if isinstance(shap_vals, list) and len(shap_vals) == 2 else shap_vals
-                    mean_abs = np.mean(np.abs(vals), axis=0)
-                    shap_global = OUTPUTS_DIR / f"shap_global_{division.lower()}.csv"
-                    pd.DataFrame({"feature": feature_names, "mean_abs_shap": mean_abs}).sort_values("mean_abs_shap", ascending=False).to_csv(shap_global, index=False)
-                    artifacts[shap_global.name] = str(shap_global)
-                    # sample
-                    sample_n = min(200, len(X_final))
-                    sample_idx = np.random.RandomState(cfg.modeling.seed).choice(len(X_final), size=sample_n, replace=False)
-                    sample = pd.DataFrame(vals[sample_idx], columns=feature_names)
-                    sample.insert(0, 'customer_id', df_final.iloc[sample_idx]['customer_id'].values)
-                    shap_sample = OUTPUTS_DIR / f"shap_sample_{division.lower()}.csv"
-                    sample.to_csv(shap_sample, index=False)
-                    artifacts[shap_sample.name] = str(shap_sample)
-                elif isinstance(base, LogisticRegression):
-                    explainer = shap.LinearExplainer(base, X_final)
-                    vals = explainer.shap_values(X_final)
-                    mean_abs = np.mean(np.abs(vals), axis=0)
-                    shap_global = OUTPUTS_DIR / f"shap_global_{division.lower()}.csv"
-                    pd.DataFrame({"feature": feature_names, "mean_abs_shap": mean_abs}).sort_values("mean_abs_shap", ascending=False).to_csv(shap_global, index=False)
-                    artifacts[shap_global.name] = str(shap_global)
-        except Exception as e:
-            logger.warning(f"Failed SHAP export: {e}")
+        artifacts.update(
+            _maybe_export_shap(
+                model,
+                X_final,
+                df_final,
+                division,
+                feature_names,
+                shap_sample,
+                cfg.modeling.shap_max_rows,
+                cfg.modeling.seed,
+            )
+        )
 
         # Model card / metrics
         # Model card / metrics
