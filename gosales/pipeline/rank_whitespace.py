@@ -88,7 +88,6 @@ def _compute_expected_value(df: pd.DataFrame, cfg=None) -> pd.Series:
     return _percentile_normalize(raw)
 
 
-<<<<<<< HEAD
 def _score_p_icp(df: pd.DataFrame, model, feat_cols: Iterable[str] | None = None) -> pd.Series:
     """Score calibrated ICP probabilities using ``model``.
 
@@ -125,7 +124,7 @@ def _score_p_icp(df: pd.DataFrame, model, feat_cols: Iterable[str] | None = None
             X = num
     X = X.apply(pd.to_numeric, errors="coerce").fillna(0.0)
     return pd.Series(model.predict_proba(X)[:, 1], index=df.index)
-=======
+
 def _apply_eligibility(df: pd.DataFrame, cfg) -> tuple[pd.DataFrame, dict]:
     """Apply whitespace eligibility rules and track exclusion counts.
 
@@ -181,7 +180,6 @@ def _apply_eligibility(df: pd.DataFrame, cfg) -> tuple[pd.DataFrame, dict]:
     else:
         logger.info("Eligibility applied: %s kept, %s dropped", counts["kept_rows"], dropped)
     return df[mask].copy(), counts
->>>>>>> a42de1b (test: verify eligibility counts add up)
 
 
 def _scale_weights_by_coverage(base_weights: Iterable[float], als_norm: pd.Series, lift_norm: pd.Series, threshold: float = 0.30) -> Tuple[List[float], Dict[str, float]]:
