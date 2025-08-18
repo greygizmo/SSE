@@ -670,9 +670,40 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
             feature_matrix_pd[f'rfm__all__gp_sum__{w}m'] = feature_matrix_pd[f'gp_sum_last_{w}m']
         if f'gp_mean_last_{w}m' in feature_matrix_pd.columns:
             feature_matrix_pd[f'rfm__all__gp_mean__{w}m'] = feature_matrix_pd[f'gp_mean_last_{w}m']
-        # Division scope
-        if f'rfm__div__tx_n__{w}m' not in feature_matrix_pd.columns and f'rfm__div__tx_n__{w}m' in feature_matrix_pd.columns:
-            pass
+    # Fallback: if key RFM columns are missing, recompute directly from fd
+    try:
+        for w in window_months:
+            start_dt = cutoff_dt - pd.DateOffset(months=w)
+            mask = (fd['order_date'] > start_dt) & (fd['order_date'] <= cutoff_dt)
+            sub = fd.loc[mask, ['customer_id', 'gross_profit']]
+            # tx_n
+            if f'rfm__all__tx_n__{w}m' not in feature_matrix_pd.columns:
+                tx_n = sub.groupby('customer_id')['gross_profit'].count().rename(f'rfm__all__tx_n__{w}m').reset_index()
+                feature_matrix_pd = feature_matrix_pd.merge(tx_n, on='customer_id', how='left')
+                feature_matrix_pd[f'rfm__all__tx_n__{w}m'] = feature_matrix_pd[f'rfm__all__tx_n__{w}m'].fillna(0)
+            # gp_sum
+            if f'rfm__all__gp_sum__{w}m' not in feature_matrix_pd.columns:
+                gp_sum = sub.groupby('customer_id')['gross_profit'].sum().rename(f'rfm__all__gp_sum__{w}m').reset_index()
+                feature_matrix_pd = feature_matrix_pd.merge(gp_sum, on='customer_id', how='left')
+                feature_matrix_pd[f'rfm__all__gp_sum__{w}m'] = feature_matrix_pd[f'rfm__all__gp_sum__{w}m'].fillna(0.0)
+            # gp_mean
+            if f'rfm__all__gp_mean__{w}m' not in feature_matrix_pd.columns:
+                gp_mean = sub.groupby('customer_id')['gross_profit'].mean().rename(f'rfm__all__gp_mean__{w}m').reset_index()
+                feature_matrix_pd = feature_matrix_pd.merge(gp_mean, on='customer_id', how='left')
+                feature_matrix_pd[f'rfm__all__gp_mean__{w}m'] = feature_matrix_pd[f'rfm__all__gp_mean__{w}m'].fillna(0.0)
+    except Exception:
+        pass
+
+    # Fallback: ensure margin proxy columns exist based on rfm__all__gp_sum__{w}m
+    try:
+        for w in window_months:
+            col_sum = f'rfm__all__gp_sum__{w}m'
+            col_margin = f'margin__all__gp_pct__{w}m'
+            if (col_sum in feature_matrix_pd.columns) and (col_margin not in feature_matrix_pd.columns):
+                s = pd.to_numeric(feature_matrix_pd[col_sum], errors='coerce').fillna(0.0)
+                feature_matrix_pd[col_margin] = s.astype(float) / (s.abs().astype(float) + 1e-9)
+    except Exception:
+        pass
     # Lifecycle naming
     if 'tenure_days' in feature_matrix_pd.columns:
         feature_matrix_pd['lifecycle__all__tenure_days__life'] = feature_matrix_pd['tenure_days']
@@ -743,16 +774,16 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
     except Exception:
         pass
 
-    # Winsorize monetary gp_sum features based on config
+    # Winsorize monetary gp_sum features based on config (stable quantiles)
     try:
         p = cfg.load_config().features.gp_winsor_p
         for w in window_months:
             for scope in ['all','div']:
                 col = f'rfm__{scope}__gp_sum__{w}m'
                 if col in feature_matrix_pd.columns:
-                    s = feature_matrix_pd[col]
-                    lower = s.quantile(0.0)
-                    upper = s.quantile(p)
+                    s = pd.to_numeric(feature_matrix_pd[col], errors='coerce').fillna(0.0)
+                    lower = float(np.quantile(s.values, 0.0))
+                    upper = float(np.quantile(s.values, p))
                     feature_matrix_pd[col] = s.clip(lower=lower, upper=upper)
     except Exception:
         pass
