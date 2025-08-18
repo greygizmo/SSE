@@ -100,3 +100,12 @@ def test_topk_threshold_partition_performance():
     assert part_time < sort_time
 
 
+def test_lift_at_k_ties_consistent():
+    """Tied scores should yield deterministic lift values across runs."""
+    y = np.array([1, 0, 1, 0, 1, 0])
+    scores = np.array([0.5, 0.5, 0.5, 0.5, 0.2, 0.1])
+    first = compute_lift_at_k(y, scores, 50)
+    for _ in range(5):
+        assert compute_lift_at_k(y, scores, 50) == first
+
+
