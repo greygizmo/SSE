@@ -273,15 +273,18 @@ def generate_whitespace_opportunities(engine):
         if "customer_id" in customers.columns:
             customers = customers.with_columns(pl.col("customer_id").cast(pl.Int64, strict=False))
 
+        has_dates = "order_date" in transactions.columns
+        agg_exprs = [
+            pl.col("product_division").unique().alias("divisions_bought"),
+            pl.len().alias("purchase_count"),
+            pl.sum("gross_profit").alias("total_gp"),
+        ]
+        if has_dates:
+            agg_exprs.append(pl.max("order_date").alias("last_purchase"))
         customer_summary = (
             transactions
             .group_by("customer_id")
-            .agg([
-                pl.col("product_division").unique().alias("divisions_bought"),
-                pl.len().alias("purchase_count"),
-                pl.max("order_date").alias("last_purchase"),
-                pl.sum("gross_profit").alias("total_gp"),
-            ])
+            .agg(agg_exprs)
         )
 
         if customer_summary.is_empty():
@@ -289,14 +292,21 @@ def generate_whitespace_opportunities(engine):
 
         freq_max = max(customer_summary["purchase_count"].max(), 1)
         gp_max = max(customer_summary["total_gp"].max(), 1.0)
-        ref_date = transactions["order_date"].max()
-        min_date = transactions["order_date"].min()
-        max_days = max((ref_date - min_date).days, 1)
-        customer_summary = customer_summary.with_columns([
-            (pl.col("purchase_count") / freq_max).alias("freq_norm"),
-            (1 - ((pl.lit(ref_date) - pl.col("last_purchase")).dt.total_days() / max_days)).clip(0.0, 1.0).alias("recency_norm"),
-            (pl.col("total_gp") / gp_max).alias("gp_norm"),
-        ])
+        if has_dates:
+            ref_date = transactions["order_date"].max()
+            min_date = transactions["order_date"].min()
+            max_days = max((ref_date - min_date).days, 1)
+            customer_summary = customer_summary.with_columns([
+                (pl.col("purchase_count") / freq_max).alias("freq_norm"),
+                (1 - ((pl.lit(ref_date) - pl.col("last_purchase")).dt.total_days() / max_days)).clip(0.0, 1.0).alias("recency_norm"),
+                (pl.col("total_gp") / gp_max).alias("gp_norm"),
+            ])
+        else:
+            customer_summary = customer_summary.with_columns([
+                (pl.col("purchase_count") / freq_max).alias("freq_norm"),
+                pl.lit(1.0).alias("recency_norm"),
+                (pl.col("total_gp") / gp_max).alias("gp_norm"),
+            ])
 
         all_divisions = (
             transactions
