@@ -46,7 +46,6 @@ def test_lift_at_k_monotonic():
     lift10 = compute_lift_at_k(y, scores, 10)
     assert lift10 > 1.0
 
-
 def test_lift_at_k_zero_base_nan_default():
     y = np.zeros(50)
     scores = np.linspace(0, 1, 50)
@@ -79,5 +78,25 @@ def test_weighted_lift_handles_nan_and_zero_base():
     weights = np.array([1.0, np.nan, 2.0, 1.0])
     result = compute_weighted_lift_at_k(y, scores, weights, 50)
     assert np.isnan(result)
+
+def test_topk_threshold_partition_performance():
+    rng = np.random.RandomState(123)
+    scores = rng.rand(100000)
+    k_percent = 10
+    k = max(1, int(len(scores) * k_percent / 100.0))
+
+    # Baseline sort-based threshold
+    baseline = np.sort(scores)[-k]
+
+    # New partition-based threshold via helper
+    thr = compute_topk_threshold(scores, k_percent)
+    assert np.isclose(thr, baseline)
+
+    import timeit
+
+    sort_time = timeit.timeit(lambda: np.sort(scores)[-k], number=3)
+    part_time = timeit.timeit(lambda: np.partition(scores, -k)[-k], number=3)
+
+    assert part_time < sort_time
 
 
