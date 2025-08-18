@@ -7,12 +7,14 @@ from gosales.utils.paths import OUTPUTS_DIR
 
 logger = get_logger(__name__)
 
-def build_als(engine, output_path):
+
+def build_als(engine, output_path, top_n: int = 10):
     """Uses alternating least squares to find whitespace opportunities.
 
     Args:
         engine (sqlalchemy.engine.base.Engine): The database engine.
         output_path (str): The path to the output CSV file.
+        top_n (int, optional): Number of recommendations to generate per user.
     """
     logger.info("Building ALS model...")
 
@@ -27,41 +29,44 @@ def build_als(engine, output_path):
         .collect()
     )
 
-    # Encode users and items to indices while retaining mappings
-    user_ids = user_item["customer_id"].to_list()
-    product_names = user_item["product_name"].to_list()
+    # Build mappings between ids and indices (deterministic order via unique())
+    user_ids = user_item["customer_id"].unique().to_list()
+    product_names = user_item["product_name"].unique().to_list()
+    user_id_to_idx = {uid: idx for idx, uid in enumerate(user_ids)}
+    item_name_to_idx = {pname: idx for idx, pname in enumerate(product_names)}
+    idx_to_user_id = {idx: uid for uid, idx in user_id_to_idx.items()}
+    idx_to_product_name = {idx: pname for pname, idx in item_name_to_idx.items()}
 
-    user_encoding = {u: i for i, u in enumerate(sorted(set(user_ids)))}
-    item_encoding = {p: i for i, p in enumerate(sorted(set(product_names)))}
+    user_item = user_item.with_columns(
+        pl.col("customer_id").map_elements(user_id_to_idx.get).alias("user_idx"),
+        pl.col("product_name").map_elements(item_name_to_idx.get).alias("item_idx"),
+    )
 
-    user_mapping = {i: u for u, i in user_encoding.items()}
-    item_mapping = {i: p for p, i in item_encoding.items()}
+    # Create a sparse matrix (users x items)
+    sparse_matrix = coo_matrix(
+        (
+            user_item["count"].to_list(),
+            (user_item["user_idx"].to_list(), user_item["item_idx"].to_list()),
+        ),
+        shape=(len(user_ids), len(product_names)),
+    ).tocsr()
 
-    user_codes = pl.Series([user_encoding[u] for u in user_ids])
-    item_codes = pl.Series([item_encoding[p] for p in product_names])
-
-    # Create a sparse matrix and convert to CSR for implicit
-    counts = user_item["count"].to_list()
-    sparse_matrix = coo_matrix((counts, (user_codes.to_list(), item_codes.to_list()))).tocsr()
-
-    # Train the ALS model
-    model = implicit.als.AlternatingLeastSquares(factors=50)
+    # Train the ALS model (deterministic)
+    model = implicit.als.AlternatingLeastSquares(factors=50, random_state=42)
     model.fit(sparse_matrix)
 
-    # Get the user and item factors
-    user_factors = model.user_factors
-    item_factors = model.item_factors
-
-    # Get the recommendations
-    recommendations = model.recommend_all(sparse_matrix)
-
-    # Map recommendations back to IDs and names
+    # Generate top-N recommendations per user
     records = []
-    for user_idx, item_indices in enumerate(recommendations):
-        cid = user_mapping.get(user_idx)
-        for item_idx in item_indices:
-            pname = item_mapping.get(item_idx)
-            records.append({"customer_id": cid, "product_name": pname})
+    for user_idx, user_id in enumerate(user_ids):
+        item_indices, scores = model.recommend(user_idx, sparse_matrix[user_idx], N=top_n)
+        for item_idx, score in zip(item_indices, scores):
+            records.append(
+                {
+                    "customer_id": idx_to_user_id.get(user_idx, user_id),
+                    "product_name": idx_to_product_name.get(item_idx, product_names[item_idx]),
+                    "score": float(score),
+                }
+            )
 
     # Save the recommendations to a CSV file
     pl.DataFrame(records).write_csv(output_path)
