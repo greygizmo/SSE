@@ -78,21 +78,33 @@ def _apply_eligibility(df: pd.DataFrame) -> Tuple[pd.DataFrame, np.ndarray | Non
 def _compute_als_norm(df: pd.DataFrame, cfg=None, owner_centroid: np.ndarray | None = None) -> pd.Series:
     """Compute ALS similarity normalized to [0,1].
 
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Candidate dataframe containing ALS embedding columns.
-    owner_centroid : np.ndarray | None
-        Centroid vector representing pre-cutoff owners. When None, returns zeros.
-    cfg : optional config (unused, kept for backward compatibility)
+    - If ``owner_centroid`` is provided, use it for similarity.
+    - Else, prefer centroid of rows where ``owned_division_pre_cutoff`` is True.
+      Fall back to global centroid if no owned rows.
     """
     als_cols = [c for c in df.columns if c.startswith("als_f")]
-    if not als_cols or owner_centroid is None:
+    if not als_cols:
         return pd.Series(np.zeros(len(df)), index=df.index, dtype=float)
     mat = df[als_cols].astype(float)
     if mat.empty:
         return pd.Series(np.zeros(len(df)), index=df.index, dtype=float)
-    centroid_vec = np.asarray(owner_centroid, dtype=float)
+
+    if owner_centroid is not None:
+        centroid_vec = np.asarray(owner_centroid, dtype=float)
+    else:
+        # Prefer owned-pre-cutoff centroid when available
+        if 'owned_division_pre_cutoff' in df.columns:
+            try:
+                base = mat[df['owned_division_pre_cutoff'].astype(bool)]
+                if not base.empty:
+                    centroid_vec = base.mean(axis=0).to_numpy(dtype=float)
+                else:
+                    centroid_vec = mat.mean(axis=0).to_numpy(dtype=float)
+            except Exception:
+                centroid_vec = mat.mean(axis=0).to_numpy(dtype=float)
+        else:
+            centroid_vec = mat.mean(axis=0).to_numpy(dtype=float)
+
     m = mat.to_numpy(dtype=float)
     # Normalize embeddings and centroid to unit length prior to similarity calc
     m_norm = normalize(m, axis=1)
