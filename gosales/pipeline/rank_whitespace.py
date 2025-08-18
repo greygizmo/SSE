@@ -41,8 +41,8 @@ def _compute_affinity_lift(df: pd.DataFrame, col: str = "mb_lift_max") -> pd.Ser
 ALS_CENTROID_PATH = OUTPUTS_DIR / "als_owner_centroid.npy"
 
 
-def _apply_eligibility(df: pd.DataFrame) -> Tuple[pd.DataFrame, np.ndarray | None]:
-    """Filter out ineligible rows while capturing ALS centroid of owners.
+def _apply_eligibility_and_centroid(df: pd.DataFrame) -> Tuple[pd.DataFrame, np.ndarray | None]:
+    """Filter out simple ineligible rows (owned pre-cutoff) while capturing ALS owner centroid.
 
     Returns the filtered dataframe and the centroid vector. If no owner embeddings
     are present, attempts to load a previously computed centroid from disk.
@@ -314,8 +314,8 @@ def rank_whitespace(inputs: RankInputs, *, weights: Iterable[float] = (0.60, 0.2
     df = inputs.scores.copy()
     if df.empty:
         return df
-    # Apply eligibility rules and capture ALS centroid
-    df, als_centroid = _apply_eligibility(df)
+    # Apply simple ownership eligibility and capture ALS centroid
+    df, als_centroid = _apply_eligibility_and_centroid(df)
     if df.empty:
         return df
     # Per-division normalization of p_icp to percentile
