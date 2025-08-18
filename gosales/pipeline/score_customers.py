@@ -4,9 +4,13 @@ Customer scoring pipeline that generates ICP scores and whitespace analysis for 
 """
 import polars as pl
 import pandas as pd
+import mlflow
+import mlflow.sklearn
 import json
 from pathlib import Path
 import joblib
+import mlflow
+import mlflow.sklearn
 
 from gosales.utils.db import get_db_connection
 from gosales.utils.logger import get_logger
@@ -48,8 +52,7 @@ def discover_available_models(models_dir: Path | None = None) -> dict[str, Path]
             pass
         available[div] = p
     return available
-
-
+ 
 def _sanitize_features(X: pd.DataFrame) -> pd.DataFrame:
     """Ensure numeric float dtype; replace infs/NaNs with 0.0 for scoring."""
     Xc = X.copy()
@@ -60,13 +63,34 @@ def _sanitize_features(X: pd.DataFrame) -> pd.DataFrame:
 
 
 def _score_p_icp(model, X: pd.DataFrame) -> np.ndarray:
-    """Predict calibrated probability after sanitizing features."""
-    Xc = _sanitize_features(X)
-    return model.predict_proba(Xc)[:, 1]
+    """Predict calibrated probability after sanitizing features.
 
-def score_customers_for_division(engine, division_name: str, model_path: Path, *, run_manifest: dict | None = None):
+    Falls back to decision_function (logistic transform) or predict() if needed.
     """
-    Score all customers for a specific division using a trained ML model.
+    Xc = _sanitize_features(X)
+    import numpy as _np
+    if hasattr(model, "predict_proba"):
+        return model.predict_proba(Xc)[:, 1]
+    if hasattr(model, "decision_function"):
+        margins = model.decision_function(Xc)
+        return 1 / (1 + _np.exp(-margins))
+    preds = model.predict(Xc)
+    return _np.asarray(preds, dtype=float)
+
+
+def score_customers_for_division(
+    engine,
+    division_name: str,
+    model_path: Path,
+    *,
+    run_manifest: dict | None = None,
+    cutoff_date: str | None = None,
+    prediction_window_months: int | None = None,
+):
+    """Score all customers for a specific division using a trained ML model.
+
+    Requires ``cutoff_date`` and ``prediction_window_months`` in the model's
+    ``metadata.json``; raises ``MissingModelMetadataError`` if absent.
     """
     logger.info(f"Scoring customers for division: {division_name}")
     
@@ -99,7 +123,9 @@ def score_customers_for_division(engine, division_name: str, model_path: Path, *
     cutoff = meta.get("cutoff_date")
     window_months = meta.get("prediction_window_months")
     if cutoff is None or window_months is None:
-        msg = f"Required metadata fields missing for {division_name}: cutoff_date or prediction_window_months"
+        msg = (
+            f"Required metadata fields missing for {division_name}: cutoff_date or prediction_window_months"
+        )
         logger.error(msg)
         if run_manifest is not None:
             run_manifest.setdefault("alerts", []).append({
@@ -269,15 +295,18 @@ def generate_whitespace_opportunities(engine):
         if "customer_id" in customers.columns:
             customers = customers.with_columns(pl.col("customer_id").cast(pl.Int64, strict=False))
 
+        has_dates = "order_date" in transactions.columns
+        agg_exprs = [
+            pl.col("product_division").unique().alias("divisions_bought"),
+            pl.len().alias("purchase_count"),
+            pl.sum("gross_profit").alias("total_gp"),
+        ]
+        if has_dates:
+            agg_exprs.append(pl.max("order_date").alias("last_purchase"))
         customer_summary = (
             transactions
             .group_by("customer_id")
-            .agg([
-                pl.col("product_division").unique().alias("divisions_bought"),
-                pl.len().alias("purchase_count"),
-                pl.max("order_date").alias("last_purchase"),
-                pl.sum("gross_profit").alias("total_gp"),
-            ])
+            .agg(agg_exprs)
         )
 
         if customer_summary.is_empty():
@@ -285,17 +314,31 @@ def generate_whitespace_opportunities(engine):
 
         freq_max = max(customer_summary["purchase_count"].max(), 1)
         gp_max = max(customer_summary["total_gp"].max(), 1.0)
-        ref_date = transactions["order_date"].max()
-        min_date = transactions["order_date"].min()
-        max_days = max((ref_date - min_date).days, 1)
-        customer_summary = customer_summary.with_columns([
-            (pl.col("purchase_count") / freq_max).alias("freq_norm"),
-            (1 - ((pl.lit(ref_date) - pl.col("last_purchase")).dt.total_days() / max_days)).clip(0.0, 1.0).alias("recency_norm"),
-            (pl.col("total_gp") / gp_max).alias("gp_norm"),
-        ])
+        if has_dates:
+            ref_date = transactions["order_date"].max()
+            min_date = transactions["order_date"].min()
+            max_days = max((ref_date - min_date).days, 1)
+            customer_summary = customer_summary.with_columns([
+                (pl.col("purchase_count") / freq_max).alias("freq_norm"),
+                (1 - ((pl.lit(ref_date) - pl.col("last_purchase")).dt.total_days() / max_days)).clip(0.0, 1.0).alias("recency_norm"),
+                (pl.col("total_gp") / gp_max).alias("gp_norm"),
+            ])
+        else:
+            customer_summary = customer_summary.with_columns([
+                (pl.col("purchase_count") / freq_max).alias("freq_norm"),
+                pl.lit(1.0).alias("recency_norm"),
+                (pl.col("total_gp") / gp_max).alias("gp_norm"),
+            ])
 
-        all_divisions = transactions.select("product_division").unique()["product_division"].to_list()
-
+        all_divisions = (
+            transactions
+            .filter(
+                pl.col("product_division").is_not_null()
+                & (pl.col("product_division").str.strip_chars() != "")
+            )
+            .select("product_division")
+            .unique()["product_division"].to_list()
+        )
         opportunities = []
         for row in customer_summary.iter_rows(named=True):
             not_bought = [div for div in all_divisions if div not in row["divisions_bought"]]
@@ -324,9 +367,17 @@ def generate_whitespace_opportunities(engine):
         logger.error(f"Failed to generate whitespace opportunities: {e}")
         return pl.DataFrame()
 
-def generate_scoring_outputs(engine, *, run_manifest: dict | None = None):
-    """
-    Generate and save ICP scores and whitespace analysis.
+def generate_scoring_outputs(
+    engine,
+    *,
+    run_manifest: dict | None = None,
+    cutoff_date: str | None = None,
+    prediction_window_months: int | None = None,
+):
+    """Generate and save ICP scores and whitespace analysis.
+
+    ``cutoff_date`` and ``prediction_window_months`` act as fallbacks when the
+    model metadata is missing these fields.
     """
     logger.info("Starting customer scoring and whitespace analysis...")
     OUTPUTS_DIR.mkdir(exist_ok=True)
@@ -340,7 +391,14 @@ def generate_scoring_outputs(engine, *, run_manifest: dict | None = None):
             logger.warning(f"Model not found for {division_name}: {model_path}")
             continue
         try:
-            scores = score_customers_for_division(engine, division_name, model_path, run_manifest=run_manifest)
+            scores = score_customers_for_division(
+                engine,
+                division_name,
+                model_path,
+                run_manifest=run_manifest,
+                cutoff_date=cutoff_date,
+                prediction_window_months=prediction_window_months,
+            )
         except MissingModelMetadataError:
             # Already logged and alerted; skip this division
             continue
@@ -446,13 +504,13 @@ def generate_scoring_outputs(engine, *, run_manifest: dict | None = None):
                     for k in [5, 10, 20]:
                         thresholds.append({"mode": "top_percent", "k_percent": k, "threshold": None, "count": 0})
                     if scores_num.size > 0:
+                        sort_cols = [c for c in ['score', 'p_icp', 'EV_norm', 'customer_id'] if c in ranked.columns]
                         for i, k in enumerate([5, 10, 20]):
                             kk = max(1, int(scores_num.size * (k / 100.0)))
-                            pos = scores_num.size - kk
-                            thr = float(np.partition(scores_num, pos)[pos])
-                            count = int((pd.to_numeric(ranked['score'], errors='coerce') >= thr).sum())
+                            topk = ranked.nlargest(kk, sort_cols) if sort_cols else ranked.head(0)
+                            thr = float(topk['score'].min()) if len(topk) else float('nan')
                             thresholds[i]["threshold"] = thr
-                            thresholds[i]["count"] = count
+                            thresholds[i]["count"] = int(len(topk))
                 thr_name = f"thresholds_whitespace_{cutoff_tag}.csv" if cutoff_tag else "thresholds_whitespace.csv"
                 pd.DataFrame(thresholds).to_csv(OUTPUTS_DIR / thr_name, index=False)
 
@@ -483,20 +541,17 @@ def generate_scoring_outputs(engine, *, run_manifest: dict | None = None):
                     cfg = load_config()
                     mode = str(cfg.whitespace.capacity_mode)
                     selected = ranked
+                    sort_cols = [c for c in ['score', 'p_icp', 'EV_norm', 'customer_id'] if c in ranked.columns]
                     if mode == 'top_percent':
                         if len(ranked) > 0:
                             ksel = max(1, int(len(ranked) * (cfg.modeling.capacity_percent / 100.0)))
-                            pos = len(ranked) - ksel
-                            thr_sel = float(np.partition(ranked['score'].values, pos)[pos])
-                            selected = ranked[ranked['score'] >= thr_sel].copy()
+                            selected = ranked.nlargest(ksel, sort_cols).copy() if sort_cols else ranked.head(0)
                         else:
-                            selected = ranked
+                            selected = ranked.head(0)
                     elif mode in ('per_rep','hybrid'):
                         # Fallback to top_percent until rep attribution/interleave available
                         ksel = max(1, int(len(ranked) * (cfg.modeling.capacity_percent / 100.0)))
-                        pos = len(ranked) - ksel
-                        thr_sel = float(np.partition(ranked['score'].values, pos)[pos]) if len(ranked) else float('nan')
-                        selected = ranked[ranked['score'] >= thr_sel].copy()
+                        selected = ranked.nlargest(ksel, sort_cols).copy() if len(ranked) and sort_cols else ranked.head(0)
 
                     sel_name = f"whitespace_selected_{cutoff_tag}.csv" if cutoff_tag else "whitespace_selected.csv"
                     selected.to_csv(OUTPUTS_DIR / sel_name, index=False)
@@ -534,5 +589,25 @@ def generate_scoring_outputs(engine, *, run_manifest: dict | None = None):
     logger.info("Scoring pipeline completed successfully!")
 
 if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Score customers across divisions")
+    parser.add_argument(
+        "--cutoff-date",
+        dest="cutoff_date",
+        help="Cutoff date to use when model metadata lacks it",
+    )
+    parser.add_argument(
+        "--window-months",
+        dest="window_months",
+        type=int,
+        help="Prediction window in months when metadata is missing",
+    )
+    args = parser.parse_args()
+
     db_engine = get_db_connection()
-    generate_scoring_outputs(db_engine)
+    generate_scoring_outputs(
+        db_engine,
+        cutoff_date=args.cutoff_date,
+        prediction_window_months=args.window_months,
+    )

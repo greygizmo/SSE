@@ -23,8 +23,8 @@ def test_scale_weights_by_coverage_scales_and_normalizes():
 def test_als_norm_fallback_centroid_prefers_owned_centroid():
     # Build a tiny embedding space where owned centroid is near (1,1)
     df = pd.DataFrame({
-        'als_f0': [1.0, 0.9, 0.1, 0.0],
-        'als_f1': [1.0, 0.8, 0.1, 0.0],
+        'als_f0': [1.0, 0.9, -0.5, 0.0],
+        'als_f1': [1.0, 0.8, -0.5, 0.0],
         'owned_division_pre_cutoff': [True, True, False, False],
     })
     s = _compute_als_norm(df, cfg=None)
