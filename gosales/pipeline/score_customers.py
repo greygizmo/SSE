@@ -4,6 +4,8 @@ Customer scoring pipeline that generates ICP scores and whitespace analysis for 
 """
 import polars as pl
 import pandas as pd
+import mlflow
+import mlflow.sklearn
 import json
 from pathlib import Path
 import joblib
