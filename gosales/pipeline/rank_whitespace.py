@@ -81,6 +81,41 @@ def _compute_als_norm(df: pd.DataFrame, cfg=None, owner_centroid: np.ndarray | N
     - If owner_centroid is provided, use it; else derive from owned-pre-cutoff when available.
     """
     als_cols = [c for c in df.columns if c.startswith("als_f")]
+    centroid: np.ndarray | None = None
+    if als_cols and "owned_division_pre_cutoff" in df.columns:
+        owners = df[df["owned_division_pre_cutoff"].astype(bool)]
+        if not owners.empty:
+            centroid = owners[als_cols].astype(float).mean(axis=0).to_numpy(dtype=float)
+            try:
+                ALS_CENTROID_PATH.parent.mkdir(parents=True, exist_ok=True)
+                np.save(ALS_CENTROID_PATH, centroid)
+            except Exception:
+                pass
+        elif ALS_CENTROID_PATH.exists():
+            try:
+                centroid = np.load(ALS_CENTROID_PATH)
+            except Exception:
+                centroid = None
+    elif ALS_CENTROID_PATH.exists():
+        try:
+            centroid = np.load(ALS_CENTROID_PATH)
+        except Exception:
+            centroid = None
+
+    if "owned_division_pre_cutoff" in df.columns:
+        df = df[~df["owned_division_pre_cutoff"].astype(bool)].copy()
+
+    return df, centroid
+
+
+def _compute_als_norm(df: pd.DataFrame, cfg=None, owner_centroid: np.ndarray | None = None) -> pd.Series:
+    """Compute ALS similarity normalized to [0,1].
+
+    - If ``owner_centroid`` is provided, use it for similarity.
+    - Else, prefer centroid of rows where ``owned_division_pre_cutoff`` is True.
+      Fall back to global centroid if no owned rows.
+    """
+    als_cols = [c for c in df.columns if c.startswith("als_f")]
     if not als_cols:
         return pd.Series(np.zeros(len(df)), index=df.index, dtype=float)
     mat = df[als_cols].astype(float)
