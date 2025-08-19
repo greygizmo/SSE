@@ -93,6 +93,23 @@ $env:PYTHONPATH = "$PWD"; streamlit run gosales/ui/app.py
 
 ---
 
+### Post-rebase updates (August 2025)
+
+- Scoring pipeline now supports sanitized probability fallback when models lack `predict_proba` or expose only `decision_function`. See `gosales/pipeline/score_customers.py`.
+- Ranker restored and hardened: eligibility checks, ALS normalization, deterministic `nlargest` selection, and schema validations.
+- Whitespace lift builder uses boolean baskets to silence mlxtend deprecation warnings.
+- ALS components pass CSR matrices to `implicit` and cap BLAS threads to avoid performance warnings. BLAS thread limit is applied centrally in `gosales/__init__.py`.
+- CLI for scoring accepts `--cutoff-date` and `--window-months` fallbacks when model `metadata.json` is missing these fields.
+
+#### Warnings during tests
+
+You may still see warnings from dependencies in CI:
+- `implicit` suggests setting `OPENBLAS_NUM_THREADS=1`. We enforce this behavior at runtime using `threadpoolctl` to limit BLAS to 1 thread.
+- `mlxtend` deprecation on non-boolean baskets has been addressed by emitting boolean dummies.
+- Pandas groupby and sklearn “feature names” notices are benign in tests; we prefer code clarity over suppressing these globally.
+
+---
+
 ### Modeling & validation notes
 
 - Class imbalance is handled via class weights (LR) and `scale_pos_weight` (LightGBM).

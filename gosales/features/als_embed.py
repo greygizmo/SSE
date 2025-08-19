@@ -5,6 +5,7 @@ import pandas as pd
 import polars as pl
 
 from scipy.sparse import coo_matrix, csr_matrix
+from threadpoolctl import threadpool_limits
 
 
 def _build_user_item(df: pd.DataFrame, user_col: str, item_col: str, weight_col: str) -> Tuple[coo_matrix, pd.Index, pd.Index]:
@@ -24,7 +25,10 @@ def _als_with_implicit(mat: coo_matrix, factors: int, reg: float, alpha: float) 
         model = implicit.als.AlternatingLeastSquares(
             factors=factors, regularization=reg, random_state=42
         )
-        model.fit((mat * alpha).astype('double'))
+        # Convert to CSR to avoid implicit's COO→CSR conversion warning and cap BLAS threads
+        mat_scaled_csr = csr_matrix((mat * alpha).astype('double'))
+        with threadpool_limits(1, "blas"):
+            model.fit(mat_scaled_csr)
         return pd.DataFrame(model.user_factors)
     except Exception:
         return None

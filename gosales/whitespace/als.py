@@ -1,6 +1,7 @@
 import polars as pl
 import implicit
-from scipy.sparse import coo_matrix
+from scipy.sparse import coo_matrix, csr_matrix
+from threadpoolctl import threadpool_limits
 from gosales.utils.db import get_db_connection
 from gosales.utils.logger import get_logger
 from gosales.utils.paths import OUTPUTS_DIR
@@ -42,14 +43,15 @@ def build_als(engine, output_path, top_n: int = 10):
     item_codes = [item_name_to_idx[str(name)] for name in user_item["item"].to_list()]
     counts = user_item["count"].to_list()
 
-    # Create a sparse matrix (users x items)
-    sparse_matrix = coo_matrix(
-        (counts, (user_codes, item_codes)), shape=(len(user_ids), len(item_names))
-    ).tocsr()
+    # Create a sparse matrix (users x items) in CSR to satisfy implicit's expectations
+    sparse_matrix = csr_matrix(
+        coo_matrix((counts, (user_codes, item_codes)), shape=(len(user_ids), len(item_names)))
+    )
 
     # Train the ALS model (deterministic)
     model = implicit.als.AlternatingLeastSquares(factors=50, random_state=42)
-    model.fit(sparse_matrix)
+    with threadpool_limits(1, "blas"):
+        model.fit(sparse_matrix)
 
     # Generate top-N recommendations per user (map indices back to readable ids/names)
     records = []

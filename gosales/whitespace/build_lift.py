@@ -37,17 +37,21 @@ def build_lift(engine, output_path):
         .collect()
     )
 
-    # Create a one-hot encoded binary matrix per customer
+    # Create a one-hot encoded boolean matrix per customer (avoid mlxtend deprecation on non-bool)
     basket_plus = (
         basket.to_dummies(columns=[item_col])
         .group_by("customer_id")
         .agg(pl.all().exclude(["customer_id"]).sum())
         .drop("count")
-        .with_columns(pl.all().exclude("customer_id").clip(upper_bound=1))
+        .with_columns((pl.all().exclude("customer_id") > 0).cast(pl.Boolean))
     )
 
     # Perform market basket analysis
-    frequent_itemsets = apriori(basket_plus.drop("customer_id").to_pandas(), min_support=0.001, use_colnames=True)
+    frequent_itemsets = apriori(
+        basket_plus.drop("customer_id").to_pandas().astype(bool),
+        min_support=0.001,
+        use_colnames=True,
+    )
     rules = association_rules(frequent_itemsets, metric="lift", min_threshold=1)
 
     # Save the rules to a CSV file
