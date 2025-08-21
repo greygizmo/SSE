@@ -1,0 +1,172 @@
+---
+title: GoSales Engine - Key Sequence Diagrams
+---
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant StreamlitApp
+    participant PipelineOrchestrator
+    participant ETLProcess
+    participant FeatureEngine
+    participant ModelTrainer
+    participant Validator
+    participant Monitor
+
+    User->>StreamlitApp: Start Pipeline
+    StreamlitApp->>PipelineOrchestrator: Initialize Pipeline
+    PipelineOrchestrator->>Monitor: Start Monitoring
+    Monitor-->>PipelineOrchestrator: Monitoring Active
+
+    PipelineOrchestrator->>ETLProcess: Execute ETL
+    ETLProcess->>Monitor: Log ETL Progress
+    ETLProcess->>ETLProcess: Extract from Azure SQL
+    ETLProcess->>ETLProcess: Transform Data (Star Schema)
+    ETLProcess->>ETLProcess: Load to SQLite
+    ETLProcess-->>PipelineOrchestrator: ETL Complete
+    Monitor-->>PipelineOrchestrator: ETL Metrics
+
+    PipelineOrchestrator->>FeatureEngine: Execute Feature Engineering
+    FeatureEngine->>Monitor: Log Feature Progress
+    FeatureEngine->>FeatureEngine: Load Transaction Data
+    FeatureEngine->>FeatureEngine: Generate Customer Features
+    FeatureEngine->>FeatureEngine: Generate Product Features
+    FeatureEngine->>FeatureEngine: Generate Temporal Features
+    FeatureEngine->>FeatureEngine: Train ALS Model
+    FeatureEngine->>FeatureEngine: Integrate External Features
+    FeatureEngine->>FeatureEngine: Cache Feature Matrix
+    FeatureEngine-->>PipelineOrchestrator: Features Complete
+    Monitor-->>PipelineOrchestrator: Feature Metrics
+
+    PipelineOrchestrator->>ModelTrainer: Execute Model Training
+    ModelTrainer->>Monitor: Log Training Progress
+    ModelTrainer->>ModelTrainer: Load Feature Matrix
+    ModelTrainer->>ModelTrainer: Configure LightGBM
+    ModelTrainer->>ModelTrainer: Perform Cross-Validation
+    ModelTrainer->>ModelTrainer: Train Final Model
+    ModelTrainer->>ModelTrainer: Generate SHAP Values
+    ModelTrainer->>ModelTrainer: Save Model Artifacts
+    ModelTrainer-->>PipelineOrchestrator: Training Complete
+    Monitor-->>PipelineOrchestrator: Training Metrics
+
+    PipelineOrchestrator->>Validator: Execute Validation
+    Validator->>Monitor: Log Validation Progress
+    Validator->>Validator: Validate Data Quality
+    Validator->>Validator: Perform Holdout Testing
+    Validator->>Validator: Execute Decile Analysis
+    Validator->>Validator: Generate Validation Reports
+    Validator-->>PipelineOrchestrator: Validation Complete
+    Monitor-->>PipelineOrchestrator: Validation Metrics
+
+    PipelineOrchestrator->>Monitor: Generate Final Report
+    Monitor-->>PipelineOrchestrator: Pipeline Complete
+    PipelineOrchestrator-->>StreamlitApp: Update Dashboard
+    StreamlitApp-->>User: Display Results
+```
+
+---
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Dashboard
+    participant DataCollector
+    participant Database
+    participant FileSystem
+    participant Monitor
+
+    User->>Dashboard: Open Monitoring Tab
+    Dashboard->>DataCollector: Request Monitoring Data
+    DataCollector->>Database: Query Pipeline Metrics
+    Database-->>DataCollector: Return Metrics Data
+    DataCollector->>FileSystem: Read Log Files
+    FileSystem-->>DataCollector: Return Log Data
+    DataCollector->>Monitor: Get Real-time Status
+    Monitor-->>DataCollector: Return System Status
+
+    DataCollector->>DataCollector: Calculate Health Scores
+    DataCollector->>DataCollector: Generate Quality Metrics
+    DataCollector->>DataCollector: Aggregate Performance Data
+    DataCollector->>DataCollector: Process Alert Conditions
+
+    DataCollector-->>Dashboard: Return Monitoring Data
+    Dashboard->>Dashboard: Render Health Overview
+    Dashboard->>Dashboard: Display Quality Metrics
+    Dashboard->>Dashboard: Show Performance Charts
+    Dashboard->>Dashboard: Generate Alert Dashboard
+
+    User->>Dashboard: Export Monitoring Report
+    Dashboard->>DataCollector: Generate Report
+    DataCollector->>DataCollector: Compile Report Data
+    DataCollector->>FileSystem: Save Report File
+    FileSystem-->>Dashboard: Report Saved
+    Dashboard-->>User: Provide Download Link
+```
+
+---
+
+```mermaid
+sequenceDiagram
+    participant Customer
+    participant WebApp
+    participant API
+    participant Database
+    participant ScoringEngine
+    participant Model
+
+    Customer->>WebApp: View Product Recommendations
+    WebApp->>API: Request Customer Features
+    API->>Database: Query Customer Data
+    Database-->>API: Return Customer Profile
+    API->>API: Generate Customer Features
+    API->>ScoringEngine: Score Customer
+    ScoringEngine->>Model: Load Division Models
+    Model-->>ScoringEngine: Models Loaded
+
+    ScoringEngine->>Model: Generate Predictions
+    Model-->>ScoringEngine: Return Predictions
+    ScoringEngine->>ScoringEngine: Apply Business Rules
+    ScoringEngine->>ScoringEngine: Calculate Final Scores
+    ScoringEngine->>API: Return Scored Results
+
+    API->>API: Format Recommendations
+    API->>Database: Log Scoring Event
+    API-->>WebApp: Return Recommendations
+    WebApp->>WebApp: Display to Customer
+    WebApp->>API: Track User Interaction
+    API->>Database: Update Interaction Log
+```
+
+---
+
+```mermaid
+sequenceDiagram
+    participant Scheduler
+    participant PipelineRunner
+    participant Monitor
+    participant AlertSystem
+    participant NotificationService
+    participant Dashboard
+
+    Scheduler->>PipelineRunner: Trigger Scheduled Run
+    PipelineRunner->>Monitor: Initialize Monitoring
+    Monitor-->>PipelineRunner: Monitoring Ready
+
+    PipelineRunner->>PipelineRunner: Execute ETL Phase
+    PipelineRunner->>Monitor: Update Progress
+    Monitor->>Monitor: Check Health Metrics
+
+    Monitor->>Monitor: Evaluate Thresholds
+    Monitor->>AlertSystem: Generate Warning Alert
+    AlertSystem->>NotificationService: Send Alert
+    NotificationService-->>AlertSystem: Alert Sent
+
+    PipelineRunner->>PipelineRunner: Continue Processing
+    PipelineRunner->>Monitor: Log Completion
+    Monitor->>Monitor: Generate Report
+    Monitor->>Dashboard: Update Real-time Data
+    Dashboard->>Dashboard: Refresh Display
+
+    Scheduler->>Scheduler: Schedule Next Run
+    Scheduler-->>PipelineRunner: Next Run Scheduled
+```

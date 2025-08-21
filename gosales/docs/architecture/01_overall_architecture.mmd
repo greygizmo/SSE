@@ -1,0 +1,137 @@
+---
+title: GoSales Engine - Overall Architecture
+---
+
+```mermaid
+graph TB
+    %% Data Sources
+    subgraph "External Data Sources"
+        AzureSQL[(Azure SQL<br/>Raw Sales Data)]
+        ConfigFiles[(Configuration<br/>Files)]
+        ModelRegistry[(Model Registry<br/>MLflow)]
+    end
+
+    %% Core Pipeline Components
+    subgraph "Data Pipeline"
+        subgraph "ETL Phase"
+            Ingest[Data Ingestion<br/>ingest.py]
+            Clean[Data Cleaning<br/>cleaners.py]
+            Transform[Data Transformation<br/>build_star.py]
+            Load[Data Loading<br/>load_csv.py]
+        end
+
+        subgraph "Feature Engineering Phase"
+            FeatureBuild[Feature Engineering<br/>engine.py]
+            ALSEmbedding[ALS Embedding<br/>als_embed.py]
+            LabelGen[Label Generation<br/>targets.py]
+            CacheSystem[Feature Caching<br/>cache.py]
+        end
+
+        subgraph "Model Training Phase"
+            TrainDivision[Division Training<br/>train_division_model.py]
+            ModelArtifacts[Model Artifacts<br/>model.pkl, MLmodel]
+            Metrics[Model Metrics<br/>metrics.py]
+        end
+
+        subgraph "Pipeline Orchestration"
+            ScoreAll[Full Pipeline Runner<br/>score_all.py]
+            ScoreCustomers[Customer Scoring<br/>score_customers.py]
+            LabelAudit[Label Auditing<br/>label_audit.py]
+        end
+    end
+
+    %% Validation & Quality
+    subgraph "Validation & Testing"
+        DataValidation[Data Validation<br/>data_validator.py]
+        SchemaValidation[Schema Validation<br/>schema.py]
+        HoldoutValidation[Holdout Testing<br/>validate_holdout.py]
+        DecilesValidation[Deciles Analysis<br/>deciles.py]
+        CIGate[CI Gate<br/>ci_gate.py]
+    end
+
+    %% Monitoring & Observability
+    subgraph "Monitoring System"
+        PipelineMonitor[Pipeline Monitor<br/>pipeline_monitor.py]
+        DataCollector[Data Collector<br/>data_collector.py]
+        DriftDetection[Drift Detection<br/>drift.py]
+        AlertSystem[Alert Management]
+    end
+
+    %% User Interface
+    subgraph "User Interface"
+        StreamlitApp[Streamlit Dashboard<br/>app.py]
+        APIGateways[API Endpoints<br/>utils.py]
+        ReportGeneration[Report Generation]
+    end
+
+    %% Storage Layer
+    subgraph "Data Storage"
+        SQLite[(SQLite<br/>Curated Database)]
+        Outputs[(Output Files<br/>CSV, JSON, PBIX)]
+        Logs[(Log Files<br/>Pipeline Logs)]
+    end
+
+    %% Data Flow Connections
+    AzureSQL --> Ingest
+    ConfigFiles --> Ingest
+    Ingest --> Clean
+    Clean --> Transform
+    Transform --> Load
+    Load --> SQLite
+
+    SQLite --> FeatureBuild
+    SQLite --> LabelGen
+    FeatureBuild --> ALSEmbedding
+    ALSEmbedding --> CacheSystem
+
+    CacheSystem --> TrainDivision
+    LabelGen --> TrainDivision
+    TrainDivision --> ModelArtifacts
+    TrainDivision --> Metrics
+
+    ModelArtifacts --> ScoreAll
+    Metrics --> ScoreAll
+    ScoreAll --> ScoreCustomers
+    ScoreCustomers --> LabelAudit
+
+    SQLite --> DataValidation
+    ModelArtifacts --> DataValidation
+    DataValidation --> SchemaValidation
+    SchemaValidation --> HoldoutValidation
+    HoldoutValidation --> DecilesValidation
+    DecilesValidation --> CIGate
+
+    ScoreAll --> PipelineMonitor
+    ScoreCustomers --> PipelineMonitor
+    DataValidation --> PipelineMonitor
+    PipelineMonitor --> DataCollector
+    DataCollector --> AlertSystem
+    DataCollector --> DriftDetection
+
+    ScoreAll --> StreamlitApp
+    ScoreCustomers --> StreamlitApp
+    ModelArtifacts --> StreamlitApp
+    DataCollector --> StreamlitApp
+    Metrics --> StreamlitApp
+
+    StreamlitApp --> Outputs
+    StreamlitApp --> Logs
+    ScoreAll --> Outputs
+    ScoreCustomers --> Outputs
+    DataCollector --> Outputs
+
+    %% Styling
+    classDef dataSource fill:#e1f5fe,stroke:#01579b,stroke-width:2px
+    classDef pipeline fill:#f3e5f5,stroke:#4a148c,stroke-width:2px
+    classDef validation fill:#e8f5e8,stroke:#2e7d32,stroke-width:2px
+    classDef monitoring fill:#fff3e0,stroke:#e65100,stroke-width:2px
+    classDef ui fill:#fce4ec,stroke:#880e4f,stroke-width:2px
+    classDef storage fill:#f5f5f5,stroke:#333,stroke-width:2px
+
+    class AzureSQL,ConfigFiles,ModelRegistry dataSource
+    class Ingest,Clean,Transform,Load,FeatureBuild,ALSEmbedding,LabelGen,CacheSystem,TrainDivision,ModelArtifacts,Metrics,ScoreAll,ScoreCustomers,LabelAudit pipeline
+    class DataValidation,SchemaValidation,HoldoutValidation,DecilesValidation,CIGate validation
+    class PipelineMonitor,DataCollector,DriftDetection,AlertSystem monitoring
+    class StreamlitApp,APIGateways,ReportGeneration ui
+    class SQLite,Outputs,Logs storage
+```

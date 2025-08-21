@@ -1,0 +1,145 @@
+---
+title: GoSales Engine - ETL Phase Flow
+---
+
+```mermaid
+graph TB
+    %% Start
+    Start([ETL Process Start]) --> CheckConfig
+
+    %% Configuration Phase
+    subgraph "Configuration & Setup"
+        CheckConfig[Check Configuration<br/>config.yaml]
+        ValidateConnections[Validate Database Connections<br/>check_connection.py]
+        SetupPaths[Setup File Paths<br/>paths.py]
+    end
+
+    %% Data Ingestion Phase
+    subgraph "Data Ingestion"
+        ConnectAzure[Connect to Azure SQL<br/>get_db_connection()]
+        QuerySalesLog[Query sales_log Table<br/>Raw Sales Data]
+        QueryCustomers[Query Customer Tables<br/>Customer Master Data]
+        QueryProducts[Query Product Tables<br/>Product Catalog]
+        LoadDataFrames[Load into Polars DataFrames<br/>ingest.py]
+    end
+
+    %% Data Cleaning Phase
+    subgraph "Data Cleaning & Standardization"
+        RemoveDuplicates[Remove Duplicate Records<br/>cleaners.py]
+        StandardizeCustomerIds[Standardize customer_id<br/>Type Consistency]
+        CleanProductNames[Clean Product Names<br/>Text Processing]
+        HandleMissingValues[Handle Missing Values<br/>Null Handling]
+        ValidateDataTypes[Validate Data Types<br/>Type Enforcement]
+    end
+
+    %% Data Transformation Phase
+    subgraph "Data Transformation (Star Schema)"
+        CreateDimCustomer[Create dim_customer<br/>Customer Dimension]
+        CreateDimProduct[Create dim_product<br/>Product Dimension]
+        CreateDimDate[Create dim_date<br/>Date Dimension]
+        CreateFactTransactions[Create fact_transactions<br/>Transaction Facts]
+        CreateFactSalesLogRaw[Create fact_sales_log_raw<br/>Preserve Raw Data]
+    end
+
+    %% Data Loading Phase
+    subgraph "Data Loading & Storage"
+        ConnectSQLite[Connect to SQLite<br/>Curated Database]
+        WriteDimensions[Write Dimension Tables<br/>write_database()]
+        WriteFacts[Write Fact Tables<br/>write_database()]
+        CreateIndexes[Create Database Indexes<br/>Performance Optimization]
+        ValidateLoad[Validate Data Load<br/>Row Count Verification]
+    end
+
+    %% Monitoring & Logging
+    subgraph "ETL Monitoring"
+        LogProgress[Log ETL Progress<br/>logger.py]
+        TrackMetrics[Track ETL Metrics<br/>pipeline_monitor.py]
+        ErrorHandling[Error Handling & Recovery<br/>Exception Management]
+        GenerateReports[Generate ETL Reports<br/>data_collector.py]
+    end
+
+    %% End
+    ValidateLoad --> Success([ETL Success])
+    ErrorHandling --> Failure([ETL Failed])
+
+    %% Connections
+    Start --> CheckConfig
+    CheckConfig --> ValidateConnections
+    ValidateConnections --> SetupPaths
+    SetupPaths --> ConnectAzure
+
+    ConnectAzure --> QuerySalesLog
+    ConnectAzure --> QueryCustomers
+    ConnectAzure --> QueryProducts
+
+    QuerySalesLog --> LoadDataFrames
+    QueryCustomers --> LoadDataFrames
+    QueryProducts --> LoadDataFrames
+
+    LoadDataFrames --> RemoveDuplicates
+    RemoveDuplicates --> StandardizeCustomerIds
+    StandardizeCustomerIds --> CleanProductNames
+    CleanProductNames --> HandleMissingValues
+    HandleMissingValues --> ValidateDataTypes
+
+    ValidateDataTypes --> CreateDimCustomer
+    ValidateDataTypes --> CreateDimProduct
+    ValidateDataTypes --> CreateDimDate
+    ValidateDataTypes --> CreateFactTransactions
+    ValidateDataTypes --> CreateFactSalesLogRaw
+
+    CreateDimCustomer --> ConnectSQLite
+    CreateDimProduct --> ConnectSQLite
+    CreateDimDate --> ConnectSQLite
+    CreateFactTransactions --> ConnectSQLite
+    CreateFactSalesLogRaw --> ConnectSQLite
+
+    ConnectSQLite --> WriteDimensions
+    ConnectSQLite --> WriteFacts
+    WriteDimensions --> CreateIndexes
+    WriteFacts --> CreateIndexes
+    CreateIndexes --> ValidateLoad
+
+    %% Parallel Monitoring
+    CheckConfig --> LogProgress
+    ValidateConnections --> LogProgress
+    LoadDataFrames --> LogProgress
+    ValidateDataTypes --> LogProgress
+    WriteDimensions --> LogProgress
+    ValidateLoad --> LogProgress
+
+    RemoveDuplicates --> TrackMetrics
+    StandardizeCustomerIds --> TrackMetrics
+    CreateFactTransactions --> TrackMetrics
+    ValidateLoad --> TrackMetrics
+
+    TrackMetrics --> GenerateReports
+    LogProgress --> GenerateReports
+
+    %% Error Paths
+    CheckConfig -->|Invalid Config| ErrorHandling
+    ValidateConnections -->|Connection Failed| ErrorHandling
+    LoadDataFrames -->|Load Failed| ErrorHandling
+    ValidateDataTypes -->|Type Mismatch| ErrorHandling
+    WriteDimensions -->|Write Failed| ErrorHandling
+    ValidateLoad -->|Validation Failed| ErrorHandling
+
+    %% Styling
+    classDef setup fill:#e3f2fd,stroke:#1565c0,stroke-width:2px
+    classDef ingestion fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px
+    classDef cleaning fill:#e8f5e8,stroke:#2e7d32,stroke-width:2px
+    classDef transformation fill:#fff3e0,stroke:#f57c00,stroke-width:2px
+    classDef loading fill:#fce4ec,stroke:#c2185b,stroke-width:2px
+    classDef monitoring fill:#f5f5f5,stroke:#424242,stroke-width:2px
+    classDef success fill:#c8e6c9,stroke:#2e7d32,stroke-width:3px
+    classDef failure fill:#ffcdd2,stroke:#c62828,stroke-width:3px
+
+    class Start,CheckConfig,ValidateConnections,SetupPaths setup
+    class ConnectAzure,QuerySalesLog,QueryCustomers,QueryProducts,LoadDataFrames ingestion
+    class RemoveDuplicates,StandardizeCustomerIds,CleanProductNames,HandleMissingValues,ValidateDataTypes cleaning
+    class CreateDimCustomer,CreateDimProduct,CreateDimDate,CreateFactTransactions,CreateFactSalesLogRaw transformation
+    class ConnectSQLite,WriteDimensions,WriteFacts,CreateIndexes,ValidateLoad loading
+    class LogProgress,TrackMetrics,ErrorHandling,GenerateReports monitoring
+    class Success success
+    class Failure failure
+```

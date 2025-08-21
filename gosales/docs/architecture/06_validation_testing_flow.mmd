@@ -1,0 +1,224 @@
+---
+title: GoSales Engine - Validation & Testing Flow
+---
+
+```mermaid
+graph TB
+    %% Start
+    Start([Validation Start]) --> InitializeValidation
+
+    %% Validation Initialization
+    subgraph "Validation Setup"
+        InitializeValidation[Initialize Validation Framework<br/>ci_gate.py]
+        LoadValidationConfig[Load Validation Configuration<br/>config.yaml]
+        SetupTestEnvironment[Setup Test Environment<br/>Dependencies & Paths]
+        InitializeTestLogging[Initialize Test Logging<br/>logger.py]
+        ValidateTestPrerequisites[Validate Test Prerequisites<br/>Data & Models Available]
+    end
+
+    %% Data Quality Validation
+    subgraph "Data Quality Validation"
+        ExecuteDataValidator[Execute Data Validator<br/>data_validator.py]
+        ValidateSchemaCompliance[Validate Schema Compliance<br/>Column Types & Names]
+        CheckDataCompleteness[Check Data Completeness<br/>Missing Value Analysis]
+        ValidateDataConsistency[Validate Data Consistency<br/>Cross-table Validation]
+        PerformStatisticalChecks[Perform Statistical Checks<br/>Distribution Analysis]
+        GenerateDataQualityReport[Generate Data Quality Report<br/>Quality Metrics Summary]
+    end
+
+    %% Model Validation
+    subgraph "Model Validation"
+        LoadModelForValidation[Load Model for Validation<br/>MLmodel Integration]
+        ValidateModelInputs[Validate Model Inputs<br/>Feature Matrix Compatibility]
+        ExecuteModelPredictions[Execute Model Predictions<br/>Batch Scoring]
+        ValidatePredictionOutputs[Validate Prediction Outputs<br/>Format & Range Checks]
+        CheckModelPerformance[Check Model Performance<br/>Performance Thresholds]
+        GenerateModelValidationReport[Generate Model Validation Report<br/>Model Quality Summary]
+    end
+
+    %% Holdout Validation
+    subgraph "Holdout Validation"
+        ExecuteHoldoutValidation[Execute Holdout Validation<br/>validate_holdout.py]
+        LoadHoldoutDataset[Load Holdout Dataset<br/>Unseen Historical Data]
+        PrepareHoldoutFeatures[Prepare Holdout Features<br/>Feature Engineering on Holdout]
+        GenerateHoldoutPredictions[Generate Holdout Predictions<br/>Model Scoring on Holdout]
+        CalculateHoldoutMetrics[Calculate Holdout Metrics<br/>AUC, F1, Precision, Recall]
+        CompareWithBaseline[Compare With Baseline<br/>Performance vs. Random]
+        GenerateHoldoutReport[Generate Holdout Report<br/>Validation Summary]
+    end
+
+    %% Deciles Analysis
+    subgraph "Deciles Analysis"
+        ExecuteDecilesAnalysis[Execute Deciles Analysis<br/>deciles.py]
+        SortPredictionsByScore[Sort Predictions by Score<br/>Descending Order]
+        CreateDecileBuckets[Create Decile Buckets<br/>10 Equal Groups]
+        CalculateDecileMetrics[Calculate Decile Metrics<br/>Conversion Rates, Lift]
+        AnalyzeDecileTrends[Analyze Decile Trends<br/>Performance Across Deciles]
+        GenerateDecilePlots[Generate Decile Plots<br/>Visual Analysis]
+        CreateDecileReport[Create Decile Report<br/>Decile Analysis Summary]
+    end
+
+    %% Business Logic Validation
+    subgraph "Business Logic Validation"
+        ValidateBusinessRules[Validate Business Rules<br/>Domain Logic Checks]
+        CheckScoringThresholds[Check Scoring Thresholds<br/>Business Thresholds]
+        ValidateCustomerFilters[Validate Customer Filters<br/>Eligibility Criteria]
+        AssessBusinessImpact[Assess Business Impact<br/>ROI Projections]
+        GenerateBusinessReport[Generate Business Report<br/>Business Validation Summary]
+    end
+
+    %% Statistical Validation
+    subgraph "Statistical Validation"
+        PerformDistributionTests[Perform Distribution Tests<br/>KS Tests, Chi-Square]
+        CheckFeatureStability[Check Feature Stability<br/>Feature Drift Analysis]
+        ValidateModelCalibration[Validate Model Calibration<br/>Calibration Curves]
+        AssessPredictionVariance[Assess Prediction Variance<br/>Confidence Intervals]
+        GenerateStatisticalReport[Generate Statistical Report<br/>Statistical Validation Summary]
+    end
+
+    %% Integration Testing
+    subgraph "Integration Testing"
+        TestETLIntegration[Test ETL Integration<br/>End-to-End Data Flow]
+        TestFeatureIntegration[Test Feature Integration<br/>Feature Pipeline]
+        TestModelIntegration[Test Model Integration<br/>Model Loading & Scoring]
+        TestAPIIntegration[Test API Integration<br/>Streamlit Endpoints]
+        ValidateSystemIntegration[Validate System Integration<br/>Component Interactions]
+        GenerateIntegrationReport[Generate Integration Report<br/>Integration Test Summary]
+    end
+
+    %% Performance Testing
+    subgraph "Performance Testing"
+        ExecutePerformanceTests[Execute Performance Tests<br/>Load & Stress Tests]
+        MeasureExecutionTime[Measure Execution Time<br/>Timing Benchmarks]
+        MonitorResourceUsage[Monitor Resource Usage<br/>CPU, Memory, Disk]
+        TestScalability[Test Scalability<br/>Large Dataset Handling]
+        ValidateConcurrency[Validate Concurrency<br/>Parallel Processing]
+        GeneratePerformanceReport[Generate Performance Report<br/>Performance Analysis]
+    end
+
+    %% CI Gate Validation
+    subgraph "CI Gate Validation"
+        ExecuteCIGate[Execute CI Gate<br/>ci_gate.py]
+        CheckAllValidationResults[Check All Validation Results<br/>Pass/Fail Criteria]
+        ValidateQualityThresholds[Validate Quality Thresholds<br/>Minimum Standards]
+        GenerateFinalReport[Generate Final Report<br/>Comprehensive Validation Summary]
+        DetermineBuildStatus[Determine Build Status<br/>Pass/Fail Decision]
+        SendNotification[Send Notification<br/>Stakeholder Alerts]
+    end
+
+    %% End States
+    SendNotification --> Success([Validation Success])
+    GenerateFinalReport --> Failure([Validation Failed])
+
+    %% Main Flow Connections
+    Start --> InitializeValidation
+    InitializeValidation --> LoadValidationConfig
+    LoadValidationConfig --> SetupTestEnvironment
+    SetupTestEnvironment --> InitializeTestLogging
+    InitializeTestLogging --> ValidateTestPrerequisites
+    ValidateTestPrerequisites --> ExecuteDataValidator
+
+    ExecuteDataValidator --> ValidateSchemaCompliance
+    ValidateSchemaCompliance --> CheckDataCompleteness
+    CheckDataCompleteness --> ValidateDataConsistency
+    ValidateDataConsistency --> PerformStatisticalChecks
+    PerformStatisticalChecks --> GenerateDataQualityReport
+
+    GenerateDataQualityReport --> LoadModelForValidation
+    LoadModelForValidation --> ValidateModelInputs
+    ValidateModelInputs --> ExecuteModelPredictions
+    ExecuteModelPredictions --> ValidatePredictionOutputs
+    ValidatePredictionOutputs --> CheckModelPerformance
+    CheckModelPerformance --> GenerateModelValidationReport
+
+    GenerateModelValidationReport --> ExecuteHoldoutValidation
+    ExecuteHoldoutValidation --> LoadHoldoutDataset
+    LoadHoldoutDataset --> PrepareHoldoutFeatures
+    PrepareHoldoutFeatures --> GenerateHoldoutPredictions
+    GenerateHoldoutPredictions --> CalculateHoldoutMetrics
+    CalculateHoldoutMetrics --> CompareWithBaseline
+    CompareWithBaseline --> GenerateHoldoutReport
+
+    GenerateHoldoutReport --> ExecuteDecilesAnalysis
+    ExecuteDecilesAnalysis --> SortPredictionsByScore
+    SortPredictionsByScore --> CreateDecileBuckets
+    CreateDecileBuckets --> CalculateDecileMetrics
+    CalculateDecileMetrics --> AnalyzeDecileTrends
+    AnalyzeDecileTrends --> GenerateDecilePlots
+    GenerateDecilePlots --> CreateDecileReport
+
+    CreateDecileReport --> ValidateBusinessRules
+    ValidateBusinessRules --> CheckScoringThresholds
+    CheckScoringThresholds --> ValidateCustomerFilters
+    ValidateCustomerFilters --> AssessBusinessImpact
+    AssessBusinessImpact --> GenerateBusinessReport
+
+    GenerateBusinessReport --> PerformDistributionTests
+    PerformDistributionTests --> CheckFeatureStability
+    CheckFeatureStability --> ValidateModelCalibration
+    ValidateModelCalibration --> AssessPredictionVariance
+    AssessPredictionVariance --> GenerateStatisticalReport
+
+    GenerateStatisticalReport --> TestETLIntegration
+    TestETLIntegration --> TestFeatureIntegration
+    TestFeatureIntegration --> TestModelIntegration
+    TestModelIntegration --> TestAPIIntegration
+    TestAPIIntegration --> ValidateSystemIntegration
+    ValidateSystemIntegration --> GenerateIntegrationReport
+
+    GenerateIntegrationReport --> ExecutePerformanceTests
+    ExecutePerformanceTests --> MeasureExecutionTime
+    MeasureExecutionTime --> MonitorResourceUsage
+    MonitorResourceUsage --> TestScalability
+    TestScalability --> ValidateConcurrency
+    ValidateConcurrency --> GeneratePerformanceReport
+
+    GeneratePerformanceReport --> ExecuteCIGate
+    ExecuteCIGate --> CheckAllValidationResults
+    CheckAllValidationResults --> ValidateQualityThresholds
+    ValidateQualityThresholds --> GenerateFinalReport
+    GenerateFinalReport --> DetermineBuildStatus
+    DetermineBuildStatus --> SendNotification
+
+    %% Parallel Monitoring
+    InitializeValidation --> InitializeTestLogging
+    ExecuteDataValidator --> InitializeTestLogging
+    LoadModelForValidation --> InitializeTestLogging
+    ExecuteHoldoutValidation --> InitializeTestLogging
+    ExecuteCIGate --> InitializeTestLogging
+
+    %% Error Handling
+    InitializeValidation -->|Setup Failed| Failure
+    ExecuteDataValidator -->|Data Issues| Failure
+    LoadModelForValidation -->|Model Issues| Failure
+    ExecuteHoldoutValidation -->|Holdout Failed| Failure
+    ExecutePerformanceTests -->|Performance Issues| Failure
+    CheckAllValidationResults -->|Quality Gates Failed| Failure
+
+    %% Styling
+    classDef setup fill:#e3f2fd,stroke:#1565c0,stroke-width:2px
+    classDef data fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px
+    classDef model fill:#e8f5e8,stroke:#2e7d32,stroke-width:2px
+    classDef holdout fill:#fff3e0,stroke:#f57c00,stroke-width:2px
+    classDef deciles fill:#fce4ec,stroke:#c2185b,stroke-width:2px
+    classDef business fill:#f5f5f5,stroke:#424242,stroke-width:2px
+    classDef statistical fill:#e1f5fe,stroke:#01579b,stroke-width:2px
+    classDef integration fill:#f9fbe7,stroke:#689f38,stroke-width:2px
+    classDef performance fill:#ffebee,stroke:#d32f2f,stroke-width:2px
+    classDef ci fill:#e0f2f1,stroke:#00695c,stroke-width:2px
+    classDef success fill:#c8e6c9,stroke:#2e7d32,stroke-width:3px
+    classDef failure fill:#ffcdd2,stroke:#c62828,stroke-width:3px
+
+    class Start,InitializeValidation,LoadValidationConfig,SetupTestEnvironment,InitializeTestLogging,ValidateTestPrerequisites setup
+    class ExecuteDataValidator,ValidateSchemaCompliance,CheckDataCompleteness,ValidateDataConsistency,PerformStatisticalChecks,GenerateDataQualityReport data
+    class LoadModelForValidation,ValidateModelInputs,ExecuteModelPredictions,ValidatePredictionOutputs,CheckModelPerformance,GenerateModelValidationReport model
+    class ExecuteHoldoutValidation,LoadHoldoutDataset,PrepareHoldoutFeatures,GenerateHoldoutPredictions,CalculateHoldoutMetrics,CompareWithBaseline,GenerateHoldoutReport holdout
+    class ExecuteDecilesAnalysis,SortPredictionsByScore,CreateDecileBuckets,CalculateDecileMetrics,AnalyzeDecileTrends,GenerateDecilePlots,CreateDecileReport deciles
+    class ValidateBusinessRules,CheckScoringThresholds,ValidateCustomerFilters,AssessBusinessImpact,GenerateBusinessReport business
+    class PerformDistributionTests,CheckFeatureStability,ValidateModelCalibration,AssessPredictionVariance,GenerateStatisticalReport statistical
+    class TestETLIntegration,TestFeatureIntegration,TestModelIntegration,TestAPIIntegration,ValidateSystemIntegration,GenerateIntegrationReport integration
+    class ExecutePerformanceTests,MeasureExecutionTime,MonitorResourceUsage,TestScalability,ValidateConcurrency,GeneratePerformanceReport performance
+    class ExecuteCIGate,CheckAllValidationResults,ValidateQualityThresholds,GenerateFinalReport,DetermineBuildStatus,SendNotification ci
+    class Success success
+    class Failure failure
+```

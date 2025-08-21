@@ -1,0 +1,207 @@
+---
+title: GoSales Engine - Model Training Flow
+---
+
+```mermaid
+graph TB
+    %% Start
+    Start([Model Training Start]) --> InitializeTraining
+
+    %% Training Initialization
+    subgraph "Training Initialization"
+        InitializeTraining[Initialize Training Environment<br/>train_division_model.py]
+        LoadTrainingConfig[Load Training Configuration<br/>Division-specific Config]
+        SetupMLflow[Setup MLflow Tracking<br/>Experiment Tracking]
+        ValidateTrainingData[Validate Training Data Availability<br/>Feature Matrix, Labels]
+        InitializeRandomSeeds[Initialize Random Seeds<br/>Reproducibility]
+    end
+
+    %% Data Preparation Phase
+    subgraph "Data Preparation"
+        LoadFeatureMatrix[Load Feature Matrix<br/>From cache.py]
+        LoadTargetLabels[Load Target Labels<br/>From targets.py]
+        SplitTrainValidation[Split Train/Validation Sets<br/>80/20 Split]
+        ApplyFeatureScaling[Apply Feature Scaling<br/>StandardScaler]
+        HandleClassImbalance[Handle Class Imbalance<br/>SMOTE/Sampling]
+    end
+
+    %% Model Configuration Phase
+    subgraph "Model Configuration"
+        SelectModelArchitecture[Select Model Architecture<br/>LightGBM for Division]
+        ConfigureHyperparameters[Configure Hyperparameters<br/>Grid/Random Search Space]
+        SetupCrossValidation[Setup Cross-Validation Strategy<br/>5-Fold CV]
+        DefineEvaluationMetrics[Define Evaluation Metrics<br/>AUC, Precision, Recall, F1]
+        ConfigureEarlyStopping[Configure Early Stopping<br/>Prevent Overfitting]
+    end
+
+    %% Training Execution Phase
+    subgraph "Training Execution"
+        TrainInitialModel[Train Initial Model<br/>Baseline Model]
+        PerformCrossValidation[Perform Cross-Validation<br/>Hyperparameter Tuning]
+        OptimizeModelParameters[Optimize Model Parameters<br/>Grid Search]
+        TrainFinalModel[Train Final Model<br/>Best Parameters]
+        GenerateFeatureImportance[Generate Feature Importance<br/>SHAP Values]
+    end
+
+    %% Model Evaluation Phase
+    subgraph "Model Evaluation"
+        EvaluateOnValidationSet[Evaluate on Validation Set<br/>Holdout Performance]
+        CalculatePerformanceMetrics[Calculate Performance Metrics<br/>Comprehensive Metrics]
+        GenerateConfusionMatrix[Generate Confusion Matrix<br/>Classification Performance]
+        CreateROCPlots[Create ROC/PR Curves<br/>Threshold Analysis]
+        AssessModelStability[Assess Model Stability<br/>Cross-validation Variance]
+    end
+
+    %% Model Validation Phase
+    subgraph "Model Validation"
+        PerformHoldoutValidation[Perform Holdout Validation<br/>Unseen Data Test]
+        ValidateBusinessMetrics[Validate Business Metrics<br/>ROI, Uplift]
+        CheckModelFairness[Check Model Fairness<br/>Bias and Fairness Tests]
+        AssessModelRobustness[Assess Model Robustness<br/>Stress Testing]
+        GenerateValidationReport[Generate Validation Report<br/>Comprehensive Analysis]
+    end
+
+    %% Model Packaging Phase
+    subgraph "Model Packaging"
+        SaveModelArtifacts[Save Model Artifacts<br/>model.pkl, MLmodel]
+        CreateModelMetadata[Create Model Metadata<br/>Version, Parameters, Metrics]
+        GenerateModelCard[Generate Model Card<br/>Model Documentation]
+        PackageModelFiles[Package Model Files<br/>Conda Environment]
+        CreateDeploymentManifest[Create Deployment Manifest<br/>Deployment Instructions]
+    end
+
+    %% MLflow Integration Phase
+    subgraph "MLflow Integration"
+        LogModelParameters[Log Model Parameters<br/>Hyperparameters]
+        LogPerformanceMetrics[Log Performance Metrics<br/>AUC, F1, etc.]
+        LogFeatureImportance[Log Feature Importance<br/>SHAP Values]
+        LogModelArtifacts[Log Model Artifacts<br/>Model Files]
+        CreateModelVersion[Create Model Version<br/>Version Control]
+        RegisterModel[Register Model<br/>Model Registry]
+    end
+
+    %% Post-Training Analysis Phase
+    subgraph "Post-Training Analysis"
+        AnalyzeFeatureContributions[Analyze Feature Contributions<br/>Global Feature Importance]
+        IdentifyKeyPredictors[Identify Key Predictors<br/>Business Insights]
+        GenerateExplanations[Generate Explanations<br/>SHAP/SHAP Analysis]
+        CreateModelInterpretability[Create Model Interpretability<br/>LIME Analysis]
+        DocumentModelInsights[Document Model Insights<br/>Business Recommendations]
+    end
+
+    %% Model Deployment Preparation
+    subgraph "Deployment Preparation"
+        ValidateModelCompatibility[Validate Model Compatibility<br/>Production Environment]
+        CreateInferencePipeline[Create Inference Pipeline<br/>Batch/Real-time]
+        SetupModelMonitoring[Setup Model Monitoring<br/>Drift Detection]
+        GenerateDeploymentScripts[Generate Deployment Scripts<br/>Automation Scripts]
+        CreateRollbackPlan[Create Rollback Plan<br/>Disaster Recovery]
+    end
+
+    %% End
+    CreateRollbackPlan --> Success([Training Success])
+    GenerateValidationReport --> Failure([Training Failed])
+
+    %% Main Flow Connections
+    Start --> InitializeTraining
+    InitializeTraining --> LoadTrainingConfig
+    LoadTrainingConfig --> SetupMLflow
+    SetupMLflow --> ValidateTrainingData
+    ValidateTrainingData --> InitializeRandomSeeds
+    InitializeRandomSeeds --> LoadFeatureMatrix
+
+    LoadFeatureMatrix --> LoadTargetLabels
+    LoadTargetLabels --> SplitTrainValidation
+    SplitTrainValidation --> ApplyFeatureScaling
+    ApplyFeatureScaling --> HandleClassImbalance
+
+    HandleClassImbalance --> SelectModelArchitecture
+    SelectModelArchitecture --> ConfigureHyperparameters
+    ConfigureHyperparameters --> SetupCrossValidation
+    SetupCrossValidation --> DefineEvaluationMetrics
+    DefineEvaluationMetrics --> ConfigureEarlyStopping
+
+    ConfigureEarlyStopping --> TrainInitialModel
+    TrainInitialModel --> PerformCrossValidation
+    PerformCrossValidation --> OptimizeModelParameters
+    OptimizeModelParameters --> TrainFinalModel
+    TrainFinalModel --> GenerateFeatureImportance
+
+    GenerateFeatureImportance --> EvaluateOnValidationSet
+    EvaluateOnValidationSet --> CalculatePerformanceMetrics
+    CalculatePerformanceMetrics --> GenerateConfusionMatrix
+    GenerateConfusionMatrix --> CreateROCPlots
+    CreateROCPlots --> AssessModelStability
+
+    AssessModelStability --> PerformHoldoutValidation
+    PerformHoldoutValidation --> ValidateBusinessMetrics
+    ValidateBusinessMetrics --> CheckModelFairness
+    CheckModelFairness --> AssessModelRobustness
+    AssessModelRobustness --> GenerateValidationReport
+
+    GenerateValidationReport --> SaveModelArtifacts
+    SaveModelArtifacts --> CreateModelMetadata
+    CreateModelMetadata --> GenerateModelCard
+    GenerateModelCard --> PackageModelFiles
+    PackageModelFiles --> CreateDeploymentManifest
+
+    CreateDeploymentManifest --> LogModelParameters
+    LogModelParameters --> LogPerformanceMetrics
+    LogPerformanceMetrics --> LogFeatureImportance
+    LogFeatureImportance --> LogModelArtifacts
+    LogModelArtifacts --> CreateModelVersion
+    CreateModelVersion --> RegisterModel
+
+    RegisterModel --> AnalyzeFeatureContributions
+    AnalyzeFeatureContributions --> IdentifyKeyPredictors
+    IdentifyKeyPredictors --> GenerateExplanations
+    GenerateExplanations --> CreateModelInterpretability
+    CreateModelInterpretability --> DocumentModelInsights
+
+    DocumentModelInsights --> ValidateModelCompatibility
+    ValidateModelCompatibility --> CreateInferencePipeline
+    CreateInferencePipeline --> SetupModelMonitoring
+    SetupModelMonitoring --> GenerateDeploymentScripts
+    GenerateDeploymentScripts --> CreateRollbackPlan
+
+    %% Parallel Monitoring
+    InitializeTraining --> SetupMLflow
+    LoadFeatureMatrix --> SetupMLflow
+    TrainFinalModel --> SetupMLflow
+    EvaluateOnValidationSet --> SetupMLflow
+    SaveModelArtifacts --> SetupMLflow
+
+    %% Error Handling
+    InitializeTraining -->|Setup Failed| Failure
+    ValidateTrainingData -->|Data Issues| Failure
+    TrainFinalModel -->|Training Failed| Failure
+    PerformHoldoutValidation -->|Validation Failed| Failure
+    SaveModelArtifacts -->|Save Failed| Failure
+
+    %% Styling
+    classDef init fill:#e3f2fd,stroke:#1565c0,stroke-width:2px
+    classDef data fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px
+    classDef config fill:#e8f5e8,stroke:#2e7d32,stroke-width:2px
+    classDef training fill:#fff3e0,stroke:#f57c00,stroke-width:2px
+    classDef evaluation fill:#fce4ec,stroke:#c2185b,stroke-width:2px
+    classDef validation fill:#f5f5f5,stroke:#424242,stroke-width:2px
+    classDef packaging fill:#e1f5fe,stroke:#01579b,stroke-width:2px
+    classDef mlflow fill:#f9fbe7,stroke:#689f38,stroke-width:2px
+    classDef analysis fill:#ffebee,stroke:#d32f2f,stroke-width:2px
+    classDef deployment fill:#e0f2f1,stroke:#00695c,stroke-width:2px
+    classDef success fill:#c8e6c9,stroke:#2e7d32,stroke-width:3px
+    classDef failure fill:#ffcdd2,stroke:#c62828,stroke-width:3px
+
+    class Start,InitializeTraining,LoadTrainingConfig,SetupMLflow,ValidateTrainingData,InitializeRandomSeeds init
+    class LoadFeatureMatrix,LoadTargetLabels,SplitTrainValidation,ApplyFeatureScaling,HandleClassImbalance data
+    class SelectModelArchitecture,ConfigureHyperparameters,SetupCrossValidation,DefineEvaluationMetrics,ConfigureEarlyStopping config
+    class TrainInitialModel,PerformCrossValidation,OptimizeModelParameters,TrainFinalModel,GenerateFeatureImportance training
+    class EvaluateOnValidationSet,CalculatePerformanceMetrics,GenerateConfusionMatrix,CreateROCPlots,AssessModelStability evaluation
+    class PerformHoldoutValidation,ValidateBusinessMetrics,CheckModelFairness,AssessModelRobustness,GenerateValidationReport validation
+    class SaveModelArtifacts,CreateModelMetadata,GenerateModelCard,PackageModelFiles,CreateDeploymentManifest packaging
+    class LogModelParameters,LogPerformanceMetrics,LogFeatureImportance,LogModelArtifacts,CreateModelVersion,RegisterModel mlflow
+    class AnalyzeFeatureContributions,IdentifyKeyPredictors,GenerateExplanations,CreateModelInterpretability,DocumentModelInsights analysis
+    class ValidateModelCompatibility,CreateInferencePipeline,SetupModelMonitoring,GenerateDeploymentScripts,CreateRollbackPlan deployment
+    class Success success
+    class Failure failure
+```
