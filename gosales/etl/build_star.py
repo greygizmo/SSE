@@ -9,10 +9,11 @@ except Exception:
 from sqlalchemy import text
 from pathlib import Path
 import hashlib
-from gosales.utils.db import get_db_connection
-from gosales.utils.paths import OUTPUTS_DIR
+from gosales.utils.db import get_db_connection, get_curated_connection
+from gosales.utils.paths import OUTPUTS_DIR, DATA_DIR
 from gosales.utils.config import load_config
 from gosales.ops.run import run_context
+from gosales.etl.ingest import robust_read_csv
 from gosales.utils.logger import get_logger
 from gosales.etl.sku_map import get_sku_mapping
 from gosales.etl.cleaners import clean_currency_value, coerce_datetime, summarise_dataframe_schema
@@ -79,10 +80,22 @@ def build_star_schema(engine, config_path: str | Path | None = None, rebuild: bo
         except Exception as e:
             logger.warning(f"Failed to clean curated parquet: {e}")
 
+    # Resolve source table/view names from config (supports schema-qualified names)
+    db_sources = {}
+    try:
+        db_sources = dict(getattr(getattr(cfg, 'database', object()), 'source_tables', {}) or {})
+    except Exception:
+        db_sources = {}
+    sales_log_src = db_sources.get('sales_log', 'sales_log')
+    ind_src = db_sources.get('industry_enrichment', 'industry_enrichment')
+
+    # Engines: source (raw) and curated (write target)
+    curated_engine = get_curated_connection()
+
     # Read the raw data from the database using pandas first, then convert to polars
     logger.info("Reading sales_log table...")
     try:
-        sales_log_pd = pd.read_sql("SELECT * FROM sales_log", engine)
+        sales_log_pd = pd.read_sql(f"SELECT * FROM {sales_log_src}", engine)
 
         # --- Normalize schema to canonical wide format ---
         def normalize_sales_log_schema(df: pd.DataFrame) -> pd.DataFrame:
@@ -90,46 +103,33 @@ def build_star_schema(engine, config_path: str | Path | None = None, rebuild: bo
             # Trim column names
             df.columns = [str(c).strip() for c in df.columns]
 
-            # Ensure identifying columns exist
+            # Create canonical columns from exact DB headers provided via config
             for col in ["CustomerId", "Rec Date", "Division", "Customer"]:
                 if col not in df.columns:
                     df[col] = None
-
-            # Alias common synonyms to our canonical GP/Qty columns
-            # Map common header variants to our canonical column names
-            alias_pairs = [
-                ("PDM", "EPDM_CAD_Editor"),
-                ("PDM_Qty", "EPDM_CAD_Editor_Qty"),
-                ("Supplies", "Consumables"),
-                # DraftSight inference inputs (map to canonical DraftSight if present downstream)
-                ("DraftSight", "CGP"),
-                ("DraftSight_Qty", "Misc_Qty"),
-                # AM software alias
-                ("AM_Software_Qty", "_3DP_Software_Qty"),
-                ("AM_Software_Qty", "3DP_Software_Qty"),
-                ("AM_Software_Qty", "AM Software Qty"),
-                ("AM_Software", "_3DP_Software"),
-                ("AM_Software", "3DP_Software"),
-                ("AM_Software", "AM Software"),
-                # Post Processing variants
-                ("Post_Processing", "Post Processing"),
-                ("Post_Processing", "PostProcessing"),
-                ("Post_Processing_Qty", "Post Processing_Qty"),
-                ("Post_Processing_Qty", "PostProcessing_Qty"),
-                # Legacy printer SKUs alias to Fortus
-                ("Fortus", "_1200_Elite_Fortus250"),
-                ("Fortus_Qty", "_1200_Elite_Fortus250_Qty"),
-                ("Fortus", "UPrint"),
-                ("Fortus_Qty", "UPrint_Qty"),
-                # CPE SKU variants with spaces
-                ("HV_Simulation", "HV Simulation"),
-                ("HV_Simulation_Qty", "HV Simulation_Qty"),
-                ("Delmia_Apriso", "Delmia Apriso"),
-                ("Delmia_Apriso_Qty", "Delmia Apriso_Qty"),
-            ]
-            for target, source in alias_pairs:
-                if target not in df.columns and source in df.columns:
-                    df[target] = df[source]
+            src_map = {}
+            try:
+                src_map = dict(getattr(getattr(cfg, 'etl', object()), 'source_columns', {}) or {})
+            except Exception:
+                src_map = {}
+            cust_col = src_map.get('customer_id')
+            date_col = src_map.get('order_date')
+            div_col = src_map.get('division')
+            name_col = src_map.get('customer_name')
+            if cust_col and cust_col in df.columns:
+                df['CustomerId'] = df[cust_col]
+            if date_col and date_col in df.columns:
+                df['Rec Date'] = df[date_col]
+            if div_col and div_col in df.columns:
+                df['Division'] = df[div_col]
+            if name_col and name_col in df.columns:
+                df['Customer'] = df[name_col]
+            # Final fallback for Customer name
+            if df['Customer'].isna().all():
+                try:
+                    df['Customer'] = df['CustomerId'].astype(str)
+                except Exception:
+                    df['Customer'] = ""
 
             # Ensure all mapped GP/Qty columns exist
             mapping_local = get_sku_mapping()
@@ -178,7 +178,17 @@ def build_star_schema(engine, config_path: str | Path | None = None, rebuild: bo
                 for c in sales_log_pd.columns
             ]
             sales_log_pd_norm = sales_log_pd.copy()
-            sales_log_pd_norm.columns = norm_cols
+            # Ensure unique normalized columns by de-duplicating with suffixes
+            seen: dict[str,int] = {}
+            uniq_cols: list[str] = []
+            for c in norm_cols:
+                if c in seen:
+                    seen[c] += 1
+                    uniq_cols.append(f"{c}__{seen[c]}")
+                else:
+                    seen[c] = 0
+                    uniq_cols.append(c)
+            sales_log_pd_norm.columns = uniq_cols
             pl.from_pandas(sales_log_pd_norm).write_parquet(staging_dir / "sales_log_normalized.parquet")
         except Exception as e:
             logger.warning(f"Failed to write staging parquet: {e}")
@@ -244,11 +254,29 @@ def build_star_schema(engine, config_path: str | Path | None = None, rebuild: bo
 
     # Read industry enrichment data if available
     try:
-        industry_enrichment_pd = pd.read_sql("SELECT * FROM industry_enrichment", engine)
-        industry_enrichment = pl.from_pandas(industry_enrichment_pd)
-        logger.info(f"Successfully loaded industry enrichment data with {len(industry_enrichment)} records.")
+        if isinstance(ind_src, str) and ind_src.lower() == 'csv':
+            # Read from CSV path in config
+            try:
+                csv_path = getattr(getattr(cfg, 'etl', object()), 'industry_enrichment_csv', None)
+                if not csv_path:
+                    # Default fallback path
+                    csv_path = DATA_DIR / 'database_samples' / 'TR - Industry Enrichment.csv'
+                else:
+                    csv_path = Path(csv_path)
+                ie_pd = robust_read_csv(csv_path)
+                industry_enrichment = pl.from_pandas(ie_pd)
+                logger.info(f"Loaded industry enrichment CSV with {len(industry_enrichment)} records from {csv_path}.")
+            except Exception as ee:
+                logger.warning(f"Failed reading industry enrichment CSV: {ee}. Falling back to DB if available...")
+                industry_enrichment_pd = pd.read_sql("SELECT * FROM industry_enrichment", engine)
+                industry_enrichment = pl.from_pandas(industry_enrichment_pd)
+                logger.info(f"Successfully loaded industry enrichment data with {len(industry_enrichment)} records.")
+        else:
+            industry_enrichment_pd = pd.read_sql(f"SELECT * FROM {ind_src}", engine)
+            industry_enrichment = pl.from_pandas(industry_enrichment_pd)
+            logger.info(f"Successfully loaded industry enrichment data with {len(industry_enrichment)} records.")
     except Exception as e:
-        logger.warning(f"Industry enrichment table not found: {e}")
+        logger.warning(f"Industry enrichment source not found/loaded: {e}")
         industry_enrichment = None
 
     # Start with basic customer data from sales_log
@@ -256,7 +284,7 @@ def build_star_schema(engine, config_path: str | Path | None = None, rebuild: bo
     # Build per-customer record; keep exact and normalised customer name for joining with enrichment
     dim_customer_base = (
         sales_log.lazy()
-        .select(["Customer", "CustomerId"]) 
+        .select(["Customer", "CustomerId"])
         .rename({
             "Customer": "customer_name",
             "CustomerId": "customer_id",
@@ -266,8 +294,8 @@ def build_star_schema(engine, config_path: str | Path | None = None, rebuild: bo
             pl.col("customer_name").first().cast(pl.Utf8).str.strip_chars().alias("customer_name"),
         ])
         .with_columns([
-            # Keep primary customer_id as integer to match fact tables and downstream joins
-            pl.col("customer_id").cast(pl.Int64, strict=False),
+            # Keep customer_id as string (GUID-safe) for downstream joins
+            pl.col("customer_id").cast(pl.Utf8),
             # Normalised name and numeric prefix for robust matching
             pl.col("customer_name").cast(pl.Utf8).str.to_lowercase().str.replace_all(r"\s+", " ").alias("customer_name_norm"),
             pl.col("customer_name")
@@ -275,6 +303,33 @@ def build_star_schema(engine, config_path: str | Path | None = None, rebuild: bo
                 .str.extract(r"^\s*(\d+)")
                 .cast(pl.Int64, strict=False)
                 .alias("customer_prefix_id"),
+        ])
+        .filter(pl.col("customer_id").is_not_null())
+    )
+
+    # Preserve raw sales_log data for Branch/Rep features
+    # This ensures we have the original Branch and Rep information available
+    fact_sales_log_raw = (
+        sales_log.lazy()
+        .select([
+            "CustomerId", "Rec Date", "branch", "rep", "Customer",
+            "Division", "invoice_date"
+        ])
+        .rename({
+            "CustomerId": "customer_id",
+            "Rec Date": "order_date",
+            "Customer": "customer_name",
+            "Division": "division"
+        })
+        .with_columns([
+            # Ensure consistent string typing for customer_id
+            pl.col("customer_id").cast(pl.Utf8),
+            # Preserve original columns for feature engineering (already lowercase)
+            pl.col("branch").cast(pl.Utf8),
+            pl.col("rep").cast(pl.Utf8),
+            pl.col("order_date").cast(pl.Date),
+            pl.col("division").cast(pl.Utf8),
+            pl.col("invoice_date").cast(pl.Date),
         ])
         .filter(pl.col("customer_id").is_not_null())
     )
@@ -347,11 +402,23 @@ def build_star_schema(engine, config_path: str | Path | None = None, rebuild: bo
             .collect()
         )
         
-        # C) Optional fuzzy-match fallback for remaining unmatched names
+        # C) Optional fuzzy-match fallback for remaining unmatched names (configurable)
         try:
             if FUZZY_AVAILABLE:
                 unmatched = dim_customer.filter(pl.col("industry").is_null())
-                if len(unmatched) > 0:
+                total = int(len(dim_customer)) if dim_customer is not None else 0
+                with_ind = int(dim_customer.filter(pl.col('industry').is_not_null()).height)
+                cov = (with_ind / total) if total else 0.0
+                do_fuzzy = bool(getattr(getattr(cfg, 'etl', object()), 'enable_industry_fuzzy', True))
+                min_unmatched = int(getattr(getattr(cfg, 'etl', object()), 'fuzzy_min_unmatched', 50))
+                skip_cov_ge = float(getattr(getattr(cfg, 'etl', object()), 'fuzzy_skip_if_coverage_ge', 0.95))
+                if not do_fuzzy:
+                    logger.info("Industry fuzzy matching disabled via config; skipping fuzzy fallback.")
+                elif cov >= skip_cov_ge:
+                    logger.info(f"Industry coverage {cov:.2%} >= {skip_cov_ge:.0%} threshold; skipping fuzzy fallback.")
+                elif len(unmatched) < min_unmatched:
+                    logger.info(f"Only {len(unmatched)} unmatched (< {min_unmatched}); skipping fuzzy fallback.")
+                else:
                     logger.info(f"Attempting fuzzy match for {len(unmatched)} customers without industry data...")
                     # Collect eager frames to pandas
                     unmatched_pd = unmatched.select(["customer_id", "customer_name_norm"]).to_pandas()
@@ -414,7 +481,7 @@ def build_star_schema(engine, config_path: str | Path | None = None, rebuild: bo
         dim_customer = dim_customer_base.collect()
         logger.info(f"Successfully created dim_customer table with {len(dim_customer)} unique customers (no industry data).")
 
-    dim_customer.write_database("dim_customer", engine, if_table_exists="replace")
+    dim_customer.write_database("dim_customer", curated_engine, if_table_exists="replace")
     # Write Parquet snapshot
     dim_customer_parquet = curated_dir / "dim" / "dim_customer.parquet"
     dim_customer.write_parquet(dim_customer_parquet)
@@ -498,7 +565,7 @@ def build_star_schema(engine, config_path: str | Path | None = None, rebuild: bo
     fact_transactions_pd = fact_transactions.to_pandas()
     
     # Clean the data
-    fact_transactions_pd['customer_id'] = pd.to_numeric(fact_transactions_pd['CustomerId'], errors='coerce')
+    fact_transactions_pd['customer_id'] = fact_transactions_pd['CustomerId'].astype(str)
     fact_transactions_pd['order_date'] = coerce_datetime(fact_transactions_pd['Rec Date'])
 
     # Clean currency columns using shared cleaner
@@ -524,7 +591,11 @@ def build_star_schema(engine, config_path: str | Path | None = None, rebuild: bo
     # Convert back to polars
     fact_transactions = pl.from_pandas(fact_transactions_pd)
 
-    fact_transactions.write_database("fact_transactions", engine, if_table_exists="replace")
+    fact_transactions.write_database("fact_transactions", curated_engine, if_table_exists="replace")
+
+    # Write raw sales log data for Branch/Rep features
+    fact_sales_log_raw = fact_sales_log_raw.collect()
+    fact_sales_log_raw.write_database("fact_sales_log_raw", curated_engine, if_table_exists="replace")
     # Write Parquet snapshot and checksum
     fact_parquet = curated_dir / "fact" / "fact_transactions.parquet"
     fact_transactions.write_parquet(fact_parquet)
@@ -532,7 +603,7 @@ def build_star_schema(engine, config_path: str | Path | None = None, rebuild: bo
 
     # Create indexes on common join/filter keys for performance
     try:
-        with engine.connect() as conn:
+        with curated_engine.connect() as conn:
             conn.execute(text("CREATE INDEX IF NOT EXISTS idx_fact_customer ON fact_transactions(customer_id)"))
             conn.execute(text("CREATE INDEX IF NOT EXISTS idx_fact_order_date ON fact_transactions(order_date)"))
             conn.execute(text("CREATE INDEX IF NOT EXISTS idx_fact_division ON fact_transactions(product_division)"))
@@ -593,8 +664,8 @@ def build_star_schema(engine, config_path: str | Path | None = None, rebuild: bo
     # --- FK integrity (fact → dim_customer, dim_product, dim_date) ---
     try:
         # Prepare keys
-        dim_c = dim_customer.select([pl.col("customer_id")]).unique().with_columns(pl.col("customer_id").cast(pl.Int64, strict=False))
-        fact_ck = fact_transactions.select([pl.col("customer_id")]).with_columns(pl.col("customer_id").cast(pl.Int64, strict=False))
+        dim_c = dim_customer.select([pl.col("customer_id")]).unique().with_columns(pl.col("customer_id").cast(pl.Utf8))
+        fact_ck = fact_transactions.select([pl.col("customer_id")]).with_columns(pl.col("customer_id").cast(pl.Utf8))
         # Left anti joins to find missing
         missing_customer = fact_ck.join(dim_c, on="customer_id", how="anti")
         # Product and date integrity (best effort)
@@ -631,14 +702,14 @@ def build_star_schema(engine, config_path: str | Path | None = None, rebuild: bo
                     "quarter": [int((d.month - 1) / 3) + 1 for d in rng],
                     "month": [d.month for d in rng],
                 })
-                dim_date.write_database("dim_date", engine, if_table_exists="replace")
+                dim_date.write_database("dim_date", curated_engine, if_table_exists="replace")
                 dim_date.write_parquet(curated_dir / "dim" / "dim_date.parquet")
         # dim_product: unique SKUs/divisions
         dp = (
             fact_transactions.select(["product_sku", "product_division"])\
             .unique()
         )
-        dp.write_database("dim_product", engine, if_table_exists="replace")
+        dp.write_database("dim_product", curated_engine, if_table_exists="replace")
         dp.write_parquet(curated_dir / "dim" / "dim_product.parquet")
     except Exception as e:
         logger.warning(f"Failed to build dim_date/dim_product: {e}")
@@ -646,7 +717,7 @@ def build_star_schema(engine, config_path: str | Path | None = None, rebuild: bo
     # --- Deprecate old tables ---
     try:
         logger.info("Dropping old fact_orders and dim_product tables if legacy names exist...")
-        with engine.connect() as connection:
+        with curated_engine.connect() as connection:
             connection.execute(text("DROP TABLE IF EXISTS fact_orders;"))
             connection.execute(text("DROP TABLE IF EXISTS dim_product_legacy;"))
             connection.commit()

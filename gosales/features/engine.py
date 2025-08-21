@@ -424,16 +424,25 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
         # Attach to features_pd
         features_pd = features_pd.merge(extra, on='customer_id', how='left')
 
-        # --- Region (Branch) and Rep features from sales_log (feature period only) ---
+        # --- Region (Branch) and Rep features from preserved raw data ---
         try:
-            sl = pd.read_sql("SELECT CustomerId, [Rec Date] AS rec_date, Branch, Rep FROM sales_log", engine)
-            sl['rec_date'] = pd.to_datetime(sl['rec_date'], errors='coerce')
-            sl['customer_id'] = pd.to_numeric(sl['CustomerId'], errors='coerce').astype('Int64')
+            # Use preserved raw data instead of missing sales_log table
+            raw_data_query = """
+                SELECT customer_id, order_date, branch, rep
+                FROM fact_sales_log_raw
+            """
+            if cutoff_date:
+                raw_data_query += f" WHERE order_date <= '{cutoff_date}'"
+
+            sl = pd.read_sql(raw_data_query, engine)
+
+            # Ensure proper types - customer_id should already be string from ETL
+            sl['order_date'] = pd.to_datetime(sl['order_date'], errors='coerce')
             sl = sl.dropna(subset=['customer_id'])
-            sl = sl[sl['rec_date'] <= cutoff_dt]
+            # No need for type conversion - customer_id is already string from ETL
             # Top branches and reps
-            top_branches = sl['Branch'].astype(str).str.strip().value_counts().head(30).index.tolist()
-            top_reps = sl['Rep'].astype(str).str.strip().value_counts().head(50).index.tolist()
+            top_branches = sl['branch'].astype(str).str.strip().value_counts().head(30).index.tolist()
+            top_reps = sl['rep'].astype(str).str.strip().value_counts().head(50).index.tolist()
 
             import re
             def sanitize_key(text: str) -> str:
@@ -448,21 +457,21 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
                 return key
 
             # Branch share features
-            b = sl[['customer_id', 'Branch']].copy()
-            b['Branch'] = b['Branch'].astype(str).str.strip()
+            b = sl[['customer_id', 'branch']].copy()
+            b['branch'] = b['branch'].astype(str).str.strip()
             b['count'] = 1
             b_tot = b.groupby('customer_id')['count'].sum().rename('branch_tx_total')
-            b_top = b[b['Branch'].isin(top_branches)].groupby(['customer_id', 'Branch'])['count'].sum().unstack(fill_value=0)
+            b_top = b[b['branch'].isin(top_branches)].groupby(['customer_id', 'branch'])['count'].sum().unstack(fill_value=0)
             # Normalize to shares
             b_top = b_top.div(b_tot, axis=0).fillna(0.0)
             b_top.columns = [f"branch_share_{sanitize_key(c)}" for c in b_top.columns]
 
             # Rep share features
-            r = sl[['customer_id', 'Rep']].copy()
-            r['Rep'] = r['Rep'].astype(str).str.strip()
+            r = sl[['customer_id', 'rep']].copy()
+            r['rep'] = r['rep'].astype(str).str.strip()
             r['count'] = 1
             r_tot = r.groupby('customer_id')['count'].sum().rename('rep_tx_total')
-            r_top = r[r['Rep'].isin(top_reps)].groupby(['customer_id', 'Rep'])['count'].sum().unstack(fill_value=0)
+            r_top = r[r['rep'].isin(top_reps)].groupby(['customer_id', 'rep'])['count'].sum().unstack(fill_value=0)
             r_top = r_top.div(r_tot, axis=0).fillna(0.0)
             r_top.columns = [f"rep_share_{sanitize_key(c)}" for c in r_top.columns]
 
@@ -619,8 +628,13 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
                 lookback_months=cfgmod.features.als_lookback_months,
             )
             if not als_df.is_empty():
-                # Join on customer_id
+                # Ensure type consistency before joining
                 als_pd = als_df.to_pandas()
+                # Ensure customer_id types match
+                als_pd["customer_id"] = als_pd["customer_id"].astype(str)
+                features_pd["customer_id"] = features_pd["customer_id"].astype(str)
+
+                # Join on customer_id with consistent types
                 features_pd = features_pd.merge(als_pd, on='customer_id', how='left')
                 for c in [c for c in features_pd.columns if str(c).startswith('als_f')]:
                     features_pd[c] = pd.to_numeric(features_pd[c], errors='coerce').fillna(0.0)
