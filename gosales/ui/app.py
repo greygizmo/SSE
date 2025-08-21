@@ -5,6 +5,13 @@ from datetime import datetime
 import pandas as pd
 import streamlit as st
 
+# Try to import streamlit-markdown for enhanced Mermaid support
+try:
+    from streamlit_markdown import st_markdown
+    MARKDOWN_AVAILABLE = True
+except ImportError:
+    MARKDOWN_AVAILABLE = False
+
 from gosales.utils.paths import OUTPUTS_DIR, MODELS_DIR
 from gosales.ui.utils import discover_validation_runs, compute_validation_badges, load_thresholds, load_alerts, compute_default_validation_index, read_runs_registry
 from gosales.monitoring.data_collector import MonitoringDataCollector
@@ -76,7 +83,7 @@ with st.sidebar:
     colr1.write(":memo: Navigation")
     if colr2.button("Refresh", help="Clear cached artifacts and reload"):
         st.cache_data.clear()
-    tab = st.radio("Page", ["Overview", "Metrics", "Explainability", "Whitespace", "Validation", "Runs", "Monitoring"], index=0)
+    tab = st.radio("Page", ["Overview", "Metrics", "Explainability", "Whitespace", "Validation", "Runs", "Monitoring", "Architecture"], index=0)
     # Global divisions and default whitespace cutoff
     st.session_state.setdefault('divisions', _discover_divisions())
     # Preselect most recent whitespace cutoff
@@ -628,3 +635,134 @@ if tab == "Monitoring":
     st.caption("🔍 Pipeline monitoring provides real-time visibility into data quality, performance, and system health. All metrics are updated after each pipeline run.")
     st.caption("📊 Data lineage tracking ensures complete traceability from source to output.")
     st.caption("⚡ Performance metrics help identify bottlenecks and optimization opportunities.")
+
+# Architecture Documentation Tab
+elif tab == "Architecture":
+    st.header("🏗️ GoSales Engine Architecture Documentation")
+
+    st.markdown("""
+    Welcome to the comprehensive architecture documentation for the GoSales Engine. This section provides
+    detailed visual diagrams showing every phase of the data pipeline, from data ingestion to model deployment.
+
+    **Navigation:** Use the dropdown below to select different architectural views.
+    """)
+
+    # Architecture diagram selector
+    architecture_options = {
+        "🏗️ Overall Architecture": {
+            "file": "gosales/docs/architecture/01_overall_architecture.mmd",
+            "description": "High-level overview of the complete GoSales Engine system"
+        },
+        "🔄 ETL Flow": {
+            "file": "gosales/docs/architecture/02_etl_flow.mmd",
+            "description": "Data extraction, transformation, and loading process"
+        },
+        "⚙️ Feature Engineering Flow": {
+            "file": "gosales/docs/architecture/03_feature_engineering_flow.mmd",
+            "description": "Customer, product, temporal, and ALS feature generation"
+        },
+        "🤖 Model Training Flow": {
+            "file": "gosales/docs/architecture/04_model_training_flow.mmd",
+            "description": "LightGBM training with MLflow integration"
+        },
+        "🎬 Pipeline Orchestration Flow": {
+            "file": "gosales/docs/architecture/05_pipeline_orchestration_flow.mmd",
+            "description": "End-to-end pipeline execution and customer scoring"
+        },
+        "✅ Validation & Testing Flow": {
+            "file": "gosales/docs/architecture/06_validation_testing_flow.mmd",
+            "description": "Quality assurance and testing framework"
+        },
+        "📈 Monitoring System Flow": {
+            "file": "gosales/docs/architecture/07_monitoring_system_flow.mmd",
+            "description": "Enterprise monitoring and alerting system"
+        },
+        "🖥️ UI/Dashboard Flow": {
+            "file": "gosales/docs/architecture/08_ui_dashboard_flow.mmd",
+            "description": "Streamlit dashboard with 7 specialized tabs"
+        },
+        "🔄 Sequence Diagrams": {
+            "file": "gosales/docs/architecture/09_sequence_diagrams.mmd",
+            "description": "Key interaction patterns and workflows"
+        }
+    }
+
+    selected_architecture = st.selectbox(
+        "Select Architecture Diagram",
+        options=list(architecture_options.keys()),
+        index=0
+    )
+
+    st.markdown(f"**Description:** {architecture_options[selected_architecture]['description']}")
+
+    # Load and display the selected diagram
+    diagram_path = Path(architecture_options[selected_architecture]['file'])
+
+    if diagram_path.exists():
+        diagram_content = _read_text(diagram_path)
+
+        # Extract just the mermaid content (remove frontmatter)
+        mermaid_start = diagram_content.find("```mermaid")
+        mermaid_end = diagram_content.find("```", mermaid_start + 1)
+
+        if mermaid_start != -1 and mermaid_end != -1:
+            mermaid_code = diagram_content[mermaid_start:mermaid_end + 3]
+
+            st.markdown("### Architecture Diagram")
+
+            if MARKDOWN_AVAILABLE:
+                # Use st_markdown for proper Mermaid rendering
+                st_markdown(mermaid_code)
+            else:
+                # Fallback to code display with instructions
+                st.code(mermaid_code, language="mermaid")
+                st.info("💡 For better diagram visualization, install streamlit-markdown: `pip install streamlit-markdown`")
+
+            # Provide a download link
+            clean_filename = selected_architecture.replace(' ', '_').replace('🏗️', '').replace('🔄', '').replace('⚙️', '').replace('🤖', '').replace('🎬', '').replace('✅', '').replace('📈', '').replace('🖥️', '').replace('🔄', '').strip('_')
+            st.download_button(
+                label="📥 Download Diagram",
+                data=diagram_content,
+                file_name=f"{clean_filename}.mmd",
+                mime="text/markdown"
+            )
+        else:
+            st.error("Could not extract Mermaid diagram from file")
+    else:
+        st.error(f"Architecture diagram not found: {diagram_path}")
+
+    # Additional information section
+    st.markdown("---")
+    st.subheader("📚 Documentation Guide")
+
+    st.markdown("""
+    **Understanding the Diagrams:**
+
+    - **🔵 Blue nodes** = Setup and configuration phases
+    - **🟣 Purple nodes** = Data processing and ingestion
+    - **🟢 Green nodes** = Success completion states
+    - **🔴 Red nodes** = Error handling and failure states
+    - **🟠 Orange nodes** = Active processing steps
+    - **⚫ Gray nodes** = Monitoring and validation steps
+
+    **Key Data Flows:**
+    1. **Azure SQL** → Raw sales data extraction
+    2. **SQLite** → Curated data warehouse
+    3. **Feature Matrix** → ML-ready data
+    4. **Model Training** → Division-specific models
+    5. **Customer Scoring** → Real-time predictions
+    6. **Dashboard** → Business insights and monitoring
+
+    **Quality Gates:**
+    - Type consistency validation
+    - Data completeness checks
+    - Holdout testing for model validation
+    - Statistical quality assurance
+    - Business logic verification
+    """)
+
+    # Footer
+    st.markdown("---")
+    st.caption("🏗️ Architecture documentation provides complete transparency into the GoSales Engine design and data flows.")
+    st.caption("🔧 Use these diagrams for development, debugging, onboarding, and system optimization.")
+    st.caption("📊 All diagrams are automatically generated from the actual codebase structure.")
