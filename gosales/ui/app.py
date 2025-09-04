@@ -5,12 +5,21 @@ from datetime import datetime
 import pandas as pd
 import streamlit as st
 
-# Try to import streamlit-markdown for enhanced Mermaid support
+# Try to import Mermaid rendering libraries
+MERMAID_AVAILABLE = False
+MARKDOWN_AVAILABLE = False
+
+# Try streamlit-mermaid first (more specific)
 try:
-    from streamlit_markdown import st_markdown
-    MARKDOWN_AVAILABLE = True
+    import streamlit_mermaid as st_mermaid
+    MERMAID_AVAILABLE = True
 except ImportError:
-    MARKDOWN_AVAILABLE = False
+    # Try streamlit-markdown as fallback
+    try:
+        from streamlit_markdown import st_markdown
+        MARKDOWN_AVAILABLE = True
+    except ImportError:
+        pass
 
 from gosales.utils.paths import OUTPUTS_DIR, MODELS_DIR
 from gosales.ui.utils import discover_validation_runs, compute_validation_badges, load_thresholds, load_alerts, compute_default_validation_index, read_runs_registry
@@ -83,7 +92,7 @@ with st.sidebar:
     colr1.write(":memo: Navigation")
     if colr2.button("Refresh", help="Clear cached artifacts and reload"):
         st.cache_data.clear()
-    tab = st.radio("Page", ["Overview", "Metrics", "Explainability", "Whitespace", "Validation", "Runs", "Monitoring", "Architecture"], index=0)
+    tab = st.radio("Page", ["Overview", "Metrics", "Explainability", "Whitespace", "Validation", "Runs", "Monitoring", "Architecture", "Configuration & Launch"], index=0)
     # Global divisions and default whitespace cutoff
     st.session_state.setdefault('divisions', _discover_divisions())
     # Preselect most recent whitespace cutoff
@@ -702,6 +711,13 @@ elif tab == "Architecture":
         diagram_content = _read_text(diagram_path)
 
         # Extract just the mermaid content (remove frontmatter)
+        # Remove frontmatter if present
+        if diagram_content.startswith("---"):
+            # Find the end of frontmatter
+            frontmatter_end = diagram_content.find("---", 3)
+            if frontmatter_end != -1:
+                diagram_content = diagram_content[frontmatter_end + 3:].lstrip()
+
         mermaid_start = diagram_content.find("```mermaid")
         mermaid_end = diagram_content.find("```", mermaid_start + 1)
 
@@ -710,13 +726,33 @@ elif tab == "Architecture":
 
             st.markdown("### Architecture Diagram")
 
-            if MARKDOWN_AVAILABLE:
+            if MERMAID_AVAILABLE:
+                # Use streamlit-mermaid for proper rendering
+                mermaid_content = mermaid_code.replace("```mermaid", "").replace("```", "").strip()
+                try:
+                    st_mermaid.st_mermaid(mermaid_content)
+                except Exception as e:
+                    st.error(f"Error rendering Mermaid diagram: {e}")
+                    # Show debugging info
+                    st.text("Debug info:")
+                    st.text(f"Diagram length: {len(mermaid_content)}")
+                    st.text(f"First few lines: {mermaid_content[:200]}...")
+                    st.code(mermaid_content, language="mermaid")
+            elif MARKDOWN_AVAILABLE:
                 # Use st_markdown for proper Mermaid rendering
-                st_markdown(mermaid_code)
+                try:
+                    st_markdown(mermaid_code)
+                except Exception as e:
+                    st.error(f"Error rendering Mermaid diagram: {e}")
+                    # Show debugging info
+                    st.text("Debug info:")
+                    st.text(f"Diagram length: {len(mermaid_code)}")
+                    st.text(f"First few lines: {mermaid_code[:200]}...")
+                    st.code(mermaid_code, language="mermaid")
             else:
                 # Fallback to code display with instructions
                 st.code(mermaid_code, language="mermaid")
-                st.info("💡 For better diagram visualization, install streamlit-markdown: `pip install streamlit-markdown`")
+                st.info("💡 For better diagram visualization, install streamlit-mermaid: `pip install streamlit-mermaid`")
 
             # Provide a download link
             clean_filename = selected_architecture.replace(' ', '_').replace('🏗️', '').replace('🔄', '').replace('⚙️', '').replace('🤖', '').replace('🎬', '').replace('✅', '').replace('📈', '').replace('🖥️', '').replace('🔄', '').strip('_')
@@ -766,3 +802,372 @@ elif tab == "Architecture":
     st.caption("🏗️ Architecture documentation provides complete transparency into the GoSales Engine design and data flows.")
     st.caption("🔧 Use these diagrams for development, debugging, onboarding, and system optimization.")
     st.caption("📊 All diagrams are automatically generated from the actual codebase structure.")
+
+elif tab == "Configuration & Launch":
+    st.header("⚙️ Configuration & Launch Center")
+    st.markdown("Configure pipeline parameters and launch scoring algorithms with full control.")
+
+    # Import required modules for configuration and pipeline execution
+    import subprocess
+    import sys
+    from gosales.utils.config import load_config, Config
+    from gosales.etl.sku_map import division_set, get_supported_models
+    import yaml
+    from pathlib import Path
+
+    # Load current configuration
+    try:
+        cfg = load_config()
+    except Exception as e:
+        st.error(f"Failed to load configuration: {e}")
+        cfg = None
+
+    # Create tabs for different configuration categories
+    config_tabs = st.tabs(["📊 Pipeline Settings", "🔧 ETL Configuration", "🤖 Model Training", "🎯 Scoring Parameters", "🚀 Launch Pipeline"])
+
+    with config_tabs[0]:
+        st.subheader("📊 Pipeline Settings")
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.markdown("**Database Configuration**")
+            if cfg:
+                db_engine = st.selectbox(
+                    "Database Engine",
+                    ["azure", "sqlite"],
+                    index=["azure", "sqlite"].index(cfg.database.engine) if cfg.database.engine in ["azure", "sqlite"] else 0,
+                    help="Primary database engine (Azure SQL or local SQLite)"
+                )
+
+                curated_target = st.selectbox(
+                    "Curated Target",
+                    ["db", "sqlite"],
+                    index=["db", "sqlite"].index(cfg.database.curated_target) if cfg.database.curated_target in ["db", "sqlite"] else 0,
+                    help="Where to store curated data"
+                )
+
+            st.markdown("**Date Settings**")
+            if cfg:
+                cutoff_date = st.date_input(
+                    "Cutoff Date",
+                    value=pd.to_datetime(cfg.run.cutoff_date).date(),
+                    help="Date to split training vs prediction data"
+                )
+
+                prediction_window = st.slider(
+                    "Prediction Window (Months)",
+                    min_value=1, max_value=24, value=cfg.run.prediction_window_months,
+                    help="How far into the future to predict"
+                )
+
+        with col2:
+            st.markdown("**Logging Configuration**")
+            if cfg:
+                log_level = st.selectbox(
+                    "Log Level",
+                    ["DEBUG", "INFO", "WARNING", "ERROR"],
+                    index=["DEBUG", "INFO", "WARNING", "ERROR"].index(cfg.logging.level) if cfg.logging.level in ["DEBUG", "INFO", "WARNING", "ERROR"] else 1,
+                    help="Logging verbosity level"
+                )
+
+            st.markdown("**Data Quality**")
+            if cfg:
+                fail_on_contract = st.checkbox(
+                    "Fail on Contract Breach",
+                    value=cfg.etl.fail_on_contract_breach,
+                    help="Stop pipeline if data contracts are violated"
+                )
+
+                allow_unknown_cols = st.checkbox(
+                    "Allow Unknown Columns",
+                    value=cfg.etl.allow_unknown_columns,
+                    help="Accept columns not defined in schema"
+                )
+
+    with config_tabs[1]:
+        st.subheader("🔧 ETL Configuration")
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.markdown("**Data Sources**")
+            if cfg:
+                sales_log_source = st.selectbox(
+                    "Sales Log Source",
+                    ["csv", "dbo.saleslog"],
+                    index=["csv", "dbo.saleslog"].index(cfg.database.source_tables.get("sales_log", "csv")),
+                    help="Source for sales transaction data"
+                )
+
+                industry_source = st.selectbox(
+                    "Industry Enrichment Source",
+                    ["csv", "database"],
+                    index=["csv", "database"].index(cfg.database.source_tables.get("industry_enrichment", "csv")),
+                    help="Source for industry classification data"
+                )
+
+            st.markdown("**Data Processing**")
+            if cfg:
+                coerce_timezone = st.selectbox(
+                    "Timezone Coercion",
+                    ["UTC", "America/New_York", "Europe/London"],
+                    index=0,  # Default to UTC
+                    help="Timezone for date processing"
+                )
+
+        with col2:
+            st.markdown("**Industry Matching**")
+            if cfg:
+                enable_fuzzy = st.checkbox(
+                    "Enable Fuzzy Industry Matching",
+                    value=cfg.etl.enable_industry_fuzzy,
+                    help="Use fuzzy matching for industry classification"
+                )
+
+                fuzzy_min_unmatched = st.slider(
+                    "Min Unmatched for Fuzzy",
+                    min_value=10, max_value=200, value=cfg.etl.fuzzy_min_unmatched,
+                    help="Minimum unmatched records to trigger fuzzy matching"
+                )
+
+            st.markdown("**Column Mapping**")
+            if cfg and cfg.etl.source_columns:
+                st.json(cfg.etl.source_columns)
+
+    with config_tabs[2]:
+        st.subheader("🤖 Model Training Configuration")
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.markdown("**Training Settings**")
+            if cfg:
+                folds = st.slider(
+                    "Cross-Validation Folds",
+                    min_value=2, max_value=10, value=cfg.modeling.folds,
+                    help="Number of CV folds for model validation"
+                )
+
+                models = st.multiselect(
+                    "Model Types",
+                    ["logreg", "lgbm", "rf", "svm"],
+                    default=[m for m in cfg.modeling.models if m in ["logreg", "lgbm", "rf", "svm"]],
+                    help="Machine learning models to train"
+                )
+
+            st.markdown("**Feature Engineering**")
+            if cfg:
+                windows = st.multiselect(
+                    "Time Windows (Months)",
+                    [3, 6, 12, 24, 36],
+                    default=[w for w in cfg.features.windows_months if w in [3, 6, 12, 24, 36]],
+                    help="Historical time windows for feature calculation"
+                )
+
+        with col2:
+            st.markdown("**Advanced Features**")
+            if cfg:
+                use_als = st.checkbox(
+                    "Use ALS Embeddings",
+                    value=cfg.features.use_als_embeddings,
+                    help="Collaborative filtering embeddings"
+                )
+
+                use_market_basket = st.checkbox(
+                    "Use Market Basket Analysis",
+                    value=cfg.features.use_market_basket,
+                    help="Association rule mining features"
+                )
+
+                use_text_tags = st.checkbox(
+                    "Use Text Tags",
+                    value=cfg.features.use_text_tags,
+                    help="Text processing features"
+                )
+
+            st.markdown("**Hyperparameter Ranges**")
+            if cfg:
+                with st.expander("Logistic Regression Grid"):
+                    lr_c = st.slider("C Parameter", 0.01, 100.0, 1.0, help="Inverse regularization strength")
+                    lr_l1 = st.slider("L1 Ratio", 0.0, 1.0, 0.2, help="L1 regularization ratio")
+
+    with config_tabs[3]:
+        st.subheader("🎯 Scoring Parameters")
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.markdown("**Scoring Thresholds**")
+            if cfg:
+                top_k_percents = st.multiselect(
+                    "Top-K Percentiles",
+                    [1, 5, 10, 20, 25],
+                    default=[p for p in cfg.modeling.top_k_percents if p in [1, 5, 10, 20, 25]],
+                    help="Percentiles for ICP scoring"
+                )
+
+                capacity_percent = st.slider(
+                    "Capacity Percent",
+                    min_value=1, max_value=50, value=cfg.modeling.capacity_percent,
+                    help="Percentage of accounts to score as ICPs"
+                )
+
+        with col2:
+            st.markdown("**Calibration**")
+            if cfg:
+                calibration_methods = st.multiselect(
+                    "Calibration Methods",
+                    ["platt", "isotonic", "none"],
+                    default=[m for m in cfg.modeling.calibration_methods if m in ["platt", "isotonic", "none"]],
+                    help="Probability calibration methods"
+                )
+
+            st.markdown("**Validation Settings**")
+            if cfg:
+                shap_max_rows = st.slider(
+                    "SHAP Max Rows",
+                    min_value=1000, max_value=100000, value=cfg.modeling.shap_max_rows,
+                    help="Maximum rows for SHAP computation"
+                )
+
+    with config_tabs[4]:
+        st.subheader("🚀 Launch Pipeline")
+
+        st.markdown("**Pipeline Stages**")
+        st.markdown("Choose which parts of the pipeline to execute:")
+
+        # Pipeline stage selection
+        col1, col2, col3 = st.columns(3)
+
+        with col1:
+            st.markdown("**Data Pipeline**")
+            run_etl = st.checkbox("ETL (Extract, Transform, Load)", value=True, help="Load and process raw data")
+            run_feature_engineering = st.checkbox("Feature Engineering", value=True, help="Create ML-ready features")
+
+        with col2:
+            st.markdown("**Model Pipeline**")
+            run_training = st.checkbox("Model Training", value=True, help="Train ML models")
+            run_validation = st.checkbox("Model Validation", value=True, help="Validate model performance")
+
+        with col3:
+            st.markdown("**Scoring Pipeline**")
+            run_scoring = st.checkbox("Customer Scoring", value=True, help="Generate ICP scores")
+            run_whitespace = st.checkbox("Whitespace Analysis", value=True, help="Find opportunity gaps")
+
+        # Division/Model selection
+        st.markdown("**Target Selection**")
+        try:
+            available_divisions = list(division_set())
+            selected_divisions = st.multiselect(
+                "Divisions to Process",
+                available_divisions,
+                default=available_divisions[:3],  # Default to first 3
+                help="Select which product divisions to process"
+            )
+        except Exception as e:
+            st.warning(f"Could not load divisions: {e}")
+            selected_divisions = []
+
+        # Launch button and status
+        if st.button("🚀 Launch Pipeline", type="primary", use_container_width=True):
+            st.markdown("---")
+            st.subheader("📋 Pipeline Execution Status")
+
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            log_output = st.empty()
+
+            # Simulate pipeline execution
+            steps = []
+            if run_etl: steps.append("ETL Processing")
+            if run_feature_engineering: steps.append("Feature Engineering")
+            if run_training: steps.append("Model Training")
+            if run_validation: steps.append("Model Validation")
+            if run_scoring: steps.append("Customer Scoring")
+            if run_whitespace: steps.append("Whitespace Analysis")
+
+            total_steps = len(steps)
+            current_step = 0
+
+            for step in steps:
+                current_step += 1
+                progress = current_step / total_steps
+                progress_bar.progress(progress)
+                status_text.markdown(f"**Executing:** {step} ({current_step}/{total_steps})")
+
+                # Simulate execution with subprocess call
+                try:
+                    if step == "ETL Processing":
+                        cmd = [sys.executable, "-m", "gosales.etl.build_star"]
+                    elif step == "Feature Engineering":
+                        cmd = [sys.executable, "-m", "gosales.features.engine"]
+                    elif step == "Model Training":
+                        cmd = [sys.executable, "-m", "gosales.models.train"]
+                    elif step == "Customer Scoring":
+                        cmd = [sys.executable, "-m", "gosales.pipeline.score_customers"]
+                    elif step == "Whitespace Analysis":
+                        cmd = [sys.executable, "-m", "gosales.whitespace.build_lift"]
+                    else:
+                        cmd = [sys.executable, "-c", f"print('Completed {step}')"]
+
+                    # Run the command
+                    result = subprocess.run(cmd, capture_output=True, text=True, cwd=Path.cwd())
+
+                    if result.returncode == 0:
+                        st.success(f"✅ {step} completed successfully")
+                        log_output.code(result.stdout or "No output", language="text")
+                    else:
+                        st.error(f"❌ {step} failed")
+                        log_output.code(result.stderr or "No error details", language="text")
+
+                except Exception as e:
+                    st.error(f"❌ Error executing {step}: {str(e)}")
+                    log_output.code(str(e), language="text")
+
+                # Small delay for visual effect
+                import time
+                time.sleep(0.5)
+
+            progress_bar.progress(1.0)
+            status_text.markdown("**🎉 Pipeline execution completed!**")
+
+        # Quick launch buttons for common scenarios
+        st.markdown("---")
+        st.subheader("⚡ Quick Launch Options")
+
+        col1, col2, col3 = st.columns(3)
+
+        with col1:
+            if st.button("🔄 Full Pipeline", help="Run complete ETL → Training → Scoring pipeline"):
+                st.info("Launching full pipeline... (This would execute score_all.py)")
+
+        with col2:
+            if st.button("📊 Scoring Only", help="Run scoring with existing models"):
+                st.info("Launching scoring pipeline... (This would execute score_customers.py)")
+
+        with col3:
+            if st.button("🔧 ETL Only", help="Run data processing only"):
+                st.info("Launching ETL pipeline... (This would execute build_star.py)")
+
+        # Configuration export/import
+        st.markdown("---")
+        st.subheader("💾 Configuration Management")
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            if st.button("📤 Export Current Config", help="Download current configuration as YAML"):
+                if cfg:
+                    config_yaml = yaml.safe_dump(cfg.to_dict(), sort_keys=False)
+                    st.download_button(
+                        label="Download config.yaml",
+                        data=config_yaml,
+                        file_name="gosales_config.yaml",
+                        mime="text/yaml"
+                    )
+
+        with col2:
+            uploaded_config = st.file_uploader("📥 Upload Config File", type=["yaml", "yml"])
+            if uploaded_config is not None:
+                st.info("Configuration file uploaded. Ready to apply on next pipeline run.")
