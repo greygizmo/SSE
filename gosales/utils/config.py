@@ -23,6 +23,10 @@ class Paths:
 class Database:
     engine: str = "sqlite"  # sqlite | duckdb | azure
     sqlite_path: Path = ROOT_DIR.parent / "gosales.db"
+    curated_target: str = "db"  # 'db' | 'sqlite'
+    curated_sqlite_path: Path = ROOT_DIR.parent / "gosales_curated.db"
+    # Optional mapping of logical table names -> concrete source (e.g., "dbo.saleslog" or "csv")
+    source_tables: Dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -38,6 +42,12 @@ class ETL:
     currency: str = "USD"
     fail_on_contract_breach: bool = True
     allow_unknown_columns: bool = False
+    # Industry enrichment fuzzy-match controls
+    enable_industry_fuzzy: bool = True
+    fuzzy_min_unmatched: int = 50
+    fuzzy_skip_if_coverage_ge: float = 0.95
+    # Source column mapping: use exact DB headers
+    source_columns: Dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -251,6 +261,9 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
         database=Database(
             engine=str(database.get("engine", "sqlite")),
             sqlite_path=Path(database.get("sqlite_path", ROOT_DIR.parent / "gosales.db")).resolve(),
+            curated_target=str(database.get("curated_target", "db")),
+            curated_sqlite_path=Path(database.get("curated_sqlite_path", ROOT_DIR.parent / "gosales_curated.db")).resolve(),
+            source_tables=dict(database.get("source_tables", {})),
         ),
         run=Run(
             cutoff_date=str(run_cfg.get("cutoff_date", "2024-12-31")),
@@ -262,6 +275,10 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
             currency=str(etl_cfg.get("currency", "USD")),
             fail_on_contract_breach=bool(etl_cfg.get("fail_on_contract_breach", True)),
             allow_unknown_columns=bool(etl_cfg.get("allow_unknown_columns", False)),
+            enable_industry_fuzzy=bool(etl_cfg.get("enable_industry_fuzzy", True)),
+            fuzzy_min_unmatched=int(etl_cfg.get("fuzzy_min_unmatched", 50)),
+            fuzzy_skip_if_coverage_ge=float(etl_cfg.get("fuzzy_skip_if_coverage_ge", 0.95)),
+            source_columns=dict(etl_cfg.get("source_columns", {})),
         ),
         logging=Logging(
             level=str(log_cfg.get("level", "INFO")),

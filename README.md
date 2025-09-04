@@ -145,7 +145,8 @@ graph TD
     subgraph "Training Pipeline"
         A[Raw CSVs <br/> (e.g., 2023-2024)] --> B{ETL}
         B --> C[fact_transactions]
-        C --> D{Feature Engine <br/> cutoff_date='2024-12-31'}
+        C --> CE[Eventization <br/> fact_events]
+        CE --> D{Feature Engine <br/> cutoff_date='2024-12-31'}
         D --> E[Feature Matrix]
     end
 
@@ -170,18 +171,27 @@ graph TD
     end
 ```
 
-1.  **ETL**: Raw CSVs are loaded and transformed into a clean `fact_transactions` table.
+1.  **ETL**: Raw CSVs are loaded and transformed into a clean `fact_transactions` table (includes `invoice_id` when available).
+1a. **Eventization**: `fact_events` aggregates line items by invoice and stamps per-model labels (Printers, SWX_Seats, etc.).
 2.  **Feature Engineering**: A `cutoff_date` is used to build features *only* from historical data.
 3.  **Target Labeling**: The model is trained to predict purchases that happen in a *future* window.
 4.  **Validation**: A separate holdout dataset (e.g., 2025 data) is used to measure the model's true performance.
 
 ---
 
-### Multi‑division support
+### Multi-division support
 
-Known divisions are sourced from `etl/sku_map.division_set()`; cross‑division features adapt automatically.
-Training and scoring auto‑discover divisions: the `score_all` pipeline now trains and audits labels for every known division, then generates scores/whitespace for any division with an available model.
+Known divisions are sourced from `etl/sku_map.division_set()`; cross-division features adapt automatically.
+Training and scoring auto-discover divisions: the `score_all` pipeline now trains and audits labels for every known division, then generates scores/whitespace for any division with an available model.
 To add a division: extend `etl/sku_map.py` (or overrides CSV), rebuild the star and features, then either run `score_all` or train explicitly with `gosales/models/train.py`.
+
+#### Targets vs Divisions
+- Divisions (reporting): Solidworks, PDM, Simulation, Services, Training, Success Plan, Hardware, CPE, Scanning, CAMWorks, Maintenance.
+- Logical models (SKU-based targets): Printers, SWX_Seats, PDM_Seats, SW_Electrical, SW_Inspection, plus divisions that are targets (Services, Training, Simulation, Success_Plan, Scanning, CAMWorks).
+- Mapping metadata: each SKU maps to a `division`, with modeling fields `family` and `sale_type` to distinguish targets (e.g., `sale_type=Printer`) from predictors (e.g., `sale_type=Consumable`, `sale_type=Maintenance`).
+- AM_Support is routed by the source DB `Division` into Hardware or Scanning during ETL to avoid misclassification.
+
+The orchestrator `pipeline/score_all.py` collects training targets as (divisions minus `{Hardware, Maintenance}`) union the supported logical models from `etl/sku_map.get_supported_models()`. You can also train a specific model directly (e.g., `--division Printers`).
 
 #### Troubleshooting and notes
 - If training fails in the simple trainer (`gosales/models/train_division_model.py`) due to infinities or extreme values, prefer the robust trainer `gosales/models/train.py`, which sanitizes features (NaN/inf handling, low‑variance and high‑correlation pruning) and performs hyper‑search across cutoffs.

@@ -104,7 +104,7 @@ def build_star_schema(engine, config_path: str | Path | None = None, rebuild: bo
             df.columns = [str(c).strip() for c in df.columns]
 
             # Create canonical columns from exact DB headers provided via config
-            for col in ["CustomerId", "Rec Date", "Division", "Customer"]:
+            for col in ["CustomerId", "Rec Date", "Division", "Customer", "InvoiceId"]:
                 if col not in df.columns:
                     df[col] = None
             src_map = {}
@@ -116,10 +116,13 @@ def build_star_schema(engine, config_path: str | Path | None = None, rebuild: bo
             date_col = src_map.get('order_date')
             div_col = src_map.get('division')
             name_col = src_map.get('customer_name')
+            inv_col = src_map.get('invoice_id')
             if cust_col and cust_col in df.columns:
                 df['CustomerId'] = df[cust_col]
             if date_col and date_col in df.columns:
                 df['Rec Date'] = df[date_col]
+            if inv_col and inv_col in df.columns:
+                df['InvoiceId'] = df[inv_col]
             if div_col and div_col in df.columns:
                 df['Division'] = df[div_col]
             if name_col and name_col in df.columns:
@@ -313,7 +316,7 @@ def build_star_schema(engine, config_path: str | Path | None = None, rebuild: bo
         sales_log.lazy()
         .select([
             "CustomerId", "Rec Date", "branch", "rep", "Customer",
-            "Division", "invoice_date"
+            "Division", "invoice_date", "InvoiceId"
         ])
         .rename({
             "CustomerId": "customer_id",
@@ -330,6 +333,7 @@ def build_star_schema(engine, config_path: str | Path | None = None, rebuild: bo
             pl.col("order_date").cast(pl.Date),
             pl.col("division").cast(pl.Utf8),
             pl.col("invoice_date").cast(pl.Date),
+            pl.col("InvoiceId").alias("invoice_id").cast(pl.Utf8),
         ])
         .filter(pl.col("customer_id").is_not_null())
     )
@@ -531,6 +535,8 @@ def build_star_schema(engine, config_path: str | Path | None = None, rebuild: bo
     
     # Base columns to keep for every transaction line item
     id_vars = ["CustomerId", "Rec Date", "Division"]
+    if "InvoiceId" in sales_log.columns:
+        id_vars.append("InvoiceId")
 
     for gp_col, details in sku_mapping.items():
         qty_col = details['qty_col']
@@ -567,11 +573,35 @@ def build_star_schema(engine, config_path: str | Path | None = None, rebuild: bo
     # Clean the data
     fact_transactions_pd['customer_id'] = fact_transactions_pd['CustomerId'].astype(str)
     fact_transactions_pd['order_date'] = coerce_datetime(fact_transactions_pd['Rec Date'])
+    if 'InvoiceId' in fact_transactions_pd.columns:
+        fact_transactions_pd['invoice_id'] = fact_transactions_pd['InvoiceId'].astype(str)
 
     # Clean currency columns using shared cleaner
     fact_transactions_pd['gross_profit'] = fact_transactions_pd['gross_profit'].apply(clean_currency_value)
     fact_transactions_pd['quantity'] = pd.to_numeric(fact_transactions_pd['quantity'], errors='coerce').fillna(0)
     
+    # Route product_division for SKUs that depend on source DB Division (e.g., AM_Support)
+    try:
+        _map = get_sku_mapping()
+        routed = [
+            (k, v.get('db_division_routes', {}))
+            for k, v in _map.items()
+            if isinstance(v, dict) and 'db_division_routes' in v
+        ]
+        if routed and 'Division' in fact_transactions_pd.columns:
+            for sku_key, route in routed:
+                if not route:
+                    continue
+                mask = fact_transactions_pd['product_sku'] == sku_key
+                if mask.any():
+                    # Map row-wise using source Division column
+                    fact_transactions_pd.loc[mask, 'product_division'] = (
+                        fact_transactions_pd.loc[mask, 'Division']
+                        .map(lambda x: route.get(str(x).strip(), fact_transactions_pd.loc[mask, 'product_division'].iloc[0]))
+                    )
+    except Exception as e:
+        logger.warning(f"Division routing step skipped/failed: {e}")
+
     # Filter out rows with no meaningful transaction data
     fact_transactions_pd = fact_transactions_pd[
         (fact_transactions_pd['gross_profit'] != 0) | (fact_transactions_pd['quantity'] != 0)
@@ -579,9 +609,12 @@ def build_star_schema(engine, config_path: str | Path | None = None, rebuild: bo
     
     # Normalize division strings (trim) and select/sort final columns
     fact_transactions_pd['product_division'] = fact_transactions_pd['product_division'].astype(str).str.strip()
-    fact_transactions_pd = fact_transactions_pd[[
-        'customer_id', 'order_date', 'product_sku', 'product_division', 'gross_profit', 'quantity'
-    ]].sort_values(by=['customer_id', 'order_date', 'product_sku'], kind='mergesort').reset_index(drop=True)
+    final_cols = ['customer_id', 'order_date', 'product_sku', 'product_division', 'gross_profit', 'quantity']
+    if 'invoice_id' in fact_transactions_pd.columns:
+        final_cols.insert(1, 'invoice_id')
+    fact_transactions_pd = fact_transactions_pd[final_cols] \
+        .sort_values(by=[c for c in final_cols if c in fact_transactions_pd.columns], kind='mergesort') \
+        .reset_index(drop=True)
     
     # Round monetary and quantities for idempotency
     if not fact_transactions_pd.empty:

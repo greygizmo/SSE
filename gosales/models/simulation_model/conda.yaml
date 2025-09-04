@@ -2,10 +2,14 @@ channels:
 - conda-forge
 dependencies:
 - python=3.13.2
-- pip<=25.0.1
+- pip<=25.2
 - pip:
   - mlflow==3.1.4
+  - cffi==1.17.1
   - cloudpickle==3.1.1
+  - graphviz==0.21
+  - lightgbm==4.6.0
+  - matplotlib==3.10.0
   - numpy==2.2.2
   - pandas==2.2.3
   - pyarrow==20.0.0

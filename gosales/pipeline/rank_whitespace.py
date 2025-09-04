@@ -436,7 +436,7 @@ def rank_whitespace(inputs: RankInputs, *, weights: Iterable[float] = (0.60, 0.2
     # Explanations
     df['nba_reason'] = df.apply(_explain, axis=1)
     # Output columns
-    out_cols = ['customer_id', 'division_name', 'score', 'score_challenger', 'p_icp', 'p_icp_pct', 'lift_norm', 'als_norm', 'EV_norm', 'nba_reason']
+    out_cols = ['customer_id', 'customer_name', 'division_name', 'score', 'score_challenger', 'p_icp', 'p_icp_pct', 'lift_norm', 'als_norm', 'EV_norm', 'nba_reason']
     present = [c for c in out_cols if c in df.columns]
     return df[present].reset_index(drop=True)
 

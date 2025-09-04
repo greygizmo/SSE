@@ -262,6 +262,8 @@ def score_customers_for_division(
             pd.read_sql("select customer_id, customer_name from dim_customer", engine)
             .drop_duplicates(subset="customer_id")
         )
+        scores_df["customer_id"] = scores_df["customer_id"].astype(str)
+        customer_names["customer_id"] = customer_names["customer_id"].astype(str)
         scores_df = scores_df.merge(customer_names, on="customer_id", how="left")
         
         logger.info(f"Successfully scored {len(scores_df)} customers for {division_name}")
@@ -291,9 +293,9 @@ def generate_whitespace_opportunities(engine):
         transactions = pl.from_pandas(tx_pd)
         customers = pl.from_pandas(pd.read_sql("SELECT * FROM dim_customer", engine))
         if "customer_id" in transactions.columns:
-            transactions = transactions.with_columns(pl.col("customer_id").cast(pl.Int64, strict=False))
+            transactions = transactions.with_columns(pl.col("customer_id").cast(pl.Utf8))
         if "customer_id" in customers.columns:
-            customers = customers.with_columns(pl.col("customer_id").cast(pl.Int64, strict=False))
+            customers = customers.with_columns(pl.col("customer_id").cast(pl.Utf8))
 
         customer_summary = (
             transactions
@@ -372,6 +374,16 @@ def generate_scoring_outputs(
     
     # Discover available models by folder convention *_model
     available_models = discover_available_models()
+    # Filter to supported targets only (divisions minus excluded + logical models)
+    try:
+        from gosales.etl.sku_map import get_supported_models, division_set as _division_set
+        exclude = {"Hardware", "Maintenance"}
+        targets = sorted({d for d in _division_set() if d not in exclude} | set(get_supported_models()))
+        available_models = {k: v for k, v in available_models.items() if k in targets}
+        if not available_models:
+            logger.warning("No supported models found for scoring after pruning legacy models.")
+    except Exception as e:
+        logger.warning(f"Could not prune legacy models: {e}")
     
     all_scores = []
     for division_name, model_path in available_models.items():
@@ -499,7 +511,7 @@ def generate_scoring_outputs(
                             thr = float(np.partition(scores_num, pos)[pos])
                             count = int((pd.to_numeric(ranked['score'], errors='coerce') >= thr).sum())
                             thresholds[i]["threshold"] = thr
-                            thresholds[i]["count"] = int(len(topk))
+                            thresholds[i]["count"] = int(count)
                 thr_name = f"thresholds_whitespace_{cutoff_tag}.csv" if cutoff_tag else "thresholds_whitespace.csv"
                 pd.DataFrame(thresholds).to_csv(OUTPUTS_DIR / thr_name, index=False)
 

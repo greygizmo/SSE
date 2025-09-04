@@ -6,6 +6,7 @@ from dateutil.relativedelta import relativedelta
 
 from gosales.utils.logger import get_logger
 from gosales.utils.paths import OUTPUTS_DIR
+from gosales.etl.sku_map import get_model_targets
 
 logger = get_logger(__name__)
 
@@ -37,7 +38,7 @@ def compute_label_audit(
     OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
 
     # Load base tables
-    tx = pd.read_sql("SELECT customer_id, order_date, product_division FROM fact_transactions", engine)
+    tx = pd.read_sql("SELECT customer_id, order_date, product_division, product_sku FROM fact_transactions", engine)
     dim = pd.read_sql("SELECT customer_id FROM dim_customer", engine)
     if tx.empty or dim.empty:
         logger.warning("Missing transactions or customers for label audit; skipping.")
@@ -51,8 +52,12 @@ def compute_label_audit(
     feature_tx = tx[tx["order_date"] <= cutoff_dt].copy()
     window_tx = tx[(tx["order_date"] > cutoff_dt) & (tx["order_date"] <= window_end)].copy()
 
-    # Buyers in prediction window for target division
-    window_div = window_tx[window_tx["product_division"] == division_name].copy()
+    # Buyers in prediction window for target division or SKU-modeled target
+    sku_targets = tuple(get_model_targets(division_name))
+    if sku_targets:
+        window_div = window_tx[window_tx["product_sku"].astype(str).isin(sku_targets)].copy()
+    else:
+        window_div = window_tx[window_tx["product_division"] == division_name].copy()
     buyers = window_div["customer_id"].dropna().unique()
     total_customers = int(dim["customer_id"].nunique())
     positives = int(len(buyers))
@@ -62,23 +67,26 @@ def compute_label_audit(
     cohort_customers = int(feature_tx["customer_id"].nunique())
 
     # Cohort flags for positives
-    feature_any = set(feature_tx["customer_id"].dropna().astype("int64").tolist())
-    pre_div_buyers = set(
-        feature_tx.loc[feature_tx["product_division"] == division_name, "customer_id"].dropna().astype("int64").tolist()
-    )
+    # Treat IDs as strings (GUID-safe) for cohort flags
+    feature_any = set(feature_tx["customer_id"].dropna().astype(str).tolist())
+    if sku_targets:
+        pre_div_buyers = set(
+            feature_tx.loc[feature_tx["product_sku"].astype(str).isin(sku_targets), "customer_id"].dropna().astype(str).tolist()
+        )
+    else:
+        pre_div_buyers = set(
+            feature_tx.loc[feature_tx["product_division"] == division_name, "customer_id"].dropna().astype(str).tolist()
+        )
     positive_rows = []
     for cid in buyers:
-        try:
-            cid_int = int(cid)
-        except Exception:
-            continue
-        is_new_logo = int(cid_int not in feature_any)
-        had_pre_div = cid_int in pre_div_buyers
+        cid_str = str(cid)
+        is_new_logo = int(cid_str not in feature_any)
+        had_pre_div = cid_str in pre_div_buyers
         is_renewal_like = int((not is_new_logo) and had_pre_div)
         is_expansion = int((not is_new_logo) and (not had_pre_div))
         positive_rows.append(
             {
-                "customer_id": cid_int,
+                "customer_id": cid_str,
                 "is_new_logo": is_new_logo,
                 "is_expansion": is_expansion,
                 "is_renewal_like": is_renewal_like,

@@ -1,4 +1,4 @@
-import json
+﻿import json
 from pathlib import Path
 from datetime import datetime
 
@@ -179,10 +179,12 @@ elif tab == "Metrics":
         st.info("No divisions discovered (expected models/*_model or metrics_*.json)")
     else:
         div = st.selectbox("Division", divisions, help="Choose a division to view model artifacts")
-        with st.expander("How to read these metrics", expanded=False):
-            st.markdown("- AUC/PR-AUC: overall ranking quality (higher is better). Brier: probability accuracy (lower is better).")
-            st.markdown("- Gains: average conversion by decile (1=top 10% by score). Expect decreasing pattern.")
-            st.markdown("- Thresholds: score cut lines for top‑K%. Use to set capacity policies in ops.")
+        with st.expander("How to read these metrics", expanded=True):
+            st.markdown("- AUC: how well the model ranks likely buyers vs non-buyers (0.5=random, 1.0=perfect). Higher is better.")
+            st.markdown("- PR-AUC: like AUC but focuses on the positive class; useful when positives are rare. Higher is better.")
+            st.markdown("- Brier: accuracy of predicted probabilities (lower is better). 0.0 means perfectly calibrated.")
+            st.markdown("- Gains: average conversion rate within each decile (1=top 10% by score); should generally decrease from decile 1 to 10.")
+            st.markdown("- Thresholds: score cutoffs to select top-K% customers; use for capacity planning.")
         # Model card
         mc_path = OUTPUTS_DIR / f"model_card_{div.lower()}.json"
         if mc_path.exists():
@@ -309,8 +311,16 @@ elif tab == "Whitespace":
             # Filters
             df = _read_csv(ws)
             if not df.empty:
+                with st.expander(""What these columns mean"", expanded=True):
+                    st.markdown(""- customer_id/customer_name: who the recommendation is for."")
+                    st.markdown(""- division_name: the product/target (e.g., Printers, SWX_Seats)."")
+                    st.markdown(""- score: blended next-best-action score combining model probability, affinity, similarity, and expected value."")
+                    st.markdown(""- p_icp: model probability; p_icp_pct: percentile within this division (0–1)."")
+                    st.markdown(""- lift_norm: market-basket affinity (normalized); als_norm: similarity to current owners (normalized)."")
+                    st.markdown(""- EV_norm: expected value proxy (normalized). nba_reason: short text explanation."")
                 # Simple filters on key columns when present
-                cols = st.multiselect("Columns to show", df.columns.tolist(), default=df.columns.tolist()[:12], help="Tip: reduce visible columns to focus on key signals")
+                default_cols = [c for c in [""customer_id"",""customer_name"",""division_name"",""score"",""p_icp"",""p_icp_pct"",""EV_norm"",""nba_reason""] if c in df.columns]
+                cols = st.multiselect(""Columns to show"", df.columns.tolist(), default=default_cols or df.columns.tolist()[:12], help=""Tip: reduce visible columns to focus on key signals"")
                 if cols:
                     st.dataframe(df[cols].head(200), use_container_width=True)
                 else:

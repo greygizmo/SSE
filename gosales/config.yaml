@@ -4,8 +4,15 @@ paths:
   curated: gosales/data/curated
   outputs: gosales/outputs
 database:
-  engine: sqlite          # sqlite | duckdb | azure
+  engine: azure          # sqlite | duckdb | azure
   sqlite_path: gosales/gosales.db
+  # Optional mapping of logical sources -> actual tables/views. Use 'csv' to read from a file.
+  source_tables:
+    sales_log: dbo.saleslog            # Azure SQL view for Sales Log
+    industry_enrichment: csv           # 'csv' means read from ETL CSV path below
+  # Where to write curated tables: 'db' (default, same engine) or 'sqlite'
+  curated_target: sqlite
+  curated_sqlite_path: gosales/gosales_curated.db
 run:
   cutoff_date: "2024-12-31"
   prediction_window_months: 6
@@ -15,6 +22,17 @@ etl:
   currency: "USD"
   fail_on_contract_breach: true
   allow_unknown_columns: false
+  enable_industry_fuzzy: true
+  fuzzy_min_unmatched: 50
+  fuzzy_skip_if_coverage_ge: 0.95
+  # Path to CSV when industry_enrichment source is 'csv'
+  industry_enrichment_csv: gosales/data/database_samples/TR - Industry Enrichment.csv
+  # Exact DB column headers for identifiers
+  source_columns:
+    customer_id: CompanyId
+    order_date: Rec_Date
+    division: division
+    customer_name: New_Business
 logging:
   level: INFO
   jsonl: true
