@@ -9,6 +9,7 @@ from gosales.utils.paths import OUTPUTS_DIR
 from gosales.features.als_embed import customer_als_embeddings
 from gosales.etl.sku_map import division_set, get_model_targets
 from gosales.utils.normalize import normalize_division
+from gosales.etl.assets import build_fact_assets  # for on-demand ensure
 
 logger = get_logger(__name__)
 
@@ -570,6 +571,50 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
     except Exception as e:
         # Non-fatal; proceed with base features if advanced features fail
         logger.warning(f"Advanced temporal features failed: {e}")
+
+    # --- 3b. Asset features at cutoff (from Moneyball + item rollups) ---
+    try:
+        cfgmod = cfg.load_config()
+        if getattr(cfgmod.features, 'use_assets', False) and cutoff_date:
+            # Read curated fact_assets; build on-demand if missing
+            try:
+                fact_assets_pd = pd.read_sql('SELECT * FROM fact_assets', engine)
+            except Exception:
+                # Attempt to build and read again
+                try:
+                    build_fact_assets(write=True)
+                    fact_assets_pd = pd.read_sql('SELECT * FROM fact_assets', engine)
+                except Exception as ee:
+                    logger.warning(f"fact_assets unavailable: {ee}")
+                    fact_assets_pd = pd.DataFrame()
+
+            if not fact_assets_pd.empty:
+                from gosales.etl.assets import features_at_cutoff
+                rollup_df, per_df = features_at_cutoff(fact_assets_pd, cutoff_date)
+
+                # Pivot rollups into columns with safe names
+                def safe(col: str) -> str:
+                    return 'assets_rollup_' + str(col).strip().lower().replace(' ', '_').replace('/', '_')
+
+                if not rollup_df.empty:
+                    # Ensure consistent join key types
+                    rollup_df['customer_id'] = rollup_df['customer_id'].astype(str)
+                    features_pd['customer_id'] = features_pd['customer_id'].astype(str)
+                    rollup_df.columns = [c if c == 'customer_id' else safe(c) for c in rollup_df.columns]
+                    features_pd = features_pd.merge(rollup_df, on='customer_id', how='left')
+                if not per_df.empty:
+                    per_df['customer_id'] = per_df['customer_id'].astype(str)
+                    features_pd['customer_id'] = features_pd['customer_id'].astype(str)
+                    features_pd = features_pd.merge(per_df, on='customer_id', how='left')
+
+                # Fill NaNs for newly added features
+                for c in features_pd.columns:
+                    if c == 'customer_id':
+                        continue
+                    if features_pd[c].dtype.kind in 'fi':
+                        features_pd[c] = features_pd[c].fillna(0.0)
+    except Exception as e:
+        logger.warning(f"Asset features failed: {e}")
 
     # Flags / indicators aggregated from raw: ACR and New (robust to missing/variant names)
     try:

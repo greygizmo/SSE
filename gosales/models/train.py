@@ -23,7 +23,7 @@ except Exception:
     _HAS_SHAP = False
 
 from gosales.utils.config import load_config
-from gosales.utils.db import get_db_connection
+from gosales.utils.db import get_db_connection, get_curated_connection
 from gosales.features.engine import create_feature_matrix
 from gosales.utils.paths import OUTPUTS_DIR, MODELS_DIR
 from gosales.utils.logger import get_logger
@@ -215,7 +215,11 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
     cut_list = [c.strip() for c in cutoffs.split(",") if c.strip()]
     OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
-    engine = get_db_connection()
+    # Prefer curated connection where fact tables exist; fallback to primary DB
+    try:
+        engine = get_curated_connection()
+    except Exception:
+        engine = get_db_connection()
 
     # Accumulate metrics across cutoffs per model
     model_names = [m.strip() for m in models.split(",") if m.strip()]

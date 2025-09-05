@@ -10,6 +10,10 @@ database:
   source_tables:
     sales_log: dbo.saleslog            # Azure SQL view for Sales Log
     industry_enrichment: csv           # 'csv' means read from ETL CSV path below
+    # Assets & item taxonomy (Azure SQL views)
+    customer_assets_rollups: dbo.customer_asset_rollups
+    moneyball_assets: dbo.[Moneyball Assets]
+    items_category_limited: dbo.items_category_limited
   # Where to write curated tables: 'db' (default, same engine) or 'sqlite'
   curated_target: sqlite
   curated_sqlite_path: gosales/gosales_curated.db
@@ -49,6 +53,7 @@ features:
   als_lookback_months: 12
   use_item2vec: false
   use_text_tags: false
+  use_assets: true
 modeling:
   seed: 42
   folds: 3

@@ -7,7 +7,7 @@ import pandas as pd
 import polars as pl
 
 from gosales.utils.config import load_config
-from gosales.utils.db import get_db_connection
+from gosales.utils.db import get_db_connection, get_curated_connection
 from gosales.utils.paths import OUTPUTS_DIR
 from gosales.utils.logger import get_logger
 from gosales.features.engine import create_feature_matrix
@@ -30,7 +30,11 @@ logger = get_logger(__name__)
 def main(division: str, cutoff: str, windows: str, config: str, with_eb: bool, with_affinity: bool, with_als: bool) -> None:
     cfg = load_config(config)
     OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
-    engine = get_db_connection()
+    # Use curated engine for features (fact_transactions, dim_customer live here)
+    try:
+        engine = get_curated_connection()
+    except Exception:
+        engine = get_db_connection()
 
     # For now, engine already computes a comprehensive set; toggles can be wired later
     cutoffs = [c.strip() for c in cutoff.split(",") if c.strip()]
