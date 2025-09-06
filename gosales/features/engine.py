@@ -10,6 +10,7 @@ from gosales.features.als_embed import customer_als_embeddings
 from gosales.etl.sku_map import division_set, get_model_targets
 from gosales.utils.normalize import normalize_division
 from gosales.etl.assets import build_fact_assets  # for on-demand ensure
+from gosales.sql.queries import select_all
 
 logger = get_logger(__name__)
 
@@ -155,8 +156,11 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
         )
 
     # --- 3. Engineer Behavioral Features ---
-    # Get the current date for recency calculations
-    current_date = datetime.now().date()
+    # Recency anchor: use cutoff when provided to avoid temporal leakage; else 'now'.
+    try:
+        reference_date = pd.to_datetime(cutoff_date).date() if cutoff_date else pd.Timestamp.utcnow().date()
+    except Exception:
+        reference_date = pd.Timestamp.utcnow().date()
 
     features = (
         transactions.lazy()
@@ -208,7 +212,7 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
             if pd.isna(date):
                 days_diff.append(999)
             else:
-                days_diff.append((current_date - date.date()).days)
+                days_diff.append((reference_date - date.date()).days)
         features_pd['days_since_last_order'] = days_diff
     else:
         features_pd['days_since_last_order'] = 999  # Default for customers with no orders
@@ -223,7 +227,7 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
             if pd.isna(date):
                 days_diff.append(999)
             else:
-                days_diff.append((current_date - date.date()).days)
+                days_diff.append((reference_date - date.date()).days)
         features_pd[f'days_since_last_{division_name}_order'] = days_diff
     else:
         features_pd[f'days_since_last_{division_name}_order'] = 999  # Default for customers with no orders in division
@@ -575,22 +579,29 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
     # --- 3b. Asset features at cutoff (from Moneyball + item rollups) ---
     try:
         cfgmod = cfg.load_config()
-        if getattr(cfgmod.features, 'use_assets', False) and cutoff_date:
+        enabled = getattr(cfgmod.features, 'use_assets', None)
+        # Default to ON when not explicitly disabled in config
+        if cutoff_date and enabled is not False:
+            logger.info("Asset features enabled (flag=%s); merging at cutoff %s", enabled, cutoff_date)
             # Read curated fact_assets; build on-demand if missing
             try:
-                fact_assets_pd = pd.read_sql('SELECT * FROM fact_assets', engine)
+                fact_assets_pd = pd.read_sql(select_all('fact_assets'), engine)
             except Exception:
                 # Attempt to build and read again
                 try:
                     build_fact_assets(write=True)
-                    fact_assets_pd = pd.read_sql('SELECT * FROM fact_assets', engine)
+                    fact_assets_pd = pd.read_sql(select_all('fact_assets'), engine)
                 except Exception as ee:
                     logger.warning(f"fact_assets unavailable: {ee}")
                     fact_assets_pd = pd.DataFrame()
 
             if not fact_assets_pd.empty:
                 from gosales.etl.assets import features_at_cutoff
-                rollup_df, per_df = features_at_cutoff(fact_assets_pd, cutoff_date)
+                # Backward/forward compatible: function may return (roll, per) or (roll, per, extras)
+                _out = features_at_cutoff(fact_assets_pd, cutoff_date)
+                rollup_df = _out[0] if isinstance(_out, (list, tuple)) else _out
+                per_df = _out[1] if isinstance(_out, (list, tuple)) and len(_out) > 1 else pd.DataFrame()
+                extra_map = _out[2] if isinstance(_out, (list, tuple)) and len(_out) > 2 else {}
 
                 # Pivot rollups into columns with safe names
                 def safe(col: str) -> str:
@@ -607,12 +618,32 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
                     features_pd['customer_id'] = features_pd['customer_id'].astype(str)
                     features_pd = features_pd.merge(per_df, on='customer_id', how='left')
 
+                # Merge additional rollup frames (expiring windows, subs status)
+                for key, df in (extra_map or {}).items():
+                    if df is None or df.empty:
+                        continue
+                    df = df.copy()
+                    df['customer_id'] = df['customer_id'].astype(str)
+                    def prefix(col: str) -> str:
+                        if col == 'customer_id':
+                            return col
+                        # key like 'expiring_30d' or 'on_subs' becomes assets_<key>_<rollup>
+                        return f"assets_{key}_" + str(col).strip().lower().replace(' ', '_').replace('/', '_')
+                    df.columns = [prefix(c) for c in df.columns]
+                    features_pd = features_pd.merge(df, on='customer_id', how='left')
+
                 # Fill NaNs for newly added features
                 for c in features_pd.columns:
                     if c == 'customer_id':
                         continue
                     if features_pd[c].dtype.kind in 'fi':
                         features_pd[c] = features_pd[c].fillna(0.0)
+
+                try:
+                    added = [c for c in features_pd.columns if str(c).startswith('assets_')]
+                    logger.info("Asset features added: %d", len(added))
+                except Exception:
+                    pass
     except Exception as e:
         logger.warning(f"Asset features failed: {e}")
 
@@ -623,7 +654,7 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
             sl_flags = pd.read_sql("SELECT CustomerId, \"Rec Date\" AS rec_date, * FROM sales_log", engine)
         except Exception:
             try:
-                sl_flags = pd.read_sql("SELECT * FROM sales_log", engine)
+                sl_flags = pd.read_sql(select_all('sales_log'), engine)
                 if 'Rec Date' in sl_flags.columns:
                     sl_flags = sl_flags.rename(columns={'Rec Date': 'rec_date'})
             except Exception:
@@ -980,11 +1011,25 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
             dtype = str(fm_pd[col].dtype)
             non_null = int(fm_pd[col].notna().sum())
             coverage = round(non_null / len(fm_pd), 6) if len(fm_pd) else 0.0
-            desc = (
-                "Primary key for customer" if col == 'customer_id' else (
-                    f"Target: bought in {division_name} during prediction window" if col == 'bought_in_division' else "feature"
-                )
-            )
+            # Human-readable descriptions for important feature families
+            if col == 'customer_id':
+                desc = "Primary key for customer"
+            elif col == 'bought_in_division':
+                desc = f"Target: bought in {division_name} during prediction window"
+            elif str(col).startswith('assets_subs_share_'):
+                desc = "Assets: per-rollup subscription share (on / (on+off)) at cutoff"
+            elif str(col).startswith('assets_on_subs_share_'):
+                desc = "Assets: composition share across rollups among ON subscriptions at cutoff"
+            elif str(col).startswith('assets_off_subs_share_'):
+                desc = "Assets: composition share across rollups among OFF subscriptions at cutoff"
+            elif str(col).startswith('assets_expiring_30d_'):
+                desc = "Assets: quantity expiring within 30 days by rollup at cutoff"
+            elif str(col).startswith('assets_expiring_60d_'):
+                desc = "Assets: quantity expiring within 60 days by rollup at cutoff"
+            elif str(col).startswith('assets_expiring_90d_'):
+                desc = "Assets: quantity expiring within 90 days by rollup at cutoff"
+            else:
+                desc = "feature"
             catalog.append({"name": col, "dtype": dtype, "coverage": coverage, "description": desc})
         # Include cutoff in catalog filename for determinism across cutoffs
         fname = f"feature_catalog_{division_name.lower()}_{(cutoff_date or '').replace('-', '')}.csv" if cutoff_date else f"feature_catalog_{division_name.lower()}.csv"

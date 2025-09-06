@@ -46,6 +46,13 @@ def get_db_connection():
     username = os.getenv("AZSQL_USER")
     password = os.getenv("AZSQL_PWD")
 
+    # Strict mode: require Azure SQL and do not fall back when configured
+    try:
+        cfg = load_config()
+        strict_db = bool(getattr(getattr(cfg, 'database', object()), 'strict_db', False))
+    except Exception:
+        strict_db = False
+
     if all([server, database, username, password]):
         logger.info(f"Connecting to Azure SQL database: {server}/{database}")
         last_err = None
@@ -77,6 +84,8 @@ def get_db_connection():
         )
         raise RuntimeError(msg)
     else:
+        if strict_db:
+            raise RuntimeError("database.strict_db=True but AZSQL_* environment variables are not set")
         logger.info("Azure SQL credentials not found, falling back to SQLite.")
         db_path = ROOT_DIR.parent / "gosales.db"
         logger.info(f"Using SQLite database at: {db_path}")
@@ -107,3 +116,17 @@ def get_curated_connection():
         # Fallback to local curated.sqlite
         p = ROOT_DIR.parent / 'gosales_curated.db'
         return create_engine(f"sqlite:///{p}")
+
+
+def validate_connection(engine) -> bool:
+    """Validate DB connection health by executing a trivial query."""
+    try:
+        with engine.connect() as conn:
+            try:
+                conn.exec_driver_sql("SELECT 1")
+            except Exception:
+                conn.execute("SELECT 1")
+        return True
+    except Exception as e:
+        logger.error("Database connection validation failed: %s", e)
+        return False

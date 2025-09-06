@@ -10,6 +10,8 @@ from sqlalchemy import text
 from pathlib import Path
 import hashlib
 from gosales.utils.db import get_db_connection, get_curated_connection
+from gosales.utils.sql import validate_identifier, ensure_allowed_identifier
+from gosales.sql.queries import select_all
 from gosales.utils.paths import OUTPUTS_DIR, DATA_DIR
 from gosales.utils.config import load_config
 from gosales.ops.run import run_context
@@ -64,12 +66,12 @@ def build_star_schema(engine, config_path: str | Path | None = None, rebuild: bo
     if rebuild:
         try:
             logger.info("Rebuild requested: dropping curated tables and removing parquet snapshots")
-            with engine.connect() as connection:
+            # Use curated engine and transactional DDL to allow rollback on failure
+            with get_curated_connection().begin() as connection:
                 connection.execute(text("DROP TABLE IF EXISTS fact_transactions;"))
                 connection.execute(text("DROP TABLE IF EXISTS dim_customer;"))
                 connection.execute(text("DROP TABLE IF EXISTS dim_product;"))
                 connection.execute(text("DROP TABLE IF EXISTS dim_date;"))
-                connection.commit()
         except Exception as e:
             logger.warning(f"Failed to drop curated tables: {e}")
         # Remove parquet files (keep directory)
@@ -95,7 +97,30 @@ def build_star_schema(engine, config_path: str | Path | None = None, rebuild: bo
     # Read the raw data from the database using pandas first, then convert to polars
     logger.info("Reading sales_log table...")
     try:
-        sales_log_pd = pd.read_sql(f"SELECT * FROM {sales_log_src}", engine)
+        if isinstance(sales_log_src, str) and sales_log_src.lower() != "csv":
+            allow = set(getattr(getattr(cfg, 'database', object()), 'allowed_identifiers', []) or [])
+            if allow:
+                ensure_allowed_identifier(sales_log_src, allow)
+            else:
+                validate_identifier(sales_log_src)
+    except Exception as e:
+        raise
+    try:
+        # Chunked read for large sources
+        def _read_sql_chunks(sql: str, params: dict | None = None, chunksize: int = 200_000) -> pd.DataFrame:
+            try:
+                it = pd.read_sql_query(sql, engine, params=params, chunksize=chunksize)
+                frames = [chunk for chunk in it]
+                if not frames:
+                    return pd.DataFrame()
+                return pd.concat(frames, ignore_index=True)
+            except Exception:
+                return pd.read_sql(sql, engine)
+
+        # Centralized query template
+        allow = set(getattr(getattr(cfg, 'database', object()), 'allowed_identifiers', []) or [])
+        q_sales = select_all(sales_log_src, allowlist=allow if allow else None)
+        sales_log_pd = _read_sql_chunks(q_sales)
 
         # --- Normalize schema to canonical wide format ---
         def normalize_sales_log_schema(df: pd.DataFrame) -> pd.DataFrame:
@@ -275,7 +300,17 @@ def build_star_schema(engine, config_path: str | Path | None = None, rebuild: bo
                 industry_enrichment = pl.from_pandas(industry_enrichment_pd)
                 logger.info(f"Successfully loaded industry enrichment data with {len(industry_enrichment)} records.")
         else:
-            industry_enrichment_pd = pd.read_sql(f"SELECT * FROM {ind_src}", engine)
+            # Validate identifier for DB-backed enrichment source
+            try:
+                allow = set(getattr(getattr(cfg, 'database', object()), 'allowed_identifiers', []) or [])
+                if allow:
+                    ensure_allowed_identifier(ind_src, allow)
+                else:
+                    validate_identifier(ind_src)
+            except Exception as ve:
+                raise
+            q_ind = select_all(ind_src, allowlist=allow if allow else None)
+            industry_enrichment_pd = _read_sql_chunks(q_ind)
             industry_enrichment = pl.from_pandas(industry_enrichment_pd)
             logger.info(f"Successfully loaded industry enrichment data with {len(industry_enrichment)} records.")
     except Exception as e:
@@ -784,3 +819,4 @@ if __name__ == "__main__":
 
         db_engine = get_db_connection()
         build_star_schema(db_engine, config_path=args.config, rebuild=args.rebuild, staging_only=args.staging_only, fail_soft=args.fail_soft)
+

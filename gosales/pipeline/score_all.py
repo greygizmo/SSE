@@ -1,4 +1,4 @@
-from gosales.utils.db import get_db_connection
+from gosales.utils.db import get_db_connection, validate_connection
 from gosales.etl.load_csv import load_csv_to_db
 from gosales.etl.build_star import build_star_schema
 import sys
@@ -32,6 +32,22 @@ def score_all():
         db_engine = get_db_connection()          # source (Azure)
         from gosales.utils.db import get_curated_connection
         curated_engine = get_curated_connection()  # curated (local sqlite)
+        # Connection health checks
+        try:
+            cfg = load_config()
+            strict = bool(getattr(getattr(cfg, 'database', object()), 'strict_db', False))
+        except Exception:
+            strict = False
+        if not validate_connection(db_engine):
+            msg = "Primary database connection is unhealthy."
+            if strict:
+                raise RuntimeError(msg)
+            logger.warning(msg + " Proceeding with best-effort fallback where applicable.")
+        if not validate_connection(curated_engine):
+            msg2 = "Curated database connection is unhealthy."
+            if strict:
+                raise RuntimeError(msg2)
+            logger.warning(msg2)
         try:
             divisions = list(division_set())
         except Exception:

@@ -29,4 +29,15 @@
 
 - Ranker down-weights low-coverage signals automatically. Improve data coverage over time or adjust `whitespace.weights`.
 
+### `icp_scores.csv` write fails on Windows
+
+- If `icp_scores.csv` is open in Excel, Windows may lock the file. The scorer now writes a timestamped fallback file in the same folder and logs a warning. Close Excel and re-run if you need the canonical filename.
+
+### `lift_norm` or `als_norm` appear as all zeros
+
+- Scorer now propagates `mb_lift_max/mb_lift_mean` and `als_f*` into ranking. If zeros persist:
+  - Reduce basket-lift `min_support` in the features engine for sparse divisions.
+  - Increase `features.als_lookback_months` in `config.yaml` to widen the interaction window.
+  - Ensure `implicit` is installed for ALS; a TruncatedSVD fallback is provided but requires recent activity.
+
 

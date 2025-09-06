@@ -23,7 +23,7 @@ except Exception:
     _HAS_SHAP = False
 
 from gosales.utils.config import load_config
-from gosales.utils.db import get_db_connection, get_curated_connection
+from gosales.utils.db import get_db_connection, get_curated_connection, validate_connection
 from gosales.features.engine import create_feature_matrix
 from gosales.utils.paths import OUTPUTS_DIR, MODELS_DIR
 from gosales.utils.logger import get_logger
@@ -209,8 +209,9 @@ def _calibrate(clf, X_train: pd.DataFrame, y_train: pd.Series, X_valid: pd.DataF
 @click.option("--calibration", default="platt,isotonic")
 @click.option("--shap-sample", default=0, type=int, help="Rows to sample for SHAP; 0 disables")
 @click.option("--config", default=str((Path(__file__).parents[1] / "config.yaml").resolve()))
+@click.option("--group-cv/--no-group-cv", default=False, help="Use GroupKFold by customer_id for train/valid split (leakage guard)")
 @click.option("--dry-run/--no-dry-run", default=False, help="Skip training; only verify inputs and emit planned artifacts to manifest")
-def main(division: str, cutoffs: str, window_months: int, models: str, calibration: str, shap_sample: int, config: str, dry_run: bool) -> None:
+def main(division: str, cutoffs: str, window_months: int, models: str, calibration: str, shap_sample: int, config: str, group_cv: bool, dry_run: bool) -> None:
     cfg = load_config(config)
     cut_list = [c.strip() for c in cutoffs.split(",") if c.strip()]
     OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -220,6 +221,16 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
         engine = get_curated_connection()
     except Exception:
         engine = get_db_connection()
+    # Connection health check
+    try:
+        strict = bool(getattr(getattr(cfg, 'database', object()), 'strict_db', False))
+    except Exception:
+        strict = False
+    if not validate_connection(engine):
+        msg = "Database connection is unhealthy."
+        if strict:
+            raise RuntimeError(msg)
+        logger.warning(msg)
 
     # Accumulate metrics across cutoffs per model
     model_names = [m.strip() for m in models.split(",") if m.strip()]
@@ -274,7 +285,37 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
                 all_dropped_corr.extend(dropped_corr)
             except Exception:
                 pass
-            X_train, X_valid, y_train, y_valid = _train_test_split_time_aware(X, y, cfg.modeling.seed)
+            overlap_csv = None
+            if group_cv:
+                try:
+                    from sklearn.model_selection import GroupKFold
+                    groups = df['customer_id'].astype(str)
+                    # Use last fold as validation for determinism
+                    gkf = GroupKFold(n_splits=5)
+                    splits = list(gkf.split(X, y, groups=groups))
+                    tr, va = splits[-1]
+                    X_train, X_valid, y_train, y_valid = X.iloc[tr], X.iloc[va], y[tr], y[va]
+                except Exception:
+                    X_train, X_valid, y_train, y_valid = _train_test_split_time_aware(X, y, cfg.modeling.seed)
+            else:
+                X_train, X_valid, y_train, y_valid = _train_test_split_time_aware(X, y, cfg.modeling.seed)
+
+            # Emit fold overlap audit and optionally fail if any overlap
+            try:
+                train_ids = set(df.iloc[X_train.index]['customer_id'].astype(str))
+                valid_ids = set(df.iloc[X_valid.index]['customer_id'].astype(str))
+                overlap = sorted(train_ids.intersection(valid_ids))
+                from gosales.utils.paths import OUTPUTS_DIR as _OUT
+                overlap_path = _OUT / f"fold_customer_overlap_{division.lower()}_{cutoff}.csv"
+                import pandas as _pd
+                _pd.DataFrame({"customer_id": overlap}).to_csv(overlap_path, index=False)
+                overlap_csv = str(overlap_path)
+                if group_cv and len(overlap) > 0:
+                    raise RuntimeError(f"GroupKFold overlap detected ({len(overlap)} customers). See {overlap_path}")
+            except Exception as _e:
+                if group_cv:
+                    raise
+                # Non-fatal for non-group splits; proceed
 
         # Baseline LR (elastic-net via saga)
         if 'logreg' in model_names:
@@ -285,17 +326,20 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
             # Expanded grid and higher iteration budget
             grid_l1 = lr_params.get('l1_ratio', [0.0, 0.2, 0.5, 0.8])
             grid_C = lr_params.get('C', [0.1, 0.5, 1.0])
+            # Class-weight control
+            cw_cfg = str(cfg.modeling.class_weight).lower() if getattr(cfg, 'modeling', None) else 'balanced'
+            class_weight = None if cw_cfg in ('none', 'null', '') else 'balanced'
             for l1_ratio in grid_l1:
                 for C in grid_C:
                     if float(l1_ratio) == 0.0:
                         lr = LogisticRegression(
                             penalty='l2', solver='lbfgs', C=C, max_iter=10000, tol=1e-3,
-                            class_weight='balanced', random_state=cfg.modeling.seed
+                            class_weight=class_weight, random_state=cfg.modeling.seed
                         )
                     else:
                         lr = LogisticRegression(
                             penalty='elasticnet', solver='saga', l1_ratio=l1_ratio, C=C,
-                            max_iter=10000, tol=1e-3, class_weight='balanced', random_state=cfg.modeling.seed
+                            max_iter=10000, tol=1e-3, class_weight=class_weight, random_state=cfg.modeling.seed
                         )
                     pipe = Pipeline([
                         ('scaler', StandardScaler(with_mean=False)),
@@ -344,6 +388,8 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
             pos = int(np.sum(y_train))
             neg = int(len(y_train) - pos)
             spw = (neg / max(1, pos))
+            use_spw = bool(getattr(cfg.modeling, 'use_scale_pos_weight', True))
+            spw_cap = float(getattr(cfg.modeling, 'scale_pos_weight_cap', 10.0))
             grid = cfg.modeling.lgbm_grid
             best_lgbm = None
             best_auc = -1
@@ -352,7 +398,7 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
                     for learning_rate in grid.get('learning_rate', [0.05]):
                         for feature_fraction in grid.get('feature_fraction', [0.9]):
                             for bagging_fraction in grid.get('bagging_fraction', [0.9]):
-                                lgbm = LGBMClassifier(
+                                params = dict(
                                     random_state=cfg.modeling.seed,
                                     deterministic=True,
                                     n_jobs=1,
@@ -362,8 +408,10 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
                                     min_data_in_leaf=min_data_in_leaf,
                                     feature_fraction=feature_fraction,
                                     bagging_fraction=bagging_fraction,
-                                    scale_pos_weight=min(spw, 10.0),
                                 )
+                                if use_spw:
+                                    params['scale_pos_weight'] = min(spw, spw_cap)
+                                lgbm = LGBMClassifier(**params)
                                 lgbm.fit(X_train, y_train, eval_set=[(X_valid, y_valid)], eval_metric='auc')
                                 p = lgbm.predict_proba(X_valid)[:,1]
                                 auc_lgbm = roc_auc_score(y_valid, p)
@@ -375,7 +423,7 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
                                 except Exception:
                                     gap = 0.0
                                 if gap > 0.05:
-                                    reg_clf = LGBMClassifier(
+                                    reg_params = dict(
                                         random_state=cfg.modeling.seed,
                                         deterministic=True,
                                         n_jobs=1,
@@ -385,8 +433,10 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
                                         min_data_in_leaf=int(min_data_in_leaf * 2),
                                         feature_fraction=max(0.5, feature_fraction * 0.9),
                                         bagging_fraction=max(0.5, bagging_fraction * 0.9),
-                                        scale_pos_weight=min(spw, 10.0),
                                     )
+                                    if use_spw:
+                                        reg_params['scale_pos_weight'] = min(spw, spw_cap)
+                                    reg_clf = LGBMClassifier(**reg_params)
                                     reg_clf.fit(X_train, y_train, eval_set=[(X_valid, y_valid)], eval_metric='auc')
                                     p_reg = reg_clf.predict_proba(X_valid)[:,1]
                                     auc_reg = roc_auc_score(y_valid, p_reg)
@@ -443,7 +493,9 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
         final_cal_method = 'sigmoid'
 
     if winner == 'logreg':
-        lr = LogisticRegression(penalty='elasticnet', solver='saga', l1_ratio=0.2, C=1.0, max_iter=10000, tol=1e-3, class_weight='balanced', random_state=cfg.modeling.seed)
+        cw_cfg = str(cfg.modeling.class_weight).lower() if getattr(cfg, 'modeling', None) else 'balanced'
+        class_weight = None if cw_cfg in ('none', 'null', '') else 'balanced'
+        lr = LogisticRegression(penalty='elasticnet', solver='saga', l1_ratio=0.2, C=1.0, max_iter=10000, tol=1e-3, class_weight=class_weight, random_state=cfg.modeling.seed)
         pipe = Pipeline([
             ('scaler', StandardScaler(with_mean=False)),
             ('model', lr),

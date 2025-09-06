@@ -25,8 +25,12 @@ class Database:
     sqlite_path: Path = ROOT_DIR.parent / "gosales.db"
     curated_target: str = "db"  # 'db' | 'sqlite'
     curated_sqlite_path: Path = ROOT_DIR.parent / "gosales_curated.db"
+    # Enforce external DB presence; if True and AZSQL_* env vars missing/unhealthy, fail instead of falling back
+    strict_db: bool = False
     # Optional mapping of logical table names -> concrete source (e.g., "dbo.saleslog" or "csv")
     source_tables: Dict[str, str] = field(default_factory=dict)
+    # Optional explicit allow-list of schema-qualified DB objects permitted in dynamic SQL
+    allowed_identifiers: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -78,6 +82,8 @@ class Features:
     als_lookback_months: int = 12
     use_item2vec: bool = False
     use_text_tags: bool = False
+    # Toggle Moneyball-based asset features at cutoff (rollups, expiring windows, subs shares)
+    use_assets: bool = True
 
 
 @dataclass
@@ -94,6 +100,10 @@ class ModelingConfig:
     sparse_isotonic_threshold_pos: int = 1000
     # Max rows allowed for SHAP computation; skip if exceeded
     shap_max_rows: int = 50000
+    # Class imbalance controls
+    class_weight: str = "balanced"  # 'balanced' or 'none'
+    use_scale_pos_weight: bool = True
+    scale_pos_weight_cap: float = 10.0
 
 
 @dataclass
@@ -133,6 +143,12 @@ class ValidationConfig:
     ks_threshold: float = 0.15
     psi_threshold: float = 0.25
     cal_mae_threshold: float = 0.03
+    # Leakage Gauntlet thresholds for shift-14 check
+    shift14_epsilon_auc: float = 0.01
+    shift14_epsilon_lift10: float = 0.25
+    # Leakage Gauntlet thresholds for Top-K ablation
+    ablation_epsilon_auc: float = 0.01
+    ablation_epsilon_lift10: float = 0.25
 
 
 @dataclass
@@ -215,10 +231,16 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
 
     env_db_engine = os.getenv("GOSALES_DB_ENGINE")
     env_sqlite_path = os.getenv("GOSALES_SQLITE_PATH")
+    env_use_assets = os.getenv("GOSALES_FEATURES_USE_ASSETS")
     if env_db_engine:
         cfg_dict.setdefault("database", {})["engine"] = env_db_engine
     if env_sqlite_path:
         cfg_dict.setdefault("database", {})["sqlite_path"] = env_sqlite_path
+    if env_use_assets is not None:
+        # Accept truthy strings: '1', 'true', 'yes'
+        truthy = {"1", "true", "yes", "on"}
+        val = str(env_use_assets).strip().lower() in truthy
+        cfg_dict.setdefault("features", {})["use_assets"] = val
 
     cfg_dict = _merge_overrides(cfg_dict, cli_overrides)
 
@@ -263,7 +285,9 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
             sqlite_path=Path(database.get("sqlite_path", ROOT_DIR.parent / "gosales.db")).resolve(),
             curated_target=str(database.get("curated_target", "db")),
             curated_sqlite_path=Path(database.get("curated_sqlite_path", ROOT_DIR.parent / "gosales_curated.db")).resolve(),
+            strict_db=bool(database.get("strict_db", False)),
             source_tables=dict(database.get("source_tables", {})),
+            allowed_identifiers=list(database.get("allowed_identifiers", [])),
         ),
         run=Run(
             cutoff_date=str(run_cfg.get("cutoff_date", "2024-12-31")),
@@ -312,6 +336,9 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
             top_k_percents=list(mdl_cfg.get("top_k_percents", [5, 10, 20])),
             capacity_percent=int(mdl_cfg.get("capacity_percent", 10)),
             sparse_isotonic_threshold_pos=int(mdl_cfg.get("sparse_isotonic_threshold_pos", 1000)),
+            class_weight=str(mdl_cfg.get("class_weight", "balanced")),
+            use_scale_pos_weight=bool(mdl_cfg.get("use_scale_pos_weight", True)),
+            scale_pos_weight_cap=float(mdl_cfg.get("scale_pos_weight_cap", 10.0)),
         ),
         whitespace=WhitespaceConfig(
             weights=ws_weights,
@@ -342,6 +369,10 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
             ks_threshold=float(val_cfg.get("ks_threshold", 0.15)),
             psi_threshold=float(val_cfg.get("psi_threshold", 0.25)),
             cal_mae_threshold=float(val_cfg.get("cal_mae_threshold", 0.03)),
+            shift14_epsilon_auc=float(val_cfg.get("shift14_epsilon_auc", 0.01)),
+            shift14_epsilon_lift10=float(val_cfg.get("shift14_epsilon_lift10", 0.25)),
+            ablation_epsilon_auc=float(val_cfg.get("ablation_epsilon_auc", 0.01)),
+            ablation_epsilon_lift10=float(val_cfg.get("ablation_epsilon_lift10", 0.25)),
         ),
     )
 

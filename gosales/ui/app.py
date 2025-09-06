@@ -311,16 +311,16 @@ elif tab == "Whitespace":
             # Filters
             df = _read_csv(ws)
             if not df.empty:
-                with st.expander(""What these columns mean"", expanded=True):
-                    st.markdown(""- customer_id/customer_name: who the recommendation is for."")
-                    st.markdown(""- division_name: the product/target (e.g., Printers, SWX_Seats)."")
-                    st.markdown(""- score: blended next-best-action score combining model probability, affinity, similarity, and expected value."")
-                    st.markdown(""- p_icp: model probability; p_icp_pct: percentile within this division (0–1)."")
-                    st.markdown(""- lift_norm: market-basket affinity (normalized); als_norm: similarity to current owners (normalized)."")
-                    st.markdown(""- EV_norm: expected value proxy (normalized). nba_reason: short text explanation."")
+                with st.expander('"What these columns mean"', expanded=True):
+                    st.markdown('"- customer_id/customer_name: who the recommendation is for."')
+                    st.markdown('"- division_name: the product/target (e.g., Printers, SWX_Seats)."')
+                    st.markdown('"- score: blended next-best-action score combining model probability, affinity, similarity, and expected value."')
+                    st.markdown('"- p_icp: model probability; p_icp_pct: percentile within this division (0-1)."')
+                    st.markdown('"- lift_norm: market-basket affinity (normalized); als_norm: similarity to current owners (normalized)."')
+                    st.markdown('"- EV_norm: expected value proxy (normalized). nba_reason: short text explanation."')
                 # Simple filters on key columns when present
-                default_cols = [c for c in [""customer_id"",""customer_name"",""division_name"",""score"",""p_icp"",""p_icp_pct"",""EV_norm"",""nba_reason""] if c in df.columns]
-                cols = st.multiselect(""Columns to show"", df.columns.tolist(), default=default_cols or df.columns.tolist()[:12], help=""Tip: reduce visible columns to focus on key signals"")
+                default_cols = [c for c in ['"customer_id"','"customer_name"','"division_name"','"score"','"p_icp"','"p_icp_pct"','"EV_norm"','"nba_reason"'] if c in df.columns]
+                cols = st.multiselect('"Columns to show"', df.columns.tolist(), default=default_cols or df.columns.tolist()[:12], help='"Tip: reduce visible columns to focus on key signals"')
                 if cols:
                     st.dataframe(df[cols].head(200), use_container_width=True)
                 else:

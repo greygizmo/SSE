@@ -238,10 +238,10 @@ def validate_against_holdout():
         fact_transactions_combined_clean = pl.from_pandas(fact_transactions_pd)
         temp_table = "fact_transactions_temp"
         fact_transactions_combined_clean.write_database(temp_table, db_engine, if_table_exists="replace")
-        with db_engine.connect() as connection:
-            connection.execute(text("DROP TABLE IF EXISTS fact_transactions"))
-            connection.execute(text(f"CREATE TABLE fact_transactions AS SELECT * FROM {temp_table}"))
-            connection.commit()
+        from sqlalchemy import text as _text
+        with db_engine.begin() as connection:
+            connection.execute(_text("DROP TABLE IF EXISTS fact_transactions"))
+            connection.execute(_text(f"CREATE TABLE fact_transactions AS SELECT * FROM {temp_table}"))
         logger.info(f"Created combined fact_transactions table with {len(fact_transactions_pd)} transactions")
 
         def _run():

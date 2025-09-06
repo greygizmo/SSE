@@ -6,6 +6,8 @@ paths:
 database:
   engine: azure          # sqlite | duckdb | azure
   sqlite_path: gosales/gosales.db
+  # If true, require external DB; fail if AZSQL_* missing/unhealthy (no SQLite fallback)
+  strict_db: false
   # Optional mapping of logical sources -> actual tables/views. Use 'csv' to read from a file.
   source_tables:
     sales_log: dbo.saleslog            # Azure SQL view for Sales Log
@@ -14,6 +16,12 @@ database:
     customer_assets_rollups: dbo.customer_asset_rollups
     moneyball_assets: dbo.[Moneyball Assets]
     items_category_limited: dbo.items_category_limited
+  # Optional explicit allow-list of DB objects used in dynamic SQL
+  allowed_identifiers:
+    - dbo.saleslog
+    - dbo.customer_asset_rollups
+    - dbo.[Moneyball Assets]
+    - dbo.items_category_limited
   # Where to write curated tables: 'db' (default, same engine) or 'sqlite'
   curated_target: sqlite
   curated_sqlite_path: gosales/gosales_curated.db
@@ -71,6 +79,10 @@ modeling:
   top_k_percents: [5, 10, 20]
   capacity_percent: 10
   shap_max_rows: 50000
+  # Class imbalance controls
+  class_weight: balanced        # balanced | none
+  use_scale_pos_weight: true    # LightGBM scale_pos_weight toggle
+  scale_pos_weight_cap: 10.0
 
 whitespace:
   weights: [0.60, 0.20, 0.10, 0.10]   # [p_icp_pct, lift_norm, als_norm, EV_norm]; non-negative, auto-normalized
@@ -101,5 +113,11 @@ validation:
   segment_columns: [industry, industry_sub, region, territory]
   ks_threshold: 0.15
   psi_threshold: 0.25
+  # Shift-14 Leakage Gauntlet thresholds
+  shift14_epsilon_auc: 0.01
+  shift14_epsilon_lift10: 0.25
+  # Top-K ablation thresholds
+  ablation_epsilon_auc: 0.01
+  ablation_epsilon_lift10: 0.25
 
 

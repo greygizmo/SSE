@@ -9,6 +9,8 @@ from sqlalchemy import text
 from gosales.utils.db import get_db_connection
 from gosales.utils.config import load_config
 from gosales.utils.logger import get_logger
+from gosales.utils.sql import validate_identifier
+from gosales.sql.queries import top_n_preview
 
 
 logger = get_logger(__name__)
@@ -22,6 +24,12 @@ def main(view: str, rows: int, config: str) -> None:
     """Inspect a DB view: list columns and show a few sample rows (no writes)."""
     _ = load_config(config)
     eng = get_db_connection()
+    # Minimal identifier validation to mitigate injection
+    try:
+        validate_identifier(view)
+    except Exception as e:
+        logger.error("Invalid view identifier: %s", e)
+        return
     with eng.connect() as conn:
         # Columns via INFORMATION_SCHEMA when available; fallback to LIMIT 0 select
         cols = []
@@ -42,10 +50,11 @@ def main(view: str, rows: int, config: str) -> None:
         logger.info("%s columns (%d): %s", view, len(cols), cols)
 
         try:
-            top_sql = f"SELECT TOP {int(rows)} * FROM {view}"
+            dialect = eng.dialect.name
+            top_sql = top_n_preview(view, dialect, n=int(rows))
             df = pd.read_sql(top_sql, eng)
         except Exception:
-            df = pd.read_sql(f"SELECT * FROM {view} LIMIT {int(rows)}", eng)
+            df = pd.read_sql(top_n_preview(view, "sqlite", n=int(rows)), eng)
         if not df.empty:
             logger.info("Sample rows:\n%s", df.to_string(index=False))
         else:
@@ -54,4 +63,3 @@ def main(view: str, rows: int, config: str) -> None:
 
 if __name__ == "__main__":
     main()
-

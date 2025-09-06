@@ -10,7 +10,7 @@ import json
 from pathlib import Path
 import joblib
 
-from gosales.utils.db import get_db_connection
+from gosales.utils.db import get_db_connection, validate_connection
 from gosales.utils.logger import get_logger
 from gosales.utils.paths import MODELS_DIR, OUTPUTS_DIR
 from gosales.utils.normalize import normalize_division
@@ -28,6 +28,28 @@ logger = get_logger(__name__)
 class MissingModelMetadataError(Exception):
     pass
 
+_DIM_CUSTOMER_CACHE: pd.DataFrame | None = None
+
+
+def _get_dim_customer(engine) -> pd.DataFrame:
+    """Read dim_customer once per run and cache in-process.
+
+    Returns a DataFrame with at least [customer_id, customer_name] and
+    customer_id coerced to string for safe joins.
+    """
+    global _DIM_CUSTOMER_CACHE
+    if _DIM_CUSTOMER_CACHE is not None and isinstance(_DIM_CUSTOMER_CACHE, pd.DataFrame):
+        return _DIM_CUSTOMER_CACHE
+    try:
+        df = pd.read_sql("select customer_id, customer_name from dim_customer", engine)
+    except Exception:
+        # Minimal fallback if dim_customer missing
+        df = pd.DataFrame({"customer_id": pd.Series(dtype=str), "customer_name": pd.Series(dtype=str)})
+    if "customer_id" in df.columns:
+        df["customer_id"] = df["customer_id"].astype(str)
+    df = df.drop_duplicates(subset="customer_id")
+    _DIM_CUSTOMER_CACHE = df
+    return df
 
 def discover_available_models(models_dir: Path | None = None) -> dict[str, Path]:
     """Discover available models under models_dir and key by exact metadata division.
@@ -206,29 +228,41 @@ def score_customers_for_division(
     X = feature_matrix.drop(["customer_id", "bought_in_division"]).to_pandas()
     # Align columns to training feature order using saved metadata or feature_list.json
     try:
-        train_cols = []
+        train_cols: list[str] = []
         meta_path = model_path / "metadata.json"
         feat_list_path = model_path / "feature_list.json"
-        if meta_path.exists():
-            with open(meta_path, "r", encoding="utf-8") as f:
-                meta = json.load(f)
-                train_cols = meta.get("feature_names", [])
-        if not train_cols and feat_list_path.exists():
+        # Prefer explicit feature_list.json (canonical order); fallback to metadata
+        if feat_list_path.exists():
             with open(feat_list_path, "r", encoding="utf-8") as f:
                 try:
                     import json as _json
-                    train_cols = _json.load(f)
+                    train_cols = list(_json.load(f) or [])
                 except Exception:
                     train_cols = []
+        if (not train_cols) and meta_path.exists():
+            with open(meta_path, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+                train_cols = list(meta.get("feature_names", []) or [])
         if train_cols:
-            for col in train_cols:
-                if col not in X.columns:
-                    X[col] = 0
-            # Drop extras and reorder
-            X = X[[c for c in train_cols if c in X.columns]]
-    except Exception:
-        # If metadata missing, proceed with current X
-        pass
+            # Hard reindex guarantees exact shape/order and zero‑fills missing
+            missing = [c for c in train_cols if c not in X.columns]
+            extra = [c for c in X.columns if c not in train_cols]
+            if missing or extra:
+                logger.info(
+                    "Feature alignment: %d missing, %d extra columns (will reindex)",
+                    len(missing), len(extra)
+                )
+                try:
+                    if missing:
+                        logger.debug("Missing top20: %s", missing[:20])
+                    if extra:
+                        logger.debug("Extra top20: %s", extra[:20])
+                except Exception:
+                    pass
+            X = X.reindex(columns=train_cols, fill_value=0.0)
+    except Exception as e:
+        # If metadata missing, proceed with current X but log
+        logger.warning(f"Feature alignment skipped due to error: {e}")
     
     try:
         probabilities = _score_p_icp(model, X)
@@ -239,12 +273,29 @@ def score_customers_for_division(
         scores_df['division_name'] = division_name
         scores_df['icp_score'] = probabilities
         # Optional EV and affinity signals
-        for aux_col in [
-            'rfm__all__gp_sum__12m',  # EV proxy
-            'affinity__div__lift_topk__12m',  # affinity (if present)
-        ]:
+        aux_cols = [
+            'rfm__all__gp_sum__12m',        # EV proxy
+            'affinity__div__lift_topk__12m',# affinity aggregate (if present)
+            'mb_lift_max',                  # primary basket-lift signal used by ranker
+            'mb_lift_mean',                 # secondary (not required but useful)
+        ]
+        for aux_col in aux_cols:
             if aux_col in feature_matrix_pd.columns and aux_col not in scores_df.columns:
                 scores_df[aux_col] = pd.to_numeric(feature_matrix_pd[aux_col], errors='coerce').fillna(0.0)
+
+        # Pass through ALS embedding columns so ranker can compute als_norm
+        als_cols = [c for c in feature_matrix_pd.columns if str(c).startswith('als_f')]
+        if als_cols:
+            for c in als_cols:
+                scores_df[c] = pd.to_numeric(feature_matrix_pd[c], errors='coerce').fillna(0.0)
+
+        # Ownership flag for ALS centroid (last 12m div transactions)
+        try:
+            tx_div_col = 'rfm__div__tx_n__12m'
+            if tx_div_col in feature_matrix_pd.columns:
+                scores_df['owned_division_pre_cutoff'] = (pd.to_numeric(feature_matrix_pd[tx_div_col], errors='coerce').fillna(0.0) > 0).astype(int)
+        except Exception:
+            pass
         # Propagate scoring metadata for auditing
         scores_df['cutoff_date'] = cutoff
         scores_df['prediction_window_months'] = int(window_months)
@@ -258,10 +309,7 @@ def score_customers_for_division(
         except Exception:
             pass
         
-        customer_names = (
-            pd.read_sql("select customer_id, customer_name from dim_customer", engine)
-            .drop_duplicates(subset="customer_id")
-        )
+        customer_names = _get_dim_customer(engine)
         scores_df["customer_id"] = scores_df["customer_id"].astype(str)
         customer_names["customer_id"] = customer_names["customer_id"].astype(str)
         scores_df = scores_df.merge(customer_names, on="customer_id", how="left")
@@ -291,7 +339,7 @@ def generate_whitespace_opportunities(engine):
             # Provide a neutral recency anchor if date not available
             tx_pd["order_date"] = pd.Timestamp("1970-01-01")
         transactions = pl.from_pandas(tx_pd)
-        customers = pl.from_pandas(pd.read_sql("SELECT * FROM dim_customer", engine))
+        customers = pl.from_pandas(_get_dim_customer(engine))
         if "customer_id" in transactions.columns:
             transactions = transactions.with_columns(pl.col("customer_id").cast(pl.Utf8))
         if "customer_id" in customers.columns:
@@ -417,7 +465,21 @@ def generate_scoring_outputs(
         except Exception:
             pass
         icp_scores_path = OUTPUTS_DIR / "icp_scores.csv"
-        combined_scores.write_csv(str(icp_scores_path))
+        # Robust write: attempt primary path; on Windows lock, write a run_id-suffixed file
+        try:
+            combined_scores.write_csv(str(icp_scores_path))
+        except OSError as e:
+            try:
+                # Fallback: write to a unique file (non-destructive) and log
+                import datetime as _dt
+                ts = _dt.datetime.utcnow().strftime('%Y%m%d%H%M%S')
+                fallback = OUTPUTS_DIR / f"icp_scores_{ts}.csv"
+                combined_scores.write_csv(str(fallback))
+                logger.warning(f"icp_scores.csv locked or unavailable ({e}); wrote fallback file: {fallback}")
+                icp_scores_path = fallback
+            except Exception as ee:
+                logger.error(f"Failed to write ICP scores due to file lock and fallback failed: {ee}")
+                raise
         # Lightweight schema validation
         try:
             report = validate_icp_scores_schema(icp_scores_path)
@@ -557,6 +619,17 @@ def generate_scoring_outputs(
                     sel_name = f"whitespace_selected_{cutoff_tag}.csv" if cutoff_tag else "whitespace_selected.csv"
                     selected.to_csv(OUTPUTS_DIR / sel_name, index=False)
 
+                    # Capacity summary export (counts and shares per division)
+                    try:
+                        if len(selected) > 0 and 'division_name' in selected.columns:
+                            cap = selected.groupby('division_name')['customer_id'].size().sort_values(ascending=False)
+                            cap_df = cap.rename('selected_count').reset_index()
+                            cap_df['selected_share'] = cap_df['selected_count'] / float(len(selected))
+                            cap_name = f"capacity_summary_{cutoff_tag}.csv" if cutoff_tag else "capacity_summary.csv"
+                            cap_df.to_csv(OUTPUTS_DIR / cap_name, index=False)
+                    except Exception:
+                        pass
+
                     share_series = selected.groupby('division_name')['customer_id'].size().sort_values(ascending=False) if len(selected) > 0 and 'division_name' in selected.columns else pd.Series(dtype=int)
                     total_sel = max(1, int(len(selected)))
                     share_map = {str(k): float(v) / total_sel for k, v in share_series.items()} if len(selected) > 0 else {}
@@ -607,6 +680,16 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     db_engine = get_db_connection()
+    try:
+        cfg = load_config()
+        strict = bool(getattr(getattr(cfg, 'database', object()), 'strict_db', False))
+    except Exception:
+        strict = False
+    if not validate_connection(db_engine):
+        msg = "Primary database connection is unhealthy."
+        if strict:
+            raise RuntimeError(msg)
+        logger.warning(msg)
     generate_scoring_outputs(
         db_engine,
         cutoff_date=args.cutoff_date,

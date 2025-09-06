@@ -1,0 +1,81 @@
+﻿# GoSales: High-Impact TODOs (Assets + Modeling)
+
+This list captures prioritized actions to improve model accuracy, stability, and
+operational robustness. Items marked [HI] are highâ€‘impact. Focus first on code
+changes that do not require ETL rebuilds or retraining.
+
+## Highâ€‘Impact (No ETL/Training Needed)
+
+- [x] [HI] Scoring reindex: enforce exact training feature order/shape at
+      inference to avoid LightGBM shape errors (use `DataFrame.reindex`).
+- [x] [HI] Metrics rollâ€‘up: aggregate `metrics_*.json` into a single summary CSV
+      (AUC, PRâ€‘AUC, lift@K, Brier) for quick comparison/monitoring.
+- [x] [HI] Add scoreâ€‘time logging guards: emit counts of missing/added columns,
+      top 20 missing features, and ensure numeric dtype before prediction.
+- [x] [HI] Bias/capacity: make ranker thresholds explicit in outputs (already
+      emitted) and add quick sanity alert when a single division > threshold.
+- [x] [HI] Fileâ€‘lockâ€‘resistant output writes: write ICP scores to primary path,
+      fallback to timestamped file on Windows lock; log warning.
+- [ ] [HI] Identifier allowâ€‘list for DB objects: sanitize/validate schema and
+      view/table names sourced from config (regex + explicit allowâ€‘list) before
+      building fâ€‘string SQL; keep WHERE parameters bound via SQLAlchemy.
+- [ ] [HI] Connection health check: add `validate_connection(engine)` and use in
+      pipeline entrypoints (score/build/train). Add config `database.strict_db`
+      to fail instead of silently falling back to SQLite when required.
+
+## Leakage Gauntlet (from GPTâ€‘5 suggestions)
+
+- [ ] [HI] Entrypoint CLI: `gosales/pipeline/run_leakage_gauntlet.py` to run per
+      division+cutoff; writes all artifacts under `outputs/leakage/`.
+- [ ] [HI] Groupâ€‘safe CV: add option to use timeâ€‘aware split + GroupKFold by
+      `customer_id` in training; emit `fold_customer_overlap_<div>_<cutoff>.csv`
+      and fail if any overlap.
+- [ ] [HI] Feature date audit: record for each derived feature the latest
+      source event date contributing to it; write
+      `feature_date_audit_<div>_<cutoff>.csv`; fail if any date > cutoff.
+- [ ] [HI] Static scan: forbid calls like `datetime.now()`, `pd.Timestamp.now()`,
+      `date.today()` in feature paths; write `static_scan_<div>_<cutoff>.json`.
+- [ ] [HI] 14â€‘day shift test: reâ€‘build features/events with all dates shifted
+      back 14 days and retrain; metrics must not improve beyond a small epsilon;
+      write `shift14_metrics_<div>_<cutoff>.json`.
+- [ ] [HI] Topâ€‘K ablation: drop K most important features and ensure metrics do
+      not improve beyond noise; write `ablation_topk_<div>_<cutoff>.csv`.
+- [ ] [HI] Consolidated report: `leakage_report_<div>_<cutoff>.json` aggregating
+      status of all checks with PASS/FAIL and actionable messages; nonâ€‘zero exit
+      code on failure when run via CLI.
+
+## Highâ€‘Impact (Code Ready Now; Run Later)
+
+- [x] Renewal pressure at cutoff: expand asset features to
+      `expiring_{30,60,90}d_<rollup>` + shares. (Requires ETL rebuild to use.)
+- [ ] Subscription signals: merge OnSubs/OffSubs by rollup when available and
+      derive `subs_share` features. (Requires new mapping + ETL.)
+- [ ] Classâ€‘imbalance tuning: enable `class_weight='balanced'` (LR) and
+      `scale_pos_weight` (LGBM) via config. (Takes effect next training.)
+- [ ] Ablation study: train 1â€“2 divisions with assets OFF to quantify lift deltas.
+- [ ] Transaction boundaries in ETL: wrap destructive DDL/DML in
+      `with engine.begin():` to ensure rollback on failure in starâ€‘build and
+      future asset materializations.
+- [ ] Expand chunking: ensure all large reads use chunked `read_sql_query`, and
+      large CSV/Parquet writes use streaming/sink patterns where available.
+
+## Niceâ€‘toâ€‘Have
+
+- [ ] Tenure QA export: histogram and perâ€‘rollup badâ€‘date reliance over time.
+- [ ] Nameâ€‘join QA: coverage of Moneyball names â†’ `dim_customer.customer_id`.
+- [ ] Drift snapshots: monthly scoring prevalence and calibration MAE trend.
+- [ ] Explanations: optional SHAP export for selected divisions (sample gated).
+- [ ] Move adâ€‘hoc SQL into `sql/` with parameterized templates and tests.
+- [ ] Cache small dims (e.g., `dim_customer`) in memory during scoring to
+      reduce repeated DB calls.
+- [ ] CI checks: quick contract tests for assets (rollup mapping coverage
+      threshold), tenure imputation sanity, and scorer featureâ€‘list alignment.
+
+## Complete / Done
+
+- [x] Build `fact_assets` (Moneyball Ã— items rollup) and map customers by
+      humanâ€‘readable names.
+- [x] Tenure imputation for preâ€‘1996 purchase dates and `assets_bad_purchase_share`.
+- [x] Add asset features at cutoff and join into feature matrices.
+- [x] Train core divisions and generate ranked whitespace at 2024â€‘12â€‘31.
+

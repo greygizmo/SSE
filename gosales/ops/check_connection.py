@@ -11,6 +11,8 @@ from sqlalchemy import text
 from gosales.utils.db import get_db_connection
 from gosales.utils.config import load_config
 from gosales.utils.logger import get_logger
+from gosales.utils.sql import validate_identifier, ensure_allowed_identifier
+from gosales.sql.queries import top_n_preview
 
 
 logger = get_logger(__name__)
@@ -35,7 +37,9 @@ def main(table_name: Optional[str], config: str, verbose: bool) -> None:
     """
     cfg = load_config(config)
     engine = get_db_connection()
-    src = getattr(getattr(cfg, "database", object()), "source_tables", {}) or {}
+    db_cfg = getattr(cfg, "database", object())
+    src = getattr(db_cfg, "source_tables", {}) or {}
+    allow = set(getattr(db_cfg, "allowed_identifiers", []) or [])
     etl = getattr(cfg, "etl", object())
     dialect = engine.dialect.name
     logger.info("Connected using SQLAlchemy dialect: %s", dialect)
@@ -73,9 +77,19 @@ def main(table_name: Optional[str], config: str, verbose: bool) -> None:
             continue
 
         # DB-backed
+        # Validate DB identifier and enforce allow-list if configured
+        try:
+            if allow:
+                ensure_allowed_identifier(concrete, allow)
+            else:
+                validate_identifier(concrete)
+        except Exception as ve:
+            logger.warning("Invalid or disallowed identifier for %s: %s", logical, ve)
+            ok = False
+            continue
         logger.info("%s -> %s", logical, concrete)
         try:
-            sql = _preview_sql_for_table(dialect, concrete)
+            sql = top_n_preview(concrete, dialect, n=1, allowlist=allow if allow else None)
             with engine.connect() as conn:
                 rs = conn.execute(text(sql))
                 row = rs.fetchone()
@@ -94,4 +108,3 @@ def main(table_name: Optional[str], config: str, verbose: bool) -> None:
 
 if __name__ == "__main__":
     main()
-
