@@ -751,6 +751,43 @@ def main(division: str, cutoff: str, window_months: int, static_only: bool, run_
             artifacts.update(run_reproducibility_check(ctx, window_months, eps_auc=repro_eps_auc, eps_lift10=repro_eps_lift10))
     except Exception as e:
         logger.error("Reproducibility check failed: %s", e)
+
+    # Attach diagnostics (if present) as a summary artifact
+    try:
+        diag = {}
+        perm = ctx.out_dir / 'permutation_diag.json'
+        imp = ctx.out_dir / 'importance_stability.json'
+        summary = {"status": "INFO", "cutoff": ctx.cutoff, "artifacts": {}}
+        if perm.exists():
+            try:
+                p = json.loads(perm.read_text(encoding='utf-8'))
+                pv = p.get('p_value')
+                summary['artifacts']['permutation_diag'] = str(perm)
+                summary['permutation'] = {
+                    'baseline_auc': p.get('baseline_auc'),
+                    'permuted_auc_mean': p.get('permuted_auc_mean'),
+                    'auc_degradation': p.get('auc_degradation'),
+                    'p_value': pv,
+                }
+            except Exception:
+                pass
+        if imp.exists():
+            try:
+                s = json.loads(imp.read_text(encoding='utf-8'))
+                summary['artifacts']['importance_stability'] = str(imp)
+                summary['importance'] = {
+                    'mean_spearman': s.get('mean_spearman'),
+                    'mean_jaccard_topk': s.get('mean_jaccard_topk'),
+                }
+            except Exception:
+                pass
+        # Only write if anything present
+        if summary.get('artifacts'):
+            diag_path = ctx.out_dir / f'diagnostics_summary_{ctx.division}_{ctx.cutoff}.json'
+            diag_path.write_text(json.dumps(summary, indent=2), encoding='utf-8')
+            artifacts['diagnostics_summary'] = str(diag_path)
+    except Exception as e:
+        logger.warning("Diagnostics summary attach failed: %s", e)
     # Future: dynamic checks here when enabled
     report = write_consolidated_report(ctx, artifacts)
     logger.info("Wrote leakage report to %s", report)
