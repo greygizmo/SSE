@@ -116,20 +116,25 @@ def run_label_permutation(out_dir: Path, df: pd.DataFrame, n_perm: int = 50, see
             bins = pd.qcut(pd.to_numeric(rec, errors='coerce').fillna(rec.max()).astype(float), q=5, duplicates='drop')
             groups = bins.astype(str).values
         except Exception:
-            groups = np.array(['all'] * len(df))
+            groups = np.array(['all'] * len(df_s))
     else:
-        groups = np.array(['all'] * len(df))
+        groups = np.array(['all'] * len(df_s))
 
-    rng = np.random.RandomState(seed)
     auc_perm: list[float] = []
-    for _ in range(int(n_perm)):
+    for i in range(int(n_perm)):
+        rng = np.random.RandomState(seed + i)
         y_perm = y.copy()
         try:
-            for g in np.unique(groups):
-                mask = (groups == g)
-                rng.shuffle(y_perm[mask])
+            # shuffle labels only on the TRAIN subset, within time buckets
+            unique_groups = pd.unique(groups[it])
+            for g in unique_groups:
+                pos_in_train = np.where(groups[it] == g)[0]
+                if len(pos_in_train) > 1:
+                    idx_global = it[pos_in_train]
+                    y_perm[idx_global] = y_perm[idx_global][rng.permutation(len(idx_global))]
         except Exception:
-            rng.shuffle(y_perm)
+            # fallback: shuffle train labels only
+            y_perm[it] = y_perm[it][rng.permutation(len(it))]
         with warnings.catch_warnings():
             warnings.simplefilter('ignore', ConvergenceWarning)
             clf.fit(X.iloc[it], y_perm[it])
@@ -142,12 +147,18 @@ def run_label_permutation(out_dir: Path, df: pd.DataFrame, n_perm: int = 50, see
         auc_perm.append(a)
 
     auc_perm = [a for a in auc_perm if a == a and math.isfinite(a)]
+    # one-sided p-value: P(AUC_perm >= AUC_baseline)
+    p_value = None
+    if auc_perm:
+        arr = np.asarray(auc_perm, dtype=float)
+        p_value = float(((arr >= auc_baseline).sum() + 1) / (len(arr) + 1))
     stats = {
         'baseline_auc': auc_baseline,
         'permuted_auc_mean': float(np.mean(auc_perm)) if auc_perm else None,
         'permuted_auc_std': float(np.std(auc_perm)) if auc_perm else None,
         'n_permutations': int(len(auc_perm)),
         'auc_degradation': (auc_baseline - float(np.mean(auc_perm))) if auc_perm else None,
+        'p_value': p_value,
     }
 
     # Optional plot
