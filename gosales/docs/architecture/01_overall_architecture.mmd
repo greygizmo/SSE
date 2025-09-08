@@ -31,12 +31,15 @@ graph TB
             TrainDivision[Division Training<br/>train_division_model.py]
             ModelArtifacts[Model Artifacts<br/>model.pkl, MLmodel]
             Metrics[Model Metrics<br/>metrics.py]
+            NewModels[New ML Models<br/>camworks, pdm_seats,<br/>printers, scanning,<br/>simulation]
         end
 
         subgraph "Pipeline Orchestration"
             ScoreAll[Full Pipeline Runner<br/>score_all.py]
             ScoreCustomers[Customer Scoring<br/>score_customers.py]
             LabelAudit[Label Auditing<br/>label_audit.py]
+            LeakageGauntlet[Leakage Gauntlet<br/>run_leakage_gauntlet.py]
+            AblationTesting[Ablation Testing<br/>ablation_assets_off.py]
         end
     end
 
@@ -47,6 +50,9 @@ graph TB
         HoldoutValidation[Holdout Testing<br/>validate_holdout.py]
         DecilesValidation[Deciles Analysis<br/>deciles.py]
         CIGate[CI Gate<br/>ci_gate.py]
+        LeakageChecks[Leakage Detection<br/>static_scan.py]
+        FeatureAudit[Feature Date Audit<br/>feature_date_audit.py]
+        ShiftTesting[Shift Testing<br/>shift14_check.py]
     end
 
     %% Monitoring & Observability

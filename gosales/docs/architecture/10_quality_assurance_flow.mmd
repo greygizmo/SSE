@@ -1,0 +1,154 @@
+---
+title: GoSales Engine - Quality Assurance Flow
+---
+
+```mermaid
+graph TB
+    %% Start
+    Start([QA Process Start]) --> InitializeQA
+
+    %% Initialization
+    subgraph "QA Initialization"
+        InitializeQA[Initialize QA Session<br/>Load Configuration]
+        SelectTestType[Select Test Type<br/>Leakage/Ablation/Drift]
+        ConfigureParameters[Configure Parameters<br/>Division, Cutoff, Window]
+        ValidatePrerequisites[Validate Prerequisites<br/>Data Availability]
+    end
+
+    %% Leakage Gauntlet Flow
+    subgraph "Leakage Gauntlet"
+        StaticScan[Static Code Scan<br/>Banned Functions]
+        FeatureAudit[Feature Date Audit<br/>Post-Cutoff Detection]
+        Shift14Test[14-Day Shift Test<br/>Temporal Robustness]
+        TopKAblation[Top-K Feature Ablation<br/>Importance Testing]
+        ConsolidatedReport[Generate Report<br/>PASS/FAIL Summary]
+    end
+
+    %% Ablation Testing Flow
+    subgraph "Ablation Testing"
+        AssetsOffTest[Assets-Off Ablation<br/>Disable Assets Features]
+        FeatureRemovalTest[Feature Removal Test<br/>Individual Feature Impact]
+        PerformanceComparison[Performance Comparison<br/>Baseline vs Ablated]
+        ImpactAnalysis[Impact Analysis<br/>Feature Importance]
+        AblationReport[Generate Ablation Report<br/>Impact Summary]
+    end
+
+    %% Drift Monitoring Flow
+    subgraph "Drift Monitoring"
+        CollectHistoricalData[Collect Historical Data<br/>Previous Runs]
+        CalculateDriftMetrics[Calculate Drift Metrics<br/>Distribution Changes]
+        GenerateDriftSnapshot[Generate Drift Snapshot<br/>Time-series Analysis]
+        VisualizeDriftTrends[Visualize Drift Trends<br/>Trend Charts]
+        DriftAlertSystem[Drift Alert System<br/>Threshold Monitoring]
+    end
+
+    %% QA Script Execution
+    subgraph "QA Script Suite"
+        FeatureAlignment[Feature List Alignment<br/>Cross-model Consistency]
+        AssetsSanityCheck[Assets Sanity Check<br/>Data Integrity]
+        MetricsSummary[Metrics Summary<br/>Performance Aggregation]
+        BuildFeatureValidation[Build Feature Validation<br/>Feature Generation]
+        ScriptReportGeneration[Generate Script Reports<br/>Execution Results]
+    end
+
+    %% Results & Reporting
+    subgraph "Results & Reporting"
+        AggregateResults[Aggregate All Results<br/>Comprehensive Summary]
+        GenerateExecutiveSummary[Generate Executive Summary<br/>Business Impact]
+        CreateVisualizations[Create Visualizations<br/>Interactive Charts]
+        ExportReports[Export Reports<br/>Multiple Formats]
+        UpdateDashboard[Update Dashboard<br/>Real-time Display]
+    end
+
+    %% End States
+    Success([QA Tests Passed<br/>High Confidence])
+    Warning([QA Tests Warning<br/>Review Required])
+    Failure([QA Tests Failed<br/>Action Required])
+
+    %% Flow Connections
+    Start --> InitializeQA
+    InitializeQA --> SelectTestType
+    SelectTestType --> ConfigureParameters
+    ConfigureParameters --> ValidatePrerequisites
+
+    %% Test Type Branching
+    ValidatePrerequisites --> StaticScan
+    ValidatePrerequisites --> AssetsOffTest
+    ValidatePrerequisites --> CollectHistoricalData
+    ValidatePrerequisites --> FeatureAlignment
+
+    %% Leakage Flow
+    StaticScan --> FeatureAudit
+    FeatureAudit --> Shift14Test
+    Shift14Test --> TopKAblation
+    TopKAblation --> ConsolidatedReport
+
+    %% Ablation Flow
+    AssetsOffTest --> FeatureRemovalTest
+    FeatureRemovalTest --> PerformanceComparison
+    PerformanceComparison --> ImpactAnalysis
+    ImpactAnalysis --> AblationReport
+
+    %% Drift Flow
+    CollectHistoricalData --> CalculateDriftMetrics
+    CalculateDriftMetrics --> GenerateDriftSnapshot
+    GenerateDriftSnapshot --> VisualizeDriftTrends
+    VisualizeDriftTrends --> DriftAlertSystem
+
+    %% Script Flow
+    FeatureAlignment --> AssetsSanityCheck
+    AssetsSanityCheck --> MetricsSummary
+    MetricsSummary --> BuildFeatureValidation
+    BuildFeatureValidation --> ScriptReportGeneration
+
+    %% Aggregation
+    ConsolidatedReport --> AggregateResults
+    AblationReport --> AggregateResults
+    DriftAlertSystem --> AggregateResults
+    ScriptReportGeneration --> AggregateResults
+
+    %% Final Processing
+    AggregateResults --> GenerateExecutiveSummary
+    GenerateExecutiveSummary --> CreateVisualizations
+    CreateVisualizations --> ExportReports
+    ExportReports --> UpdateDashboard
+
+    %% Decision Points
+    UpdateDashboard -->|All Tests Pass| Success
+    UpdateDashboard -->|Minor Issues| Warning
+    UpdateDashboard -->|Critical Failures| Failure
+
+    %% Parallel Processing
+    InitializeQA --> StaticScan
+    SelectTestType --> AssetsOffTest
+    ConfigureParameters --> CollectHistoricalData
+    ValidatePrerequisites --> FeatureAlignment
+
+    %% Error Handling
+    StaticScan -->|Scan Fails| Failure
+    FeatureAudit -->|Leakage Detected| Failure
+    Shift14Test -->|Robustness Issues| Warning
+    AssetsOffTest -->|Performance Drop| Warning
+    CalculateDriftMetrics -->|Significant Drift| Warning
+
+    %% Styling
+    classDef init fill:#e3f2fd,stroke:#1565c0,stroke-width:2px
+    classDef leakage fill:#fce4ec,stroke:#c2185b,stroke-width:2px
+    classDef ablation fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px
+    classDef drift fill:#fff3e0,stroke:#f57c00,stroke-width:2px
+    classDef scripts fill:#e8f5e8,stroke:#2e7d32,stroke-width:2px
+    classDef results fill:#f5f5f5,stroke:#424242,stroke-width:2px
+    classDef success fill:#c8e6c9,stroke:#2e7d32,stroke-width:3px
+    classDef warning fill:#fff8e1,stroke:#f57c00,stroke-width:3px
+    classDef failure fill:#ffcdd2,stroke:#c62828,stroke-width:3px
+
+    class InitializeQA,SelectTestType,ConfigureParameters,ValidatePrerequisites init
+    class StaticScan,FeatureAudit,Shift14Test,TopKAblation,ConsolidatedReport leakage
+    class AssetsOffTest,FeatureRemovalTest,PerformanceComparison,ImpactAnalysis,AblationReport ablation
+    class CollectHistoricalData,CalculateDriftMetrics,GenerateDriftSnapshot,VisualizeDriftTrends,DriftAlertSystem drift
+    class FeatureAlignment,AssetsSanityCheck,MetricsSummary,BuildFeatureValidation,ScriptReportGeneration scripts
+    class AggregateResults,GenerateExecutiveSummary,CreateVisualizations,ExportReports,UpdateDashboard results
+    class Success success
+    class Warning warning
+    class Failure failure
+```

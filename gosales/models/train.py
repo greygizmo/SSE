@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 from pathlib import Path
@@ -54,7 +54,7 @@ def _train_test_split_time_aware(X: pd.DataFrame, y: pd.Series, seed: int) -> tu
     if recency_col in X.columns:
         df = X.copy()
         df['_y'] = y
-        # Smaller recency_days = more recent → assign those to validation
+        # Smaller recency_days = more recent â†’ assign those to validation
         df = df.sort_values(recency_col, ascending=True)
         n = len(df)
         n_valid = max(1, int(0.2 * n))
@@ -210,8 +210,11 @@ def _calibrate(clf, X_train: pd.DataFrame, y_train: pd.Series, X_valid: pd.DataF
 @click.option("--shap-sample", default=0, type=int, help="Rows to sample for SHAP; 0 disables")
 @click.option("--config", default=str((Path(__file__).parents[1] / "config.yaml").resolve()))
 @click.option("--group-cv/--no-group-cv", default=False, help="Use GroupKFold by customer_id for train/valid split (leakage guard)")
+@click.option("--purge-days", default=0, type=int, help="Embargo/purge days between train and validation (time-aware splits)")
+@click.option("--label-buffer-days", default=0, type=int, help="Start labels at cutoff+buffer_days (horizon buffer)")
+@click.option("--safe-mode/--no-safe-mode", default=False, help="Apply SAFE feature policy (drop/lag high-risk adjacency feature families)")
 @click.option("--dry-run/--no-dry-run", default=False, help="Skip training; only verify inputs and emit planned artifacts to manifest")
-def main(division: str, cutoffs: str, window_months: int, models: str, calibration: str, shap_sample: int, config: str, group_cv: bool, dry_run: bool) -> None:
+def main(division: str, cutoffs: str, window_months: int, models: str, calibration: str, shap_sample: int, config: str, group_cv: bool, purge_days: int, label_buffer_days: int, safe_mode: bool, dry_run: bool) -> None:
     cfg = load_config(config)
     cut_list = [c.strip() for c in cutoffs.split(",") if c.strip()]
     OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -260,7 +263,7 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
         all_dropped_low_var: list[str] = []
         all_dropped_corr: list[tuple[str, str]] = []
         for cutoff in cut_list:
-            fm = create_feature_matrix(engine, division, cutoff, window_months)
+            fm = create_feature_matrix(engine, division, cutoff, window_months, label_buffer_days=label_buffer_days)
             # Persist features parquet for validation phase (Phase 5) compatibility
             try:
                 from gosales.utils.paths import OUTPUTS_DIR as _OUT
@@ -275,6 +278,26 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
             y = df['bought_in_division'].astype(int).values
             X = df.drop(columns=['customer_id','bought_in_division'])
             X = _sanitize_features(X)
+            # SAFE policy: drop high-risk adjacency families
+            if safe_mode:
+                try:
+                    cols = []
+                    for c in X.columns:
+                        s = str(c).lower()
+                        if s.startswith('assets_expiring_'):
+                            continue
+                        if s.startswith('assets_subs_share_') or s.startswith('assets_on_subs_share_') or s.startswith('assets_off_subs_share_'):
+                            continue
+                        if 'days_since_last' in s or 'recency' in s:
+                            continue
+                        if '__3m' in s or s.endswith('_last_3m') or '__6m' in s or s.endswith('_last_6m'):
+                            continue
+                        if s.startswith('als_f'):\n                    continue\n                if s.startswith('gp_12m_') or s.startswith('tx_12m_'):\n                    continue\n                if s in ('gp_2024','gp_2023'):\n                            continue\n                        if s.startswith('gp_12m_') or s.startswith('tx_12m_'):\n                            continue\n                        if s in ('gp_2024','gp_2023'):
+                            continue
+                        cols.append(c)
+                    X = X[cols]
+                except Exception:
+                    pass
             # Feature pruning for stability
             dropped_low_var: list[str] = []
             dropped_corr: list[tuple[str, str]] = []
@@ -288,13 +311,23 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
             overlap_csv = None
             if group_cv:
                 try:
-                    from sklearn.model_selection import GroupKFold
-                    groups = df['customer_id'].astype(str)
-                    # Use last fold as validation for determinism
-                    gkf = GroupKFold(n_splits=5)
-                    splits = list(gkf.split(X, y, groups=groups))
-                    tr, va = splits[-1]
+                    rec_col = 'rfm__all__recency_days__life'
+                    groups = df['customer_id'].astype(str).values
+                    if int(purge_days) > 0 and rec_col in df.columns:
+                        from gosales.models.cv import BlockedPurgedGroupCV
+                        rec = pd.to_numeric(df[rec_col], errors='coerce').fillna(1e9).astype(float).values
+                        cv = BlockedPurgedGroupCV(n_splits=cfg.modeling.folds, purge_days=int(purge_days), seed=cfg.modeling.seed)
+                        splits = list(cv.split(X, y, groups, anchor_days_from_cutoff=rec))
+                        tr, va = splits[-1]
+                    else:
+                        from sklearn.model_selection import GroupKFold
+                        gkf = GroupKFold(n_splits=cfg.modeling.folds)
+                        splits = list(gkf.split(X, y, groups=groups))
+                        tr, va = splits[-1]
                     X_train, X_valid, y_train, y_valid = X.iloc[tr], X.iloc[va], y[tr], y[va]
+                except Exception:
+                    X_train, X_valid, y_train, y_valid = _train_test_split_time_aware(X, y, cfg.modeling.seed)      except Exception:
+                        pass
                 except Exception:
                     X_train, X_valid, y_train, y_valid = _train_test_split_time_aware(X, y, cfg.modeling.seed)
             else:
@@ -475,11 +508,30 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
 
     # Train final on last cutoff for simplicity here
     last_cut = cut_list[-1]
-    fm_final = create_feature_matrix(engine, division, last_cut, window_months)
+    fm_final = create_feature_matrix(engine, division, last_cut, window_months, label_buffer_days=label_buffer_days)
     df_final = fm_final.to_pandas()
     y_final = df_final['bought_in_division'].astype(int).values
     X_final = df_final.drop(columns=['customer_id','bought_in_division'])
     X_final = _sanitize_features(X_final)
+    if safe_mode:
+        try:
+            cols = []
+            for c in X_final.columns:
+                s = str(c).lower()
+                if s.startswith('assets_expiring_'):
+                    continue
+                if s.startswith('assets_subs_share_') or s.startswith('assets_on_subs_share_') or s.startswith('assets_off_subs_share_'):
+                    continue
+                if 'days_since_last' in s or 'recency' in s:
+                    continue
+                if '__3m' in s or s.endswith('_last_3m') or '__6m' in s or s.endswith('_last_6m'):
+                    continue
+                if s.startswith('als_f'):\n                    continue\n                if s.startswith('gp_12m_') or s.startswith('tx_12m_'):\n                    continue\n                if s in ('gp_2024','gp_2023'):
+                    continue
+                cols.append(c)
+            X_final = X_final[cols]
+        except Exception:
+            pass
     # Minimal: refit winner without hyper search for brevity (could repeat best params)
     # Choose calibration method that minimized Brier during validation search
     final_cal_method = None
@@ -721,5 +773,7 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
 
 if __name__ == "__main__":
     main()
+
+
 
 

@@ -230,13 +230,21 @@ def features_at_cutoff(fact: pd.DataFrame, cutoff_date: str | datetime) -> Tuple
         .reset_index()
     )
     # Aggregate per customer
-    exp_90 = f[(f['expiration_date'].notna()) & (f['expiration_date'] > cutoff) & (f['expiration_date'] <= cutoff + pd.Timedelta(days=90))]
+    # Guard near-cutoff expirations to reduce shift sensitivity
+    try:
+        from gosales.utils.config import load_config as _load_cfg
+        _cfg = _load_cfg()
+        _guard_days = int(getattr(getattr(_cfg, 'features', object()), 'expiring_guard_days', 0))
+    except Exception:
+        _guard_days = 0
+    _start_guard = cutoff + pd.Timedelta(days=int(_guard_days))
+    exp_90 = f[(f['expiration_date'].notna()) & (f['expiration_date'] > _start_guard) & (f['expiration_date'] <= cutoff + pd.Timedelta(days=90))]
     per = active.groupby('customer_id')['qty'].sum().rename('assets_active_total').reset_index()
     per = per.merge(exp_90.groupby('customer_id')['qty'].sum().rename('assets_expiring_90d').reset_index(), on='customer_id', how='left')
     per['assets_expiring_90d'] = per['assets_expiring_90d'].fillna(0.0)
     # Additional totals for 30/60d and shares vs active
     for days in (30, 60):
-        exp = f[(f['expiration_date'].notna()) & (f['expiration_date'] > cutoff) & (f['expiration_date'] <= cutoff + pd.Timedelta(days=days))]
+        exp = f[(f['expiration_date'].notna()) & (f['expiration_date'] > _start_guard) & (f['expiration_date'] <= cutoff + pd.Timedelta(days=days))]
         col = f'assets_expiring_{days}d'
         per = per.merge(exp.groupby('customer_id')['qty'].sum().rename(col).reset_index(), on='customer_id', how='left')
         per[col] = per[col].fillna(0.0)
@@ -259,7 +267,7 @@ def features_at_cutoff(fact: pd.DataFrame, cutoff_date: str | datetime) -> Tuple
     # Per-rollup expiring windows (30/60/90 days)
     extra_frames: dict[str, pd.DataFrame] = {}
     for days in (30, 60, 90):
-        exp = f[(f['expiration_date'].notna()) & (f['expiration_date'] > cutoff) & (f['expiration_date'] <= cutoff + pd.Timedelta(days=days))]
+        exp = f[(f['expiration_date'].notna()) & (f['expiration_date'] > _start_guard) & (f['expiration_date'] <= cutoff + pd.Timedelta(days=days))]
         if not exp.empty:
             piv = (
                 exp.dropna(subset=['item_rollup'])

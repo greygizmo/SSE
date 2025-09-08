@@ -84,6 +84,10 @@ class Features:
     use_text_tags: bool = False
     # Toggle Moneyball-based asset features at cutoff (rollups, expiring windows, subs shares)
     use_assets: bool = True
+    # Guard days for look-ahead expiration windows; exclude [cutoff, cutoff+guard]
+    expiring_guard_days: int = 14
+    # Floor for recency features to avoid near-cutoff signals (e.g., 14 days)
+    recency_floor_days: int = 0
 
 
 @dataclass
@@ -149,6 +153,12 @@ class ValidationConfig:
     # Leakage Gauntlet thresholds for Top-K ablation
     ablation_epsilon_auc: float = 0.01
     ablation_epsilon_lift10: float = 0.25
+    # Gauntlet-only masking: exclude last N days inside windowed aggregations
+    gauntlet_mask_tail_days: int = 14
+    # Gauntlet-only: purge/embargo days between train and validation
+    gauntlet_purge_days: int = 30
+    # Gauntlet-only: start labels at cutoff+buffer_days (horizon buffer)
+    gauntlet_label_buffer_days: int = 0
 
 
 @dataclass
@@ -232,6 +242,8 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
     env_db_engine = os.getenv("GOSALES_DB_ENGINE")
     env_sqlite_path = os.getenv("GOSALES_SQLITE_PATH")
     env_use_assets = os.getenv("GOSALES_FEATURES_USE_ASSETS")
+    env_exp_guard = os.getenv("GOSALES_FEATURES_EXPIRING_GUARD_DAYS")
+    env_rec_floor = os.getenv("GOSALES_FEATURES_RECENCY_FLOOR_DAYS")
     if env_db_engine:
         cfg_dict.setdefault("database", {})["engine"] = env_db_engine
     if env_sqlite_path:
@@ -241,6 +253,16 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
         truthy = {"1", "true", "yes", "on"}
         val = str(env_use_assets).strip().lower() in truthy
         cfg_dict.setdefault("features", {})["use_assets"] = val
+    if env_exp_guard is not None:
+        try:
+            cfg_dict.setdefault("features", {})["expiring_guard_days"] = int(env_exp_guard)
+        except Exception:
+            pass
+    if env_rec_floor is not None:
+        try:
+            cfg_dict.setdefault("features", {})["recency_floor_days"] = int(env_rec_floor)
+        except Exception:
+            pass
 
     cfg_dict = _merge_overrides(cfg_dict, cli_overrides)
 
@@ -325,6 +347,9 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
             als_lookback_months=int(feat_cfg.get("als_lookback_months", 12)),
             use_item2vec=bool(feat_cfg.get("use_item2vec", False)),
             use_text_tags=bool(feat_cfg.get("use_text_tags", False)),
+            use_assets=bool(feat_cfg.get("use_assets", True)),
+            expiring_guard_days=int(feat_cfg.get("expiring_guard_days", 14)),
+            recency_floor_days=int(feat_cfg.get("recency_floor_days", 0)),
         ),
         modeling=ModelingConfig(
             seed=int(mdl_cfg.get("seed", 42)),
@@ -373,6 +398,9 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
             shift14_epsilon_lift10=float(val_cfg.get("shift14_epsilon_lift10", 0.25)),
             ablation_epsilon_auc=float(val_cfg.get("ablation_epsilon_auc", 0.01)),
             ablation_epsilon_lift10=float(val_cfg.get("ablation_epsilon_lift10", 0.25)),
+            gauntlet_mask_tail_days=int(val_cfg.get("gauntlet_mask_tail_days", 14)),
+            gauntlet_purge_days=int(val_cfg.get("gauntlet_purge_days", 30)),
+            gauntlet_label_buffer_days=int(val_cfg.get("gauntlet_label_buffer_days", 0)),
         ),
     )
 

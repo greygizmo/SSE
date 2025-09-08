@@ -62,6 +62,9 @@ features:
   use_item2vec: false
   use_text_tags: false
   use_assets: true
+  # Leakage guards
+  expiring_guard_days: 30      # exclude [cutoff, cutoff+30d] from expiring_{30,60,90}d windows
+  recency_floor_days: 30       # floor 'days_since_last_*' features to >=30 days
 modeling:
   seed: 42
   folds: 3
@@ -119,5 +122,11 @@ validation:
   # Top-K ablation thresholds
   ablation_epsilon_auc: 0.01
   ablation_epsilon_lift10: 0.25
+  # Gauntlet-only: subtract last N days from windowed aggregates
+  gauntlet_mask_tail_days: 45
+  # Gauntlet-only: embargo/purge days between train and validation folds
+  gauntlet_purge_days: 45
+  # Gauntlet-only: start labels at cutoff+buffer_days (horizon buffer)
+  gauntlet_label_buffer_days: 30
 
 

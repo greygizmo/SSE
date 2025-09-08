@@ -247,6 +247,7 @@ Known divisions are sourced from `etl/sku_map.division_set()`; cross-division fe
 - `scripts/name_join_qa.py`: Moneyball→dim_customer name-join QA; writes coverage summary and top unmapped names
 - `scripts/ablation_assets_off.py`: Train with assets disabled and compare metrics vs baseline; writes ablation JSON
 - `scripts/build_features_for_models.py`: Build feature matrices for each trained model's cutoff to align feature lists
+- `scripts/train_all_models.py`: Retrain all target models at a given cutoff (group-CV, calibration)
 
 ### SQL Templates
 
@@ -255,3 +256,14 @@ Known divisions are sourced from `etl/sku_map.division_set()`; cross-division fe
 ### Environment Overrides
 
 - `GOSALES_FEATURES_USE_ASSETS=0|1`: Force-enable or disable asset features at runtime (used by ablation script).
+
+### Training Playbook
+
+- Recommended training cutoff: `2024-06-30`.
+  - Rationale: train on data through 1H 2024; use 2H 2024 as internal test and 2025 as forward/holdout validation.
+- Retrain all models (with GroupKFold on customer_id and Platt/Isotonic calibration):
+  - PowerShell: `$env:PYTHONPATH=$PWD; python scripts/train_all_models.py --cutoff 2024-06-30 --window-months 6`
+- After training, refresh artifacts and checks:
+  - `python scripts/build_features_for_models.py` (align feature catalogs for each model cutoff)
+  - `python scripts/ci_featurelist_alignment.py`
+  - `python -m gosales.pipeline.run_leakage_gauntlet --division <Div> --cutoff 2024-12-31 --no-static-only`

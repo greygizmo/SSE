@@ -1,0 +1,229 @@
+Title: Second-Opinion Deep Dive on Shift‑14 Leakage Gauntlet Failures and Time‑Adjacency Mitigation in GoSales
+
+You are GPT5‑Pro. Please act as a senior ML platform/ML‑ops/feature engineering advisor with deep experience in temporal leakage prevention for customer‑level sales forecasting/recommendation systems. We need a second opinion and a concrete remediation plan.
+
+Context Overview
+
+- Repo purpose: Division‑level ICP + Whitespace engine. Ingests sales log, builds curated star (fact_transactions, dim_customer), engineers features at a cutoff date, trains calibrated models per division, produces ICP scores and whitespace rankings. We added a Leakage Gauntlet to stress test for leakage.
+- Key cutoffs: We train at 2024‑06‑30 (train window) to leave 2H 2024 for internal test and 2025 for forward validation. Gauntlet exercises a 2024‑12‑31 cutoff and a Shift‑14 variant (cutoff‑14 days).
+
+Primary Issue
+
+- The Leakage Gauntlet’s Shift‑14 check is failing on Printers and Solidworks: training at cutoff‑14 days improves metrics (AUC and lift@10) beyond configured epsilons (AUC epsilon=0.01; lift@10 epsilon=0.25).
+- We already pass static source scans (no datetime.now etc.) and feature‑date audits (no post‑cutoff dates in event sources), so this appears to be time‑adjacent signal (features tightly coupled to near‑cutoff dynamics) rather than literal “future” leakage.
+
+Observed Metrics (from artifacts)
+
+- Printers @ 2024‑12‑31 (pre‑guard, baseline):
+  - Shift‑14: AUC 0.9340 → 0.9600 (+0.0260); Lift@10 increases (null earlier in that run, later computed ~+0.91).
+- Printers @ 2024‑12‑31 (after adding lift@10 compare):
+  - comparison: { auc_base: 0.9340, auc_shift: 0.9600; lift10_base: 7.5963, lift10_shift: 8.5105; brier_base: 0.00577, brier_shift: 0.00603 }
+- Solidworks @ 2024‑12‑31 (pre‑guard):
+  - Shift‑14: AUC 0.8304 → 0.9404 (+0.1101); Lift@10: 4.4904 → 6.8655 (+2.3751)
+
+Notable Risk: Gauntlet’s Shift‑14 trains via `python -m gosales.models.train` without `--group-cv` (default False). Our mainline training uses GroupKFold (by customer_id) when enabled. This mismatch may inflate Shift‑14 metrics due to cross‑customer leakage during CV.
+
+What We’ve Implemented So Far
+
+1) SQL/ETL/Assets
+- Centralized query templates with identifier allow‑listing.
+- Built fact_assets from Moneyball + items_category_limited; consistent types; transaction safety.
+- Asset features at cutoff with per‑rollup counts, expiring windows (30/60/90d), subs on/off shares and compositions.
+
+2) Feature Engine
+- Broad RFM/temporal features (3/6/12/24m), division shares, trajectory, lifecycle, seasonality, ALS toggles, basket affinity, etc.
+- Added guards and config:
+  - features.expiring_guard_days (now 30): expiring windows exclude [cutoff, cutoff+N].
+  - features.recency_floor_days (now 30): floors recency features (overall and per‑division) to >=N.
+  - Gauntlet tail mask: validation.gauntlet_mask_tail_days (14 by default): deducts last N days from end of windowed aggregations only in Gauntlet calls.
+
+3) Trainer and Gauntlet
+- Trainer supports GroupKFold by customer_id (`--group-cv`). Calibrations (Platt/Isotonic). LR and LGBM grids.
+- Leakage Gauntlet
+  - Static scan bans time‑now calls.
+  - Feature‑date audit ensures no post‑cutoff event leaks.
+  - Shift‑14 training and metrics comparison (AUC and lift@10); previously only AUC.
+  - Top‑K ablation scaffold.
+- Gauntlet Enhancements we added:
+  - Use `gauntlet_mask_tail_days` for create_feature_matrix during Gauntlet (removes last N days from windows).
+  - Compute masked LR metrics and masked‑dropped LR metrics (dropping assets_expiring_*, recency/days_since_last_*, subs share families) to quantify sensitivity.
+
+4) Diagnostics
+- Feature‑list alignment CI passes after retraining (remaining “extras” are ALS columns at runtime, which is acceptable).
+- Feature importances: exported for Solidworks; Printers selected estimator did not expose importances in the persisted pickle (we can force LGBM‑only for diagnostics if needed).
+
+Results After Guards and Masking
+
+- Even with 30‑day expiring guards and 30‑day recency floors (global) and Gauntlet tail mask (14 days; also tested stronger), Shift‑14 still FAILs because AUC and lift@10 improve for cutoff‑14.
+- For Printers, masked LR without high‑risk drops had mixed effects (lift@10 increases), and masked‑dropped LR still improved across shift (smaller but non‑trivial deltas). This suggests broader time‑adjacent signal beyond the explicitly dropped families or variability from CV.
+
+Likely Contributing Factors (Please analyze and confirm)
+
+1) CV mismatch in Gauntlet Shift‑14: group‑cv is OFF in Gauntlet shift‑14 training, so customers may leak across folds. This could amplify apparent “improvement” at earlier cutoff. We need to enforce `--group-cv` for Gauntlet’s training path.
+2) Time adjacency: Features like RFM windows (3/6/12m), division dynamics, short‑window aggregates still capture momentum very close to the start of the target window. Even with 30‑day floors/masks, 14‑day shift remains within the “momentum band”.
+3) Apples‑to‑apples comparisons: Some earlier ablations compared different cutoffs/feature sets (we’ve since standardized but need a final sweep to ensure all Gauntlet comparisons are same pipeline, same grids, same CV mode).
+4) Potential label leakage via construction: If labels accidentally include transactions too close to the cutoff or snap incorrectly, they might correlate tightly with features in the final weeks before cutoff.
+
+What We Want From You (Deliverables)
+
+1) Root‑Cause Analysis
+- Inspect Gauntlet’s Shift‑14 training path and confirm whether GroupKFold is disabled (it is by default) and propose a precise patch to pass `--group-cv` in `run_shift14_check` and any other training calls inside Gauntlet.
+- Review feature engineering pathways most susceptible to time adjacency: recency, short‑window RFM, division‑level recency, expiring windows, subscription compositions, and any derived momentum proxies. Identify gaps in our guards and propose robust lags/masks.
+- Validate label construction (at cutoff) to ensure no post‑cutoff inclusion and no inadvertent near‑cutoff leakage.
+
+2) Remediation Plan with Acceptance Criteria
+- Provide a two‑track response:
+  A) Gauntlet‑SAFE training: exact drop/lag masks to apply; concrete code patches (unified diff) targeting:
+     - A SAFE feature policy in feature engine that excludes high‑risk families (expiring/recency/subs composition/<=3m windows) when a `safe_mode=True` flag is passed from the trainer.
+     - Training CLI changes to toggle SAFE mode.
+     - Gauntlet to train/evaluate SAFE mode with `--group-cv` on.
+  B) Purged/embargo time CV: Add a purge_days parameter (e.g., 30–60) to time‑aware splits combined with GroupKFold to prevent leak across folds. Provide code patches for the trainer to implement blocked/purged CV robustly.
+- For both tracks, define PASS criteria for Gauntlet (AUC and lift@10 improvements ≤ epsilon) and expected tradeoffs in metrics.
+
+3) Verification & Reporting
+- Provide the exact commands to run (PowerShell) and what artifacts to inspect to decide PASS/FAIL.
+- Provide a succinct “why this works” justification anchored in temporal leakage best practices.
+
+Known Artifacts/Numbers to Ground You
+
+- Printers @ 2024‑12‑31 (pre‑guard): auc_base 0.9340 → auc_shift 0.9600; lift10_base ~7.60 → ~8.51
+- Solidworks @ 2024‑12‑31 (pre‑guard): auc_base 0.8304 → auc_shift 0.9404; lift10_base 4.49 → 6.87
+- After guards/tail mask, Printers still FAIL:
+  - comparison: {
+    auc_base: 0.9326,
+    auc_shift: 0.9599,
+    lift10_base: 7.8637,
+    lift10_shift: 8.5602,
+    brier_base: 0.00408,
+    brier_shift: 0.00606,
+    auc_lr_masked_base: 0.6433,
+    auc_lr_masked_shift: 0.6316,
+    lift10_lr_masked_base: 2.6133,
+    lift10_lr_masked_shift: 3.1971,
+    auc_lr_masked_dropped_base: 0.6795,
+    auc_lr_masked_dropped_shift: 0.7536,
+    lift10_lr_masked_dropped_base: 4.1463,
+    lift10_lr_masked_dropped_shift: 4.7727
+  }
+
+Important Repo Files to Add to Your Context Window
+
+- Config & Paths
+  - gosales/config.yaml
+  - gosales/utils/config.py
+  - gosales/utils/paths.py
+  - gosales/utils/db.py
+
+- SQL Safety & ETL Assets
+  - gosales/utils/sql.py
+  - gosales/sql/queries.py
+  - gosales/etl/assets.py
+  - gosales/etl/build_star.py
+  - gosales/etl/sku_map.py
+
+- Feature Engineering
+  - gosales/features/engine.py
+  - gosales/features/als_embed.py (if present)
+  - gosales/features/utils.py (if present)
+
+- Trainer & Pipelines
+  - gosales/models/train.py
+  - gosales/pipeline/run_leakage_gauntlet.py
+  - gosales/pipeline/score_customers.py
+  - gosales/pipeline/score_all.py
+
+- QA / Scripts
+  - scripts/ci_featurelist_alignment.py
+  - scripts/ci_assets_sanity.py
+  - scripts/ablation_assets_off.py
+  - scripts/build_features_for_models.py
+  - scripts/feature_importance_report.py
+  - scripts/leakage_summary.py
+
+Artifacts to Consider Sharing (snippets OK)
+
+- gosales/outputs/leakage/Printers/2024-12-31/leakage_report_Printers_2024-12-31.json
+- gosales/outputs/leakage/Printers/2024-12-31/shift14_metrics_Printers_2024-12-31.json
+- gosales/outputs/leakage/Solidworks/2024-12-31/leakage_report_Solidworks_2024-12-31.json
+- gosales/outputs/leakage/Solidworks/2024-12-31/shift14_metrics_Solidworks_2024-12-31.json
+- gosales/outputs/metrics_summary.csv
+- gosales/outputs/drift_snapshots.csv
+- gosales/outputs/feature_importance_solidworks.csv
+
+Key Questions for You
+
+1) Is the Gauntlet’s Shift‑14 training path (without `--group-cv`) a likely primary cause of the apparent metric improvement? If so, propose the exact patch and any surrounding changes needed (e.g., deterministic splits, purge window) to correctly measure Shift‑14 impact.
+2) Given our guards (expiring_guard_days=30, recency_floor_days=30, gauntlet tail mask), which additional feature families or transformations would you drop or lag in a SAFE mode to eliminate time‑adjacent performance gains? Provide code‑level diffs.
+3) What purge/embargo strategy (e.g., 30–60 day purge) would you add to the trainer’s CV to enforce temporal independence alongside GroupKFold? Provide a clear, minimal patch.
+4) Define acceptance criteria (AUC/lift@10 deltas ≤ eps) and a verification run plan. Include PowerShell commands and what to inspect.
+
+Tone & Output Requirements
+
+- Be crisp, surgical, and code‑forward. Where possible, return unified diffs for patches that we can apply directly.
+- Call out risks, tradeoffs, and rollback plans.
+- If information is missing, ask pointed questions; otherwise, propose the best defaults and proceed.
+
+End of prompt.
+
+---
+
+Update Since Last Consultation (Work Performed + Results)
+
+Code Changes Implemented
+
+- Gauntlet Training Hardening
+  - Enforced GroupKFold in Shift‑14 Gauntlet training and added purge/embargo window:
+    - gosales/pipeline/run_leakage_gauntlet.py: now calls gosales.models.train with `--group-cv --purge-days <config>` and `--safe-mode` for Shift‑14.
+    - gosales/utils/config.py, gosales/config.yaml: added `validation.gauntlet_purge_days` (default 30; later set to 45).
+  - Added tail masking for windowed features during Gauntlet evaluation:
+    - gosales/features/engine.py: `create_feature_matrix(..., mask_tail_days=...)` subtracts last N days from RFM windows.
+    - gosales/pipeline/run_leakage_gauntlet.py: passes `validation.gauntlet_mask_tail_days` to `create_feature_matrix` (default 14; later set to 45).
+  - Upgraded Shift‑14 comparison to include lift@10 and masked LR checks (with and without high‑risk families).
+    - gosales/pipeline/run_leakage_gauntlet.py: adds `auc_lr_masked_*` and `*_masked_dropped_*` metrics into `shift14_metrics_*.json`.
+
+- SAFE Feature Policy (Gauntlet/Trainer)
+  - Trainer CLI additions: `--safe-mode` and `--purge-days`.
+    - gosales/models/train.py: SAFE prunes high‑risk adjacency families: assets_expiring_*, assets_*_subs_share_*, recency/days_since_last_*, `__3m` and `__6m` windows, ALS embeddings.
+    - Embargo: after GroupKFold split, training rows within `purge_days` of the validation boundary are dropped using recency.
+
+- Global Guards
+  - features.expiring_guard_days=30; features.recency_floor_days=30.
+    - gosales/config.yaml, gosales/etl/assets.py: expiring windows exclude [cutoff, cutoff+30d] for totals and rollups.
+    - gosales/features/engine.py: recency floors applied to overall, per‑division, and per‑division arrays.
+
+- Config
+  - validation.gauntlet_mask_tail_days: increased 14 → 45.
+  - validation.gauntlet_purge_days: increased 30 → 45.
+
+- Diagnostics
+  - scripts/feature_importance_report.py: exports top importances and flags risky families (Solidworks exported; Printers selection sometimes lacks importances in pickle).
+  - scripts/leakage_summary.py: creates markdown summaries under outputs/leakage.
+
+Results (Printers @ 2024‑12‑31)
+
+- Before hardening (pre‑guard): AUC 0.9340 → 0.9600; lift@10 ~+0.91 → FAIL.
+- After adding lift compare and initial guards/masks: still FAIL with smaller deltas.
+- With SAFE + GroupCV + purge(45) + tail mask(45): still FAIL but further reduced; `shift14_metrics_Printers_2024-12-31.json` shows:
+  - auc_base 0.9326 → auc_shift 0.9566
+  - lift10_base 7.8637 → lift10_shift 8.5105
+  - brier_base 0.00408 → brier_shift 0.00647
+  - Masked LR: auc ~0.64→0.63; lift@10 ~2.83→2.98
+  - Masked‑dropped LR: auc ~0.71→0.76; lift@10 ~4.15→4.32
+  - Consolidated result remains FAIL for Shift‑14.
+
+Interpretation
+
+- Enforcing GroupKFold + purge and applying SAFE + tail masks measurably reduces Shift‑14 improvements but does not eliminate them for Printers (and prior runs showed Solidworks also FAILs). This indicates robust time‑adjacent signals remain beyond the families dropped (e.g., broader 6–12m momentum in division/sku features) and/or CV noise.
+
+Requested Next Steps (for GPT5‑Pro)
+
+- Provide precise SAFE policy expansion: which additional families (e.g., <=6m RFM already included; consider <=12m?) or aggregations should be lagged/dropped to ensure Shift‑14 PASS without cratering forward performance.
+- Confirm purge/embargo integration best practice: whether 45–60d is sufficient near December cutoffs; suggest an embargo implementation that is fold‑agnostic and consistent across runs.
+- Recommend deterministic time‑blocked GroupKFold (e.g., fold assignment by time buckets) to minimize variance and stabilize Gauntlet decisions.
+- If SAFE+purge cannot fully de‑adjacency the model for these divisions, provide a policy‑anchored alternative (e.g., horizon buffer starting at T+30) and exact threshold adjustments for epsilons with justification.
+
+Artifacts to Reference
+
+- gosales/outputs/leakage/Printers/2024-12-31/shift14_metrics_Printers_2024-12-31.json
+- gosales/outputs/leakage/Printers/2024-12-31/leakage_report_Printers_2024-12-31.json
+- (Optionally re‑run for Solidworks post‑hardening to produce fresh metrics if needed.)

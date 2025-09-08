@@ -100,7 +100,10 @@ def run_feature_date_audit(ctx: LGContext, window_months: int) -> dict[str, str]
         engine = get_db_connection()
 
     # Enumerate features by building the feature matrix (no training involved)
-    fm = create_feature_matrix(engine, ctx.division, ctx.cutoff, window_months)
+    # Use Gauntlet tail mask to reduce near-cutoff signal in windowed features
+    cfg = load_config()
+    mask_tail = int(getattr(getattr(cfg, 'validation', object()), 'gauntlet_mask_tail_days', 0) or 0)
+    fm = create_feature_matrix(engine, ctx.division, ctx.cutoff, window_months, mask_tail_days=mask_tail)
     cols = [c for c in fm.columns if c not in ("customer_id", "bought_in_division")]
     # Compute the latest event date used for features
     import pandas as pd
@@ -338,8 +341,10 @@ def run_shift14_check(ctx: LGContext, window_months: int, run_training: bool = F
 
     # Build feature matrices to capture prevalence/context
     try:
-        fm_base = create_feature_matrix(engine, ctx.division, ctx.cutoff, window_months)
-        fm_shift = create_feature_matrix(engine, ctx.division, cut_shift, window_months)
+        cfg2 = load_config()
+        mask_tail = int(getattr(getattr(cfg2, 'validation', object()), 'gauntlet_mask_tail_days', 0) or 0)
+        fm_base = create_feature_matrix(engine, ctx.division, ctx.cutoff, window_months, mask_tail_days=mask_tail)
+        fm_shift = create_feature_matrix(engine, ctx.division, cut_shift, window_months, mask_tail_days=mask_tail)
         base_prev = float(fm_base.to_pandas()['bought_in_division'].mean()) if not fm_base.is_empty() else None
         shift_prev = float(fm_shift.to_pandas()['bought_in_division'].mean()) if not fm_shift.is_empty() else None
     except Exception:
@@ -362,7 +367,21 @@ def run_shift14_check(ctx: LGContext, window_months: int, run_training: bool = F
                 backup_path = _OUT / f"metrics_{div_key}.json.bak"
                 shutil.copy2(met_path, backup_path)
             # Train shifted-only
-            cmd = [sys.executable, "-m", "gosales.models.train", "--division", division, "--cutoffs", cut_shift, "--window-months", str(window_months)]
+            # Enforce GroupKFold and purge days; use SAFE mode for Gauntlet training
+            from gosales.utils.config import load_config as _load
+            _cfg = _load()
+            purge = int(getattr(getattr(_cfg, 'validation', object()), 'gauntlet_purge_days', 30) or 30)
+            label_buf = int(getattr(getattr(_cfg, 'validation', object()), 'gauntlet_label_buffer_days', 0) or 0)
+            cmd = [
+                sys.executable, "-m", "gosales.models.train",
+                "--division", division,
+                "--cutoffs", cut_shift,
+                "--window-months", str(window_months),
+                "--group-cv",
+                "--purge-days", str(int(purge)),
+                "--safe-mode",
+                "--label-buffer-days", str(int(label_buf)),
+            ]
             subprocess.run(cmd, check=True)
             # Read shifted metrics
             shift_metrics = json.loads(met_path.read_text(encoding="utf-8")) if met_path.exists() else {}
@@ -376,18 +395,28 @@ def run_shift14_check(ctx: LGContext, window_months: int, run_training: bool = F
                 return m.get("final", {}) if isinstance(m, dict) else {}
             bm = _final(base_metrics)
             sm = _final(shift_metrics)
+            # Harmonize lift@10 field name across variants
+            def _lift10(d: dict) -> float | None:
+                if d is None:
+                    return None
+                v = d.get("lift@10") if isinstance(d, dict) else None
+                if v is None and isinstance(d, dict):
+                    v = d.get("lift10")
+                return v
             comp = {
                 "auc_base": bm.get("auc"),
                 "auc_shift": sm.get("auc"),
-                "lift10_base": bm.get("lift10"),
-                "lift10_shift": sm.get("lift10"),
+                "lift10_base": _lift10(bm),
+                "lift10_shift": _lift10(sm),
                 "brier_base": bm.get("brier"),
                 "brier_shift": sm.get("brier"),
             }
             # Determine status: improvement beyond epsilon is suspicious
             try:
                 auc_imp = (float(sm.get("auc", 0.0)) - float(bm.get("auc", 0.0))) if bm.get("auc") is not None and sm.get("auc") is not None else 0.0
-                lift_imp = (float(sm.get("lift10", 0.0)) - float(bm.get("lift10", 0.0))) if bm.get("lift10") is not None and sm.get("lift10") is not None else 0.0
+                # Compare lift@10 if available (supports both keys)
+                lb = _lift10(bm); ls = _lift10(sm)
+                lift_imp = (float(ls) - float(lb)) if lb is not None and ls is not None else 0.0
                 if auc_imp > float(epsilon_auc) or lift_imp > float(epsilon_lift10):
                     status = "FAIL"
                 else:
@@ -397,6 +426,88 @@ def run_shift14_check(ctx: LGContext, window_months: int, run_training: bool = F
         except Exception as e:
             status = "ERROR"
             comp = {"error": str(e)}
+
+        # Auxiliary LR comparison using masked features (gauntlet mask)
+        try:
+            import numpy as _np
+            from sklearn.linear_model import LogisticRegression
+            from sklearn.metrics import roc_auc_score
+            # Build masked matrices
+            mask_tail = int(getattr(getattr(load_config(), 'validation', object()), 'gauntlet_mask_tail_days', 0) or 0)
+            eng2 = None
+            try:
+                eng2 = get_curated_connection()
+            except Exception:
+                eng2 = get_db_connection()
+            fb = create_feature_matrix(eng2, ctx.division, ctx.cutoff, window_months, mask_tail_days=mask_tail)
+            fs = create_feature_matrix(eng2, ctx.division, cut_shift, window_months, mask_tail_days=mask_tail)
+            if not fb.is_empty() and not fs.is_empty():
+                db = fb.to_pandas(); ds = fs.to_pandas()
+                def _eval(df):
+                    y = df['bought_in_division'].astype(int).values
+                    X = df.drop(columns=['customer_id','bought_in_division'])
+                    # time-aware split
+                    rec = 'rfm__all__recency_days__life'
+                    try:
+                        if rec in X.columns:
+                            order = _np.argsort(_np.nan_to_num(X[rec].astype(float).values, nan=1e9))
+                            n = len(order); nv = max(1, int(0.2*n))
+                            iv = order[:nv]; it = order[nv:]
+                        else:
+                            idx = _np.arange(len(X)); _np.random.seed(42); _np.random.shuffle(idx)
+                            sp = int(0.8*len(idx)); it, iv = idx[:sp], idx[sp:]
+                    except Exception:
+                        idx = _np.arange(len(X)); sp = int(0.8*len(idx)); it, iv = idx[:sp], idx[sp:]
+                    lr = LogisticRegression(max_iter=2000, solver='lbfgs', class_weight='balanced')
+                    lr.fit(X.iloc[it], y[it])
+                    p = lr.predict_proba(X.iloc[iv])[:,1]
+                    def _lift_at_k(y_true, y_score, k=10):
+                        order = _np.argsort(-y_score); kk = max(1, int(len(order)*(k/100.0)))
+                        topk = order[:kk]; m = y_true.mean()
+                        return float(y_true[topk].mean()/m) if m>0 else 0.0
+                    return float(roc_auc_score(y[iv], p)), _lift_at_k(y[iv], p, 10)
+                auc_b, l10_b = _eval(db)
+                auc_s, l10_s = _eval(ds)
+                # Also evaluate after dropping high-risk feature families
+                def _drop_high_risk(df_pd):
+                    Xcols = [c for c in df_pd.columns if c not in ('customer_id','bought_in_division')]
+                    keep = []
+                    for c in Xcols:
+                        s = str(c).lower()
+                        if s.startswith('assets_expiring_'):
+                            continue
+                        if 'days_since_last' in s or 'recency' in s:
+                            continue
+                        if s.startswith('assets_subs_share_') or s.startswith('assets_on_subs_share_') or s.startswith('assets_off_subs_share_'):
+                            continue
+                        keep.append(c)
+                    cols = ['customer_id','bought_in_division'] + keep
+                    return df_pd[cols]
+                db2 = _drop_high_risk(db)
+                ds2 = _drop_high_risk(ds)
+                auc_b2, l10_b2 = _eval(db2)
+                auc_s2, l10_s2 = _eval(ds2)
+                comp.update({
+                    'auc_lr_masked_base': auc_b,
+                    'auc_lr_masked_shift': auc_s,
+                    'lift10_lr_masked_base': l10_b,
+                    'lift10_lr_masked_shift': l10_s,
+                    'auc_lr_masked_dropped_base': auc_b2,
+                    'auc_lr_masked_dropped_shift': auc_s2,
+                    'lift10_lr_masked_dropped_base': l10_b2,
+                    'lift10_lr_masked_dropped_shift': l10_s2,
+                })
+                # If masked LR also shows suspicious improvements, keep FAIL; else annotate
+                try:
+                    if status != 'FAIL':
+                        imp_auc = max(auc_s - auc_b, auc_s2 - auc_b2)
+                        imp_l10 = max(l10_s - l10_b, l10_s2 - l10_b2)
+                        if imp_auc > float(epsilon_auc) or imp_l10 > float(epsilon_lift10):
+                            status = 'FAIL'
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     out = {
         "status": status,

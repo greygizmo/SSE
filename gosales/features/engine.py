@@ -14,7 +14,7 @@ from gosales.sql.queries import select_all
 
 logger = get_logger(__name__)
 
-def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, prediction_window_months: int = 6):
+def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, prediction_window_months: int = 6, mask_tail_days: int | None = None, label_buffer_days: int | None = None):
     """
     Creates a rich feature matrix for a specific division for ML training with proper time-based splitting.
 
@@ -80,8 +80,16 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
                 "WHERE order_date > :cutoff AND order_date <= :pred_end "
                 f"AND product_division IN ({division_filter})"
             )
+            # Horizon buffer for labels (optional)
+            cutoff_label = cutoff_dt
+            try:
+                if label_buffer_days is not None and int(label_buffer_days) > 0:
+                    from datetime import timedelta as _td
+                    cutoff_label = cutoff_dt + _td(days=int(label_buffer_days))
+            except Exception:
+                cutoff_label = cutoff_dt
             prediction_data = _read_sql(
-                pred_sql, {"cutoff": cutoff_date, "pred_end": prediction_end}
+                pred_sql, {"cutoff": cutoff_label.strftime("%Y-%m-%d"), "pred_end": prediction_end}
             )
             prediction_data["order_date"] = pd.to_datetime(prediction_data["order_date"])
             try:
@@ -231,6 +239,22 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
         features_pd[f'days_since_last_{division_name}_order'] = days_diff
     else:
         features_pd[f'days_since_last_{division_name}_order'] = 999  # Default for customers with no orders in division
+
+    # Apply recency floor guard to reduce near-cutoff signals
+    try:
+        rec_floor = int(getattr(cfg.load_config().features, 'recency_floor_days', 0))
+    except Exception:
+        rec_floor = 0
+    if rec_floor and rec_floor > 0:
+        try:
+            features_pd['days_since_last_order'] = pd.to_numeric(features_pd['days_since_last_order'], errors='coerce').fillna(999).clip(lower=rec_floor)
+        except Exception:
+            pass
+        try:
+            coln = f'days_since_last_{division_name}_order'
+            features_pd[coln] = pd.to_numeric(features_pd[coln], errors='coerce').fillna(999).clip(lower=rec_floor)
+        except Exception:
+            pass
     
     # --- 3a. Windowed RFM and temporal dynamics (pandas) ---
     try:
@@ -245,8 +269,17 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
         per_customer_frames_div = []
         for w in window_months:
             start_dt = cutoff_dt - pd.DateOffset(months=w)
-            mask = (fd['order_date'] > start_dt) & (fd['order_date'] <= cutoff_dt)
-            sub = fd.loc[mask, ['customer_id', 'order_date', 'gross_profit']]
+            effective_end = cutoff_dt
+            try:
+                if mask_tail_days is not None and int(mask_tail_days) > 0:
+                    effective_end = cutoff_dt - pd.Timedelta(days=int(mask_tail_days))
+            except Exception:
+                effective_end = cutoff_dt
+            if effective_end <= start_dt:
+                sub = fd.head(0)[['customer_id', 'order_date', 'gross_profit']]
+            else:
+                mask = (fd['order_date'] > start_dt) & (fd['order_date'] <= effective_end)
+                sub = fd.loc[mask, ['customer_id', 'order_date', 'gross_profit']]
             # Winsorize GP at config p
             gp_w = sub.groupby('customer_id')['gross_profit'].sum().rename('gp_sum_last_w').reset_index()
             # For mean, compute robustly
@@ -398,6 +431,12 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
             rec_div = rec_div_list[0]
             for extra in rec_div_list[1:]:
                 rec_div = rec_div.merge(extra, on='customer_id', how='outer')
+        if rec_div is not None and rec_floor:
+            try:
+                for c in [c for c in rec_div.columns if c.startswith('days_since_last_')]:
+                    rec_div[c] = pd.to_numeric(rec_div[c], errors='coerce').fillna(999).clip(lower=rec_floor)
+            except Exception:
+                pass
 
         # SKU-level features (last 12 months)
         important_skus = ['SWX_Core', 'SWX_Pro_Prem', 'Core_New_UAP', 'Pro_Prem_New_UAP', 'PDM', 'Simulation', 'Services', 'Training', 'Success Plan GP', 'Supplies', 'SW_Plastics', 'AM_Software', 'DraftSight', 'Fortus', 'HV_Simulation', 'CATIA', 'Delmia_Apriso']
