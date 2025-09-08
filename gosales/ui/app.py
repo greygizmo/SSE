@@ -1,4 +1,4 @@
-﻿import json
+import json
 from pathlib import Path
 from datetime import datetime
 
@@ -397,7 +397,7 @@ with st.sidebar:
     col1, col2 = st.columns(2)
     with col1:
         if st.button("🔄 Refresh Cache", help="Clear cached data and reload"):
-        st.cache_data.clear()
+            st.cache_data.clear()
             st.success("✅ Cache cleared successfully!")
             time.sleep(1)
             st.rerun()
@@ -580,8 +580,8 @@ if tab == "Overview":
 
     with col1:
         st.markdown("### 📊 Row Counts by Table")
-    rc = OUTPUTS_DIR / 'contracts' / 'row_counts.csv'
-    if rc.exists():
+        rc = OUTPUTS_DIR / 'contracts' / 'row_counts.csv'
+        if rc.exists():
             df_rc = _read_csv(rc)
             if not df_rc.empty:
                 # Enhanced table styling
@@ -597,7 +597,7 @@ if tab == "Overview":
                 # Summary stats
                 total_rows = df_rc['row_count'].sum() if 'row_count' in df_rc.columns else 0
                 st.metric("Total Rows", f"{total_rows:,}")
-    else:
+            else:
                 st.info("No row count data available")
         else:
             st.markdown("""
@@ -609,8 +609,8 @@ if tab == "Overview":
 
     with col2:
         st.markdown("### ⚠️ Data Contract Violations")
-    viol = OUTPUTS_DIR / 'contracts' / 'violations.csv'
-    if viol.exists():
+        viol = OUTPUTS_DIR / 'contracts' / 'violations.csv'
+        if viol.exists():
             df_viol = _read_csv(viol)
             if not df_viol.empty:
                 st.dataframe(
@@ -627,7 +627,7 @@ if tab == "Overview":
                 violation_count = len(df_viol)
                 if violation_count == 0:
                     st.markdown('<p class="status-success">✅ No violations detected</p>', unsafe_allow_html=True)
-    else:
+                else:
                     st.metric("Violations Found", violation_count)
             else:
                 st.markdown('<p class="status-success">✅ No data contract violations</p>', unsafe_allow_html=True)

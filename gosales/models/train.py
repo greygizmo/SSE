@@ -262,8 +262,23 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
             return
         all_dropped_low_var: list[str] = []
         all_dropped_corr: list[tuple[str, str]] = []
+        # In SAFE (audit) mode, apply gauntlet tail-mask to windowed features
+        gauntlet_mask_tail = 0
+        try:
+            if safe_mode:
+                gauntlet_mask_tail = int(getattr(getattr(cfg, 'validation', object()), 'gauntlet_mask_tail_days', 0) or 0)
+        except Exception:
+            gauntlet_mask_tail = 0
+
         for cutoff in cut_list:
-            fm = create_feature_matrix(engine, division, cutoff, window_months, label_buffer_days=label_buffer_days)
+            fm = create_feature_matrix(
+                engine,
+                division,
+                cutoff,
+                window_months,
+                mask_tail_days=gauntlet_mask_tail if safe_mode else None,
+                label_buffer_days=label_buffer_days,
+            )
             # Persist features parquet for validation phase (Phase 5) compatibility
             try:
                 from gosales.utils.paths import OUTPUTS_DIR as _OUT
@@ -290,9 +305,18 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
                             continue
                         if 'days_since_last' in s or 'recency' in s:
                             continue
-                        if '__3m' in s or s.endswith('_last_3m') or '__6m' in s or s.endswith('_last_6m'):
+                        if '__3m' in s or s.endswith('_last_3m') or '__6m' in s or s.endswith('_last_6m') or '__12m' in s or s.endswith('_last_12m'):
                             continue
-                        if s.startswith('als_f'):\n                    continue\n                if s.startswith('gp_12m_') or s.startswith('tx_12m_'):\n                    continue\n                if s in ('gp_2024','gp_2023'):\n                            continue\n                        if s.startswith('gp_12m_') or s.startswith('tx_12m_'):\n                            continue\n                        if s in ('gp_2024','gp_2023'):
+                        if s.startswith('als_f'):
+                            continue
+                        if s.startswith('gp_12m_') or s.startswith('tx_12m_'):
+                            continue
+                        if s in ('gp_2024', 'gp_2023'):
+                            continue
+                        # Division share momentum and SKU short-term families
+                        if s.startswith('xdiv__div__gp_share__'):
+                            continue
+                        if s.startswith('sku_gp_12m_') or s.startswith('sku_qty_12m_') or s.startswith('sku_gp_per_unit_12m_'):
                             continue
                         cols.append(c)
                     X = X[cols]
@@ -325,9 +349,6 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
                         splits = list(gkf.split(X, y, groups=groups))
                         tr, va = splits[-1]
                     X_train, X_valid, y_train, y_valid = X.iloc[tr], X.iloc[va], y[tr], y[va]
-                except Exception:
-                    X_train, X_valid, y_train, y_valid = _train_test_split_time_aware(X, y, cfg.modeling.seed)      except Exception:
-                        pass
                 except Exception:
                     X_train, X_valid, y_train, y_valid = _train_test_split_time_aware(X, y, cfg.modeling.seed)
             else:
@@ -508,7 +529,14 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
 
     # Train final on last cutoff for simplicity here
     last_cut = cut_list[-1]
-    fm_final = create_feature_matrix(engine, division, last_cut, window_months, label_buffer_days=label_buffer_days)
+    fm_final = create_feature_matrix(
+        engine,
+        division,
+        last_cut,
+        window_months,
+        mask_tail_days=gauntlet_mask_tail if safe_mode else None,
+        label_buffer_days=label_buffer_days,
+    )
     df_final = fm_final.to_pandas()
     y_final = df_final['bought_in_division'].astype(int).values
     X_final = df_final.drop(columns=['customer_id','bought_in_division'])
@@ -524,9 +552,17 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
                     continue
                 if 'days_since_last' in s or 'recency' in s:
                     continue
-                if '__3m' in s or s.endswith('_last_3m') or '__6m' in s or s.endswith('_last_6m'):
+                if '__3m' in s or s.endswith('_last_3m') or '__6m' in s or s.endswith('_last_6m') or '__12m' in s or s.endswith('_last_12m'):
                     continue
-                if s.startswith('als_f'):\n                    continue\n                if s.startswith('gp_12m_') or s.startswith('tx_12m_'):\n                    continue\n                if s in ('gp_2024','gp_2023'):
+                if s.startswith('als_f'):
+                    continue
+                if s.startswith('gp_12m_') or s.startswith('tx_12m_'):
+                    continue
+                if s in ('gp_2024', 'gp_2023'):
+                    continue
+                if s.startswith('xdiv__div__gp_share__'):
+                    continue
+                if s.startswith('sku_gp_12m_') or s.startswith('sku_qty_12m_') or s.startswith('sku_gp_per_unit_12m_'):
                     continue
                 cols.append(c)
             X_final = X_final[cols]

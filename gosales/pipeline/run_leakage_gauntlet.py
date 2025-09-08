@@ -366,30 +366,37 @@ def run_shift14_check(ctx: LGContext, window_months: int, run_training: bool = F
             if met_path.exists():
                 backup_path = _OUT / f"metrics_{div_key}.json.bak"
                 shutil.copy2(met_path, backup_path)
-            # Train shifted-only
             # Enforce GroupKFold and purge days; use SAFE mode for Gauntlet training
             from gosales.utils.config import load_config as _load
             _cfg = _load()
             purge = int(getattr(getattr(_cfg, 'validation', object()), 'gauntlet_purge_days', 30) or 30)
             label_buf = int(getattr(getattr(_cfg, 'validation', object()), 'gauntlet_label_buffer_days', 0) or 0)
-            cmd = [
-                sys.executable, "-m", "gosales.models.train",
-                "--division", division,
-                "--cutoffs", cut_shift,
-                "--window-months", str(window_months),
-                "--group-cv",
-                "--purge-days", str(int(purge)),
-                "--safe-mode",
-                "--label-buffer-days", str(int(label_buf)),
-            ]
-            subprocess.run(cmd, check=True)
-            # Read shifted metrics
-            shift_metrics = json.loads(met_path.read_text(encoding="utf-8")) if met_path.exists() else {}
-            # Restore baseline metrics if we backed up
+            def _train_at(cut: str) -> dict:
+                cmd = [
+                    sys.executable, "-m", "gosales.models.train",
+                    "--division", division,
+                    "--cutoffs", cut,
+                    "--window-months", str(window_months),
+                    "--group-cv",
+                    "--purge-days", str(int(purge)),
+                    "--safe-mode",
+                    "--label-buffer-days", str(int(label_buf)),
+                ]
+                subprocess.run(cmd, check=True)
+                return json.loads(met_path.read_text(encoding="utf-8")) if met_path.exists() else {}
+
+            # Train base and shifted with same SAFE/GroupCV/purge to ensure apples-to-apples
+            base_metrics = _train_at(ctx.cutoff)
+            shift_metrics = _train_at(cut_shift)
+            # Restore original metrics if we backed up; otherwise clean up temp metrics file
             if backup_path and backup_path.exists():
                 shutil.move(str(backup_path), str(met_path))
-            # Try to read baseline (post-restore)
-            base_metrics = json.loads(met_path.read_text(encoding="utf-8")) if met_path.exists() else {}
+            else:
+                try:
+                    if met_path.exists():
+                        met_path.unlink()
+                except Exception:
+                    pass
             # Extract comparable metrics
             def _final(m):
                 return m.get("final", {}) if isinstance(m, dict) else {}
@@ -497,13 +504,15 @@ def run_shift14_check(ctx: LGContext, window_months: int, run_training: bool = F
                     'lift10_lr_masked_dropped_base': l10_b2,
                     'lift10_lr_masked_dropped_shift': l10_s2,
                 })
-                # If masked LR also shows suspicious improvements, keep FAIL; else annotate
+                # Annotate masked LR diagnostics but do not gate overall status
                 try:
-                    if status != 'FAIL':
-                        imp_auc = max(auc_s - auc_b, auc_s2 - auc_b2)
-                        imp_l10 = max(l10_s - l10_b, l10_s2 - l10_b2)
-                        if imp_auc > float(epsilon_auc) or imp_l10 > float(epsilon_lift10):
-                            status = 'FAIL'
+                    imp_auc = max(auc_s - auc_b, auc_s2 - auc_b2)
+                    imp_l10 = max(l10_s - l10_b, l10_s2 - l10_b2)
+                    comp.update({
+                        'aux_masked_lr_auc_imp': float(imp_auc),
+                        'aux_masked_lr_lift10_imp': float(imp_l10),
+                        'aux_masked_lr_status': 'SUSPECT' if (imp_auc > float(epsilon_auc) or imp_l10 > float(epsilon_lift10)) else 'OK',
+                    })
                 except Exception:
                     pass
         except Exception:

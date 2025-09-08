@@ -123,9 +123,9 @@ validation:
   ablation_epsilon_auc: 0.01
   ablation_epsilon_lift10: 0.25
   # Gauntlet-only: subtract last N days from windowed aggregates
-  gauntlet_mask_tail_days: 45
+  gauntlet_mask_tail_days: 60
   # Gauntlet-only: embargo/purge days between train and validation folds
-  gauntlet_purge_days: 45
+  gauntlet_purge_days: 60
   # Gauntlet-only: start labels at cutoff+buffer_days (horizon buffer)
   gauntlet_label_buffer_days: 30
 
