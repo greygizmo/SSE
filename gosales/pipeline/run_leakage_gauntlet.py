@@ -324,9 +324,14 @@ def run_topk_ablation_check(ctx: LGContext, window_months: int, k_list: list[int
 
 
 def run_shift14_check(ctx: LGContext, window_months: int, run_training: bool = False, epsilon_auc: float = 0.01, epsilon_lift10: float = 0.25) -> dict[str, str]:
-    """Scaffold a 14-day shift test: compute features at cutoff and cutoff-14d and (optionally) train.
+    """Backwards-compatible Shift-14 test wrapper using run_shift_check(days=14)."""
+    return run_shift_check(ctx, window_months, days=14, run_training=run_training, epsilon_auc=epsilon_auc, epsilon_lift10=epsilon_lift10)
 
-    Writes `shift14_metrics_<div>_<cutoff>.json` with PASS/FAIL when training is run; otherwise PLANNED.
+
+def run_shift_check(ctx: LGContext, window_months: int, days: int, run_training: bool = False, epsilon_auc: float = 0.01, epsilon_lift10: float = 0.25) -> dict[str, str]:
+    """Generalized shift test: compute features at cutoff and cutoff-days and (optionally) train.
+
+    Writes `shift{days}_metrics_<div>_<cutoff>.json` with PASS/FAIL when training is run; otherwise PLANNED.
     """
     import pandas as pd
     artifacts: dict[str, str] = {}
@@ -337,7 +342,7 @@ def run_shift14_check(ctx: LGContext, window_months: int, run_training: bool = F
 
     # Compute shifted cutoff
     base_cut = pd.to_datetime(ctx.cutoff)
-    cut_shift = (base_cut - timedelta(days=14)).date().isoformat()
+    cut_shift = (base_cut - timedelta(days=int(days))).date().isoformat()
 
     # Build feature matrices to capture prevalence/context
     try:
@@ -355,7 +360,7 @@ def run_shift14_check(ctx: LGContext, window_months: int, run_training: bool = F
     comp = {}
 
     if run_training:
-        # Best-effort: train on shifted cutoff only and compare to any existing baseline metrics
+        # Best-effort: train base and shifted cutoff with identical SAFE+GroupCV+purge and compare
         try:
             from gosales.utils.paths import OUTPUTS_DIR as _OUT
             import shutil
@@ -521,16 +526,138 @@ def run_shift14_check(ctx: LGContext, window_months: int, run_training: bool = F
     out = {
         "status": status,
         "cutoff": ctx.cutoff,
+        "shift_days": int(days),
         "shift_cutoff": cut_shift,
         "window_months": int(window_months),
         "prevalence_base": base_prev,
         "prevalence_shift": shift_prev,
         "comparison": comp,
-        "notes": "Set --run-shift14-training to execute training and metric comparison." if not run_training else None,
+        "notes": "Set shift training flag to execute training and metric comparison." if not run_training else None,
     }
-    out_path = ctx.out_dir / f"shift14_metrics_{ctx.division}_{ctx.cutoff}.json"
+    out_path = ctx.out_dir / f"shift{int(days)}_metrics_{ctx.division}_{ctx.cutoff}.json"
     out_path.write_text(json.dumps(out, indent=2), encoding="utf-8")
-    return {"shift14": str(out_path)}
+    return {f"shift{int(days)}": str(out_path)}
+
+
+def run_shift_grid_check(ctx: LGContext, window_months: int, shifts: list[int], run_training: bool, epsilon_auc: float, epsilon_lift10: float) -> dict[str, str]:
+    """Run multiple shift checks and summarize results."""
+    artifacts: dict[str, str] = {}
+    summary = {"overall": "PASS", "shifts": []}
+    for d in shifts:
+        art = run_shift_check(ctx, window_months, days=int(d), run_training=run_training, epsilon_auc=epsilon_auc, epsilon_lift10=epsilon_lift10)
+        artifacts.update(art)
+        # Read status back
+        try:
+            key = f"shift{int(d)}"
+            path = art.get(key)
+            if path:
+                data = json.loads(Path(path).read_text(encoding="utf-8"))
+                summary["shifts"].append({"days": int(d), "status": data.get("status"), "comparison": data.get("comparison")})
+                if data.get("status") == "FAIL":
+                    summary["overall"] = "FAIL"
+        except Exception:
+            summary["shifts"].append({"days": int(d), "status": "UNKNOWN"})
+    sum_path = ctx.out_dir / f"shift_grid_{ctx.division}_{ctx.cutoff}.json"
+    sum_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    artifacts["shift_grid"] = str(sum_path)
+    return artifacts
+
+
+def run_reproducibility_check(ctx: LGContext, window_months: int, eps_auc: float, eps_lift10: float) -> dict[str, str]:
+    """Train the base cutoff twice with Gauntlet knobs and compare deltas; also check customer overlap CSV."""
+    from gosales.utils.paths import OUTPUTS_DIR as _OUT
+    import shutil
+    division = ctx.division
+    div_key = division.lower()
+    met_path = _OUT / f"metrics_{div_key}.json"
+    backup_path = None
+    if met_path.exists():
+        backup_path = _OUT / f"metrics_{div_key}.json.bak"
+        shutil.copy2(met_path, backup_path)
+
+    # Prepare Gauntlet knobs
+    from gosales.utils.config import load_config as _load
+    _cfg = _load()
+    purge = int(getattr(getattr(_cfg, 'validation', object()), 'gauntlet_purge_days', 30) or 30)
+    label_buf = int(getattr(getattr(_cfg, 'validation', object()), 'gauntlet_label_buffer_days', 0) or 0)
+
+    def _train_once() -> dict:
+        cmd = [
+            sys.executable, "-m", "gosales.models.train",
+            "--division", division,
+            "--cutoffs", ctx.cutoff,
+            "--window-months", str(window_months),
+            "--group-cv",
+            "--purge-days", str(int(purge)),
+            "--safe-mode",
+            "--label-buffer-days", str(int(label_buf)),
+        ]
+        subprocess.run(cmd, check=True)
+        return json.loads(met_path.read_text(encoding="utf-8")) if met_path.exists() else {}
+
+    try:
+        m1 = _train_once()
+        m2 = _train_once()
+    finally:
+        if backup_path and backup_path.exists():
+            shutil.move(str(backup_path), str(met_path))
+
+    def _final(m):
+        return m.get("final", {}) if isinstance(m, dict) else {}
+
+    f1 = _final(m1); f2 = _final(m2)
+
+    def _lift10(d: dict) -> float | None:
+        if d is None:
+            return None
+        v = d.get("lift@10") if isinstance(d, dict) else None
+        if v is None and isinstance(d, dict):
+            v = d.get("lift10")
+        return v
+
+    auc1 = f1.get("auc"); auc2 = f2.get("auc")
+    l10_1 = _lift10(f1); l10_2 = _lift10(f2)
+    b1 = f1.get("brier"); b2 = f2.get("brier")
+
+    try:
+        d_auc = abs(float(auc2 or 0.0) - float(auc1 or 0.0)) if (auc1 is not None and auc2 is not None) else None
+        d_l10 = abs(float(l10_2 or 0.0) - float(l10_1 or 0.0)) if (l10_1 is not None and l10_2 is not None) else None
+    except Exception:
+        d_auc = None; d_l10 = None
+
+    # Overlap CSV check
+    overlap_path = _OUT / f"fold_customer_overlap_{div_key}_{ctx.cutoff}.csv"
+    overlap_count = None
+    try:
+        if overlap_path.exists():
+            import pandas as _pd
+            df_overlap = _pd.read_csv(overlap_path)
+            overlap_count = int(len(df_overlap))
+    except Exception:
+        pass
+
+    status = "PASS"
+    if overlap_count is not None and overlap_count > 0:
+        status = "FAIL"
+    if (d_auc is not None and d_auc > float(eps_auc)) or (d_l10 is not None and d_l10 > float(eps_lift10)):
+        status = "FAIL"
+
+    out = {
+        "status": status,
+        "cutoff": ctx.cutoff,
+        "window_months": int(window_months),
+        "overlap_csv": str(overlap_path),
+        "overlap_count": int(overlap_count) if overlap_count is not None else None,
+        "metrics_run1": {"auc": auc1, "lift10": l10_1, "brier": b1},
+        "metrics_run2": {"auc": auc2, "lift10": l10_2, "brier": b2},
+        "delta_auc": d_auc,
+        "delta_lift10": d_l10,
+        "eps_auc": float(eps_auc),
+        "eps_lift10": float(eps_lift10),
+    }
+    out_path = ctx.out_dir / f"repro_check_{ctx.division}_{ctx.cutoff}.json"
+    out_path.write_text(json.dumps(out, indent=2), encoding="utf-8")
+    return {"repro_check": str(out_path)}
 
 
 def write_consolidated_report(ctx: LGContext, artifacts: dict[str, str]) -> Path:
@@ -562,14 +689,19 @@ def write_consolidated_report(ctx: LGContext, artifacts: dict[str, str]) -> Path
 @click.option("--window-months", default=6, type=int)
 @click.option("--static-only/--no-static-only", default=True, help="Run only static checks (no training)")
 @click.option("--run-shift14-training/--no-run-shift14-training", default=False, help="Run training for shift-14 cutoff and compare metrics (overwrites metrics during run; restored after)")
+@click.option("--run-shift-grid/--no-run-shift-grid", default=False, help="Run shift grid checks (e.g., 7,14,28,56) with training and comparison")
 @click.option("--shift14-eps-auc", type=float, default=None, help="Override epsilon AUC threshold for shift-14 (default from config)")
 @click.option("--shift14-eps-lift10", type=float, default=None, help="Override epsilon lift@10 threshold for shift-14 (default from config)")
+@click.option("--shift-grid", default="7,14,28,56", help="Comma-separated day offsets to evaluate for shift grid (e.g., 7,14,28,56)")
+@click.option("--run-repro-check/--no-run-repro-check", default=False, help="Run reproducibility check (double-train base with Gauntlet knobs and compare deltas)")
+@click.option("--repro-eps-auc", type=float, default=0.002, help="Max allowed delta AUC across repeated runs")
+@click.option("--repro-eps-lift10", type=float, default=0.05, help="Max allowed delta Lift@10 across repeated runs")
 @click.option("--run-topk-ablation/--no-run-topk-ablation", default=False, help="Run Top-K ablation training and compare metrics (heavy)")
 @click.option("--topk-list", default="10,20", help="Comma-separated K list for ablation (e.g., 10,20,50)")
 @click.option("--ablation-eps-auc", type=float, default=None, help="Override epsilon AUC threshold for ablation (default from config)")
 @click.option("--ablation-eps-lift10", type=float, default=None, help="Override epsilon lift@10 threshold for ablation (default from config)")
 @click.option("--config", default=str((Path(__file__).parents[1] / "config.yaml").resolve()))
-def main(division: str, cutoff: str, window_months: int, static_only: bool, run_shift14_training: bool, shift14_eps_auc: float | None, shift14_eps_lift10: float | None, run_topk_ablation: bool, topk_list: str, ablation_eps_auc: float | None, ablation_eps_lift10: float | None, config: str) -> None:
+def main(division: str, cutoff: str, window_months: int, static_only: bool, run_shift14_training: bool, run_shift_grid: bool, shift14_eps_auc: float | None, shift14_eps_lift10: float | None, shift_grid: str, run_repro_check: bool, repro_eps_auc: float, repro_eps_lift10: float, run_topk_ablation: bool, topk_list: str, ablation_eps_auc: float | None, ablation_eps_lift10: float | None, config: str) -> None:
     cfg = load_config(config)
     ctx = _ensure_outdir(division, cutoff)
     artifacts = {}
@@ -591,6 +723,17 @@ def main(division: str, cutoff: str, window_months: int, static_only: bool, run_
     except Exception as e:
         logger.error("Shift-14 check failed: %s", e)
 
+    # Shift grid (optional)
+    try:
+        if run_shift_grid:
+            logger.info("Running shift grid checks for %s @ %s", division, cutoff)
+            shifts = [int(x.strip()) for x in str(shift_grid).split(',') if str(x).strip()]
+            eps_auc2 = float(shift14_eps_auc) if shift14_eps_auc is not None else float(getattr(getattr(cfg, 'validation', object()), 'shift14_epsilon_auc', 0.01))
+            eps_lift2 = float(shift14_eps_lift10) if shift14_eps_lift10 is not None else float(getattr(getattr(cfg, 'validation', object()), 'shift14_epsilon_lift10', 0.25))
+            artifacts.update(run_shift_grid_check(ctx, window_months, shifts=shifts, run_training=True, epsilon_auc=eps_auc2, epsilon_lift10=eps_lift2))
+    except Exception as e:
+        logger.error("Shift grid checks failed: %s", e)
+
     # Top-K ablation scaffold
     try:
         logger.info("Running Top-K ablation (scaffold) for %s @ %s", division, cutoff)
@@ -600,6 +743,14 @@ def main(division: str, cutoff: str, window_months: int, static_only: bool, run_
         artifacts.update(run_topk_ablation_check(ctx, window_months, k_list=k_list, run_training=run_topk_ablation, epsilon_auc=eps_auc2, epsilon_lift10=eps_lift2))
     except Exception as e:
         logger.error("Top-K ablation failed: %s", e)
+
+    # Reproducibility check (optional)
+    try:
+        if run_repro_check:
+            logger.info("Running reproducibility check for %s @ %s", division, cutoff)
+            artifacts.update(run_reproducibility_check(ctx, window_months, eps_auc=repro_eps_auc, eps_lift10=repro_eps_lift10))
+    except Exception as e:
+        logger.error("Reproducibility check failed: %s", e)
     # Future: dynamic checks here when enabled
     report = write_consolidated_report(ctx, artifacts)
     logger.info("Wrote leakage report to %s", report)
