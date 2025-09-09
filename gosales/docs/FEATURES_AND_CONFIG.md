@@ -77,5 +77,28 @@ All options live in `gosales/config.yaml`. Key entries:
   - `gauntlet_*`: e.g., mask tail days, purge days, label buffer
   - thresholds: `shift14_epsilon_*`, `ablation_epsilon_*`
 
-See the UI â€œFeature Guideâ€ tab for a rendered view of the current configuration.
+See the UI “Feature Guide” tab for a rendered view of the current configuration.
+
+---
+
+## Recent Changes
+
+- Post_Processing model added as a first‑class target. Artifacts live under `gosales/models/post_processing_model` and include `metadata.json` with `division`, `cutoff_date`, and `prediction_window_months`.
+- Scoring aligns per‑division score frames before concatenation to avoid schema width mismatches.
+- Scoring prefers curated DB connection (where curated fact tables exist), with safe fallback to the primary connection.
+- Trainer always emits `metadata.json` (class balance, features, cutoff/window), even when degenerate probabilities abort artifact write.
+- Prequential evaluator sanitizes features to numeric floats to prevent dtype errors with LightGBM.
+
+### Quick Commands
+
+```powershell
+# Train (example: Post_Processing)
+python -m gosales.models.train --division Post_Processing --cutoffs "2024-06-30,2024-12-31" --window-months 6 --models lgbm
+
+# Score all divisions + whitespace (curated DB preferred)
+python -m gosales.pipeline.score_customers
+
+# Prequential horizon curves
+python -m gosales.pipeline.prequential_eval --division Post_Processing --train-cutoff 2024-12-31 --start 2025-01 --end 2025-12 --window-months 6
+```
 

@@ -21,6 +21,7 @@ See `gosales/etl/sku_map.py` for the full mapping.
 - Training
 - Success Plan
 - Hardware (printers and ecosystem spend)
+- Post_Processing (post-processing hardware/software/services)
 - CPE (3DEXPERIENCE: CATIA/DELMIA/HV_Simulation)
 - Scanning (Creaform, Artec)
 - CAMWorks
@@ -41,11 +42,13 @@ Use `gosales.etl.sku_map.get_model_targets(name)` to resolve SKUs.
 - Simulation: Simulation, SW_Plastics
 - Scanning: Creaform, Artec
 - CAMWorks: CAMWorks
+- Post_Processing: Post_Processing
 
 Notes:
 - UAP (Core_New_UAP, Pro_Prem_New_UAP) is mapped to `division=Maintenance` and acts as a predictor (not a target) for SWX_Seats.
 - AM_Support is routed via `db_division_routes` (Scanning vs Hardware) and is treated as a predictor.
 - Consumables (`Consumables`) and Post_Processing/AM_Software are predictors for the Printers model.
+- Post_Processing is also modeled as its own target division and participates in whitespace ranking with learned probabilities.
 
 ## Eventization
 
@@ -64,4 +67,3 @@ You can train a specific target directly via:
 ```
 python -m gosales.models.train --division Printers --cutoffs "2024-06-30" --window-months 6
 ```
-

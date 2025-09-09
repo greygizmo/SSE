@@ -119,6 +119,28 @@ item is small, testable, and references target files/CLIs.
   - Persist `fold_assignments_{division}_{cutoff}.csv` (customer_id → fold) and `random_state` for each estimator.
   - Add CI check that two Gauntlet runs with same seed hash to identical `shift_grid_*.json`.
 
+---
+
+## Completed This Session (2025-09-09)
+
+- [x] Add Post_Processing as a model-backed target and wire into scoring/whitespace.
+- [x] Align per-division score frames before concatenation to fix schema width mismatch in scoring.
+- [x] Prefer curated DB connection in scoring (fallback to primary).
+- [x] Ensure trainer writes metadata.json even on degenerate runs.
+- [x] Sanitize features in prequential evaluator to avoid dtype errors (LightGBM).
+
+Artifacts:
+- `gosales/models/post_processing_model/{model.pkl,feature_list.json,metadata.json}`
+- `gosales/outputs/metrics_post_processing.json`, `gosales/outputs/thresholds_post_processing.csv`, `gosales/outputs/gains_post_processing.csv`
+- `gosales/outputs/prequential/Post_Processing/2024-12-31/{prequential_*.json,csv,png}`
+
+## Next Steps (Recommended)
+
+- [ ] Run Leakage Gauntlet for Post_Processing (Shift‑14 + Permutation) and attach PASS/FAIL to QA.
+- [ ] UI: Badge divisions as model‑backed vs heuristic in Metrics/QA views.
+- [ ] Review whitespace top‑N capacity and division share; adjust `whitespace.weights` or `bias_division_max_share_topN` if Post_Processing over‑dominates.
+- [ ] Expand Post_Processing training with future cutoffs and evaluate horizon curves quarterly.
+
 ### B) SAFE‑Mode Expansion (time‑adjacent risk reduction)
 
 - [ ] **Feature family minimum window**
@@ -204,4 +226,3 @@ item is small, testable, and references target files/CLIs.
 
 - [ ] One‑flag revert for SAFE mode (`features.safe_mode=false`) and for purge CV (`--purge-days 0`), documented in `docs/OPERATIONS.md`.
 - [ ] Snapshot copy of the last known‑good artifacts (run registry) with quick restore instructions.
-
