@@ -10,11 +10,11 @@ under gosales/outputs/prequential/<division>/<train_cutoff>/.
 
 from pathlib import Path
 import json
+import pandas as pd
 import argparse
 from datetime import datetime
 
 import numpy as np
-import pandas as pd
 import joblib
 from sklearn.metrics import roc_auc_score, brier_score_loss
 
@@ -101,6 +101,27 @@ def run_prequential(division: str, train_cutoff: str, start: str, end: str, wind
 
     # Build list of monthly cutoffs
     months = _month_ends(start, end)
+    # Clamp to months where labels are fully observable: (cutoff + window_months) <= today
+    try:
+        today = pd.Timestamp.utcnow().normalize()
+    except Exception:
+        today = pd.Timestamp.today().normalize()
+    # Ensure tz-naive for safe comparisons
+    try:
+        if getattr(today, 'tzinfo', None) is not None:
+            today = today.tz_localize(None)
+    except Exception:
+        pass
+    kept = []
+    for cut in months:
+        try:
+            cut_dt = pd.to_datetime(cut)
+            pred_end = cut_dt + pd.DateOffset(months=int(window_months))
+            if pred_end <= today:
+                kept.append(cut)
+        except Exception:
+            continue
+    months = kept
 
     # Evaluate per month
     rows = []
@@ -145,7 +166,6 @@ def run_prequential(division: str, train_cutoff: str, start: str, end: str, wind
     # Write JSON/CSV
     js = out_dir / f'prequential_{division}_{train_cutoff}.json'
     js.write_text(json.dumps({'division': division, 'train_cutoff': train_cutoff, 'window_months': int(window_months), 'k_percent': int(k_percent), 'results': rows}, indent=2), encoding='utf-8')
-    import pandas as pd  # ensure import
     pd.DataFrame(rows).to_csv(out_dir / f'prequential_{division}_{train_cutoff}.csv', index=False)
 
     # Plot curves
@@ -190,3 +210,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+

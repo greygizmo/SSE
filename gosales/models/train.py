@@ -216,6 +216,14 @@ def _calibrate(clf, X_train: pd.DataFrame, y_train: pd.Series, X_valid: pd.DataF
 @click.option("--dry-run/--no-dry-run", default=False, help="Skip training; only verify inputs and emit planned artifacts to manifest")
 def main(division: str, cutoffs: str, window_months: int, models: str, calibration: str, shap_sample: int, config: str, group_cv: bool, purge_days: int, label_buffer_days: int, safe_mode: bool, dry_run: bool) -> None:
     cfg = load_config(config)
+    # Determine SAFE policy: CLI flag or per-division config override
+    auto_safe = bool(safe_mode)
+    try:
+        divs = [str(d).lower() for d in getattr(cfg, 'modeling', object()).safe_divisions]  # type: ignore[attr-defined]
+        if str(division).lower() in divs:
+            auto_safe = True
+    except Exception:
+        pass
     cut_list = [c.strip() for c in cutoffs.split(",") if c.strip()]
     OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
@@ -265,7 +273,7 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
         # In SAFE (audit) mode, apply gauntlet tail-mask to windowed features
         gauntlet_mask_tail = 0
         try:
-            if safe_mode:
+            if auto_safe:
                 gauntlet_mask_tail = int(getattr(getattr(cfg, 'validation', object()), 'gauntlet_mask_tail_days', 0) or 0)
         except Exception:
             gauntlet_mask_tail = 0
@@ -276,7 +284,7 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
                 division,
                 cutoff,
                 window_months,
-                mask_tail_days=gauntlet_mask_tail if safe_mode else None,
+                mask_tail_days=gauntlet_mask_tail if auto_safe else None,
                 label_buffer_days=label_buffer_days,
             )
             # Persist features parquet for validation phase (Phase 5) compatibility
@@ -294,7 +302,7 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
             X = df.drop(columns=['customer_id','bought_in_division'])
             X = _sanitize_features(X)
             # SAFE policy: drop high-risk adjacency families
-            if safe_mode:
+            if auto_safe:
                 try:
                     cols = []
                     for c in X.columns:
@@ -534,14 +542,14 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
         division,
         last_cut,
         window_months,
-        mask_tail_days=gauntlet_mask_tail if safe_mode else None,
+        mask_tail_days=gauntlet_mask_tail if auto_safe else None,
         label_buffer_days=label_buffer_days,
     )
     df_final = fm_final.to_pandas()
     y_final = df_final['bought_in_division'].astype(int).values
     X_final = df_final.drop(columns=['customer_id','bought_in_division'])
     X_final = _sanitize_features(X_final)
-    if safe_mode:
+    if auto_safe:
         try:
             cols = []
             for c in X_final.columns:
@@ -685,12 +693,26 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
 
         # Thresholds for top-K percents
         thr_rows = []
+        topk_rows = []
         for k in cfg.modeling.top_k_percents:
             if p_final is None or len(p_final) == 0:
                 continue
             thr = compute_topk_threshold(p_final, k)
             cutoff_idx = max(1, int(len(p_final) * (k/100.0)))
             thr_rows.append({"k_percent": k, "threshold": float(thr), "count": cutoff_idx})
+            # Top-K yield and capture
+            order = np.argsort(-p_final)
+            top_idx = order[:cutoff_idx]
+            pos_rate = float(np.mean(y_final[top_idx])) if cutoff_idx > 0 else None
+            total_pos = float(np.sum(y_final)) if len(y_final) else 0.0
+            capture = float(np.sum(y_final[top_idx]) / total_pos) if total_pos > 0 else None
+            topk_rows.append({
+                "k_percent": int(k),
+                "count": int(cutoff_idx),
+                "pos_rate": pos_rate,
+                "capture": capture,
+                "threshold": float(thr),
+            })
         thr_path = OUTPUTS_DIR / f"thresholds_{division.lower()}.csv"
         pd.DataFrame(thr_rows).to_csv(thr_path, index=False)
         artifacts[thr_path.name] = str(thr_path)
@@ -751,6 +773,12 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
         artifacts[metrics_path.name] = str(metrics_path)
 
         # Model card JSON
+        # Derive a human-friendly calibration method label
+        try:
+            cal_method_label = 'isotonic' if final_cal_method == 'isotonic' else 'platt'
+        except Exception:
+            cal_method_label = None
+
         card = {
             "division": division,
             "cutoffs": cut_list,
@@ -765,7 +793,8 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
                 "n_customers": int(len(y_final)),
                 "prevalence": float(np.mean(y_final)) if len(y_final) > 0 else None,
             },
-            "calibration": {"mae_weighted": float(cal_mae) if cal_mae is not None else None},
+            "calibration": {"method": cal_method_label, "mae_weighted": float(cal_mae) if cal_mae is not None else None},
+            "topk": topk_rows,
             "artifacts": {
                 "model_pickle": str(out_dir / "model.pkl"),
                 "feature_list": str(out_dir / "feature_list.json"),

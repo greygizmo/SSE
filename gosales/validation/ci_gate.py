@@ -5,6 +5,10 @@ import sys
 from pathlib import Path
 from typing import Dict, List
 import numpy as np
+from pathlib import Path as _Path
+
+from gosales.utils.paths import ROOT_DIR, OUTPUTS_DIR
+from gosales.utils.config import load_config
 
 
 def _read_json(path: Path) -> Dict[str, object]:
@@ -61,6 +65,12 @@ def _collect_validation_reports(outputs_dir: Path) -> List[Dict[str, object]]:
 def main(outputs: str = "gosales/outputs") -> int:
     out_dir = Path(outputs)
     failures: List[str] = []
+    # Config for SAFE divisions
+    try:
+        cfg = load_config(ROOT_DIR / 'config.yaml')
+        safe_divs = set(str(d).strip().lower() for d in getattr(getattr(cfg, 'modeling', object()), 'safe_divisions', []) or [])
+    except Exception:
+        safe_divs = set()
 
     # Schema checks
     schema_reports = _collect_schema_reports(out_dir)
@@ -90,6 +100,29 @@ def main(outputs: str = "gosales/outputs") -> int:
                     failures.append(f"Calibration MAE above threshold: {float(cal_mae):.3f} > {cal_thr:.2f}")
             except Exception:
                 pass
+
+    # Adjacency ablation gate: ensure Full >= SAFE unless division is in safe_divisions
+    abl_root = out_dir / 'ablation' / 'adjacency'
+    if abl_root.exists():
+        for div_dir in abl_root.iterdir():
+            if not div_dir.is_dir():
+                continue
+            dv = div_dir.name
+            for run_dir in div_dir.iterdir():
+                if not run_dir.is_dir():
+                    continue
+                for js in run_dir.glob('adjacency_ablation_*.json'):
+                    try:
+                        payload = _read_json(js)
+                        delta = payload.get('delta_auc_full_minus_safe')
+                        if delta is None:
+                            continue
+                        delta = float(delta)
+                        # If SAFE >= Full by >= 0.005 and division not explicitly SAFE -> gate failure
+                        if (-delta) >= 0.005 and dv.lower() not in safe_divs:
+                            failures.append(f"Adjacency ablation: SAFE outperforms Full by ΔAUC {(-delta):+.4f} for {dv} ({js}). Add to modeling.safe_divisions or address feature policy.")
+                    except Exception:
+                        continue
 
     # Drift/alerts: treat presence of alerts.json with non-empty alerts as a soft warning (does not fail build)
     alerts_path = out_dir / 'alerts.json'

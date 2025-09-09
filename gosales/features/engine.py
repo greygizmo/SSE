@@ -309,6 +309,39 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
             agg_div[f'margin__div__gp_pct__{w}m'] = agg_div[col_gp].astype(float) / (agg_div[col_gp].abs().astype(float) + 1e-9)
             per_customer_frames_div.append(agg_div)
 
+            # Offset windows (end at cutoff - offset_days)
+            try:
+                cfgf = cfg.load_config().features
+                if bool(getattr(cfgf, 'enable_offset_windows', True)):
+                    offsets = list(getattr(cfgf, 'offset_days', [60]))
+                    for off in offsets:
+                        try:
+                            off = int(off)
+                        except Exception:
+                            continue
+                        end_off = cutoff_dt - pd.Timedelta(days=off)
+                        start_off = end_off - pd.DateOffset(months=w)
+                        if end_off <= start_off:
+                            sub_off = fd.head(0)[['customer_id','order_date','gross_profit']]
+                        else:
+                            m_off = (fd['order_date'] > start_off) & (fd['order_date'] <= end_off)
+                            sub_off = fd.loc[m_off, ['customer_id','order_date','gross_profit','product_division']]
+                        # All-scope aggregates
+                        gp_w_off = sub_off.groupby('customer_id')['gross_profit'].sum().rename(f'rfm__all__gp_sum__{w}m_off{off}d').reset_index()
+                        gp_mean_off = sub_off.groupby('customer_id')['gross_profit'].mean().rename(f'rfm__all__gp_mean__{w}m_off{off}d').reset_index()
+                        tx_n_off = sub_off.groupby('customer_id')['order_date'].count().rename(f'rfm__all__tx_n__{w}m_off{off}d').reset_index()
+                        agg_off = tx_n_off.merge(gp_w_off, on='customer_id', how='outer').merge(gp_mean_off, on='customer_id', how='outer')
+                        per_customer_frames.append(agg_off)
+                        # Division-specific aggregates (match norm_division_name)
+                        sub_div_off = sub_off.loc[sub_off['product_division'].astype(str).str.strip() == norm_division_name, ['customer_id','order_date','gross_profit']]
+                        tx_n_div_off = sub_div_off.groupby('customer_id')['order_date'].count().rename(f'rfm__div__tx_n__{w}m_off{off}d').reset_index()
+                        gp_sum_div_off = sub_div_off.groupby('customer_id')['gross_profit'].sum().rename(f'rfm__div__gp_sum__{w}m_off{off}d').reset_index()
+                        gp_mean_div_off = sub_div_off.groupby('customer_id')['gross_profit'].mean().rename(f'rfm__div__gp_mean__{w}m_off{off}d').reset_index()
+                        agg_div_off = tx_n_div_off.merge(gp_sum_div_off, on='customer_id', how='outer').merge(gp_mean_div_off, on='customer_id', how='outer')
+                        per_customer_frames_div.append(agg_div_off)
+            except Exception:
+                pass
+
         # Monthly resample for slope/volatility over last 12 months
         last12_mask = (fd['order_date'] > (cutoff_dt - pd.DateOffset(months=12))) & (fd['order_date'] <= cutoff_dt)
         m = fd.loc[last12_mask, ['customer_id', 'order_date', 'gross_profit']].copy()
@@ -539,8 +572,14 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
         try:
             cfgmod = cfg.load_config()
             if cfgmod.features.use_market_basket:
-                # Limit to feature window (e.g., last 12 months) to avoid leakage
-                fd_win = fd.loc[last12_mask, ['customer_id', 'product_sku', 'product_division']].dropna().copy()
+                # Limit to feature window (e.g., last 12 months) and apply lag embargo to avoid adjacency
+                try:
+                    lag_days = int(getattr(cfgmod.features, 'affinity_lag_days', 60) or 60)
+                except Exception:
+                    lag_days = 60
+                end_aff = cutoff_dt - pd.Timedelta(days=lag_days)
+                last12_mask_lag = (fd['order_date'] > (cutoff_dt - pd.DateOffset(months=12))) & (fd['order_date'] <= end_aff)
+                fd_win = fd.loc[last12_mask_lag, ['customer_id', 'product_sku', 'product_division']].dropna().copy()
                 if not fd_win.empty:
                     fd_win['product_sku'] = fd_win['product_sku'].astype(str)
                     # Baseline: fraction of customers with target division activity in window
@@ -567,7 +606,7 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
                         lift = (p_cond / baseline) if baseline > 0 else 0.0
                         lift_weights[s] = float(lift)
 
-                    # Aggregate to per-customer signals: max and mean lift of present SKUs
+                    # Aggregate to per-customer signals: max and mean lift of present SKUs (lagged exposure)
                     if lift_weights:
                         # Align DataFrame to lift columns only
                         cols = [c for c in has_sku.columns if c in lift_weights]
@@ -575,14 +614,14 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
                             w = pd.Series({c: lift_weights.get(c, 0.0) for c in cols})
                             present = has_sku[cols].astype(float)
                             weighted = present.mul(w, axis=1)
-                            mb_lift_max = weighted.max(axis=1).rename('mb_lift_max')
+                            mb_lift_max = weighted.max(axis=1).rename(f'mb_lift_max_lag{lag_days}d')
                             # mean over present SKUs (avoid dividing by zero)
                             denom = present.sum(axis=1).replace(0.0, np.nan)
-                            mb_lift_mean = (weighted.sum(axis=1) / denom).fillna(0.0).rename('mb_lift_mean')
+                            mb_lift_mean = (weighted.sum(axis=1) / denom).fillna(0.0).rename(f'mb_lift_mean_lag{lag_days}d')
                             mb_df = pd.concat([mb_lift_max, mb_lift_mean], axis=1).reset_index()
                             features_pd = features_pd.merge(mb_df, on='customer_id', how='left')
-                            features_pd['mb_lift_max'] = features_pd['mb_lift_max'].fillna(0.0)
-                            features_pd['mb_lift_mean'] = features_pd['mb_lift_mean'].fillna(0.0)
+                            features_pd[f'mb_lift_max_lag{lag_days}d'] = features_pd[f'mb_lift_max_lag{lag_days}d'].fillna(0.0)
+                            features_pd[f'mb_lift_mean_lag{lag_days}d'] = features_pd[f'mb_lift_mean_lag{lag_days}d'].fillna(0.0)
 
                         # Also export rule table for transparency
                         try:
@@ -603,10 +642,11 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
                     try:
                         if lift_weights and cols:
                             # Sum of lifts for present SKUs
-                            affinity = weighted.sum(axis=1).rename('affinity__div__lift_topk__12m')
+                            affinity = weighted.sum(axis=1).rename(f'affinity__div__lift_topk__12m_lag{lag_days}d')
                             affinity_df = affinity.reset_index()
                             features_pd = features_pd.merge(affinity_df, on='customer_id', how='left')
-                            features_pd['affinity__div__lift_topk__12m'] = features_pd['affinity__div__lift_topk__12m'].fillna(0.0)
+                            coln = f'affinity__div__lift_topk__12m_lag{lag_days}d'
+                            features_pd[coln] = features_pd[coln].fillna(0.0)
                     except Exception:
                         pass
         except Exception as e:
@@ -802,6 +842,28 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
     div_rec_col = f'days_since_last_{division_name}_order'
     if div_rec_col in feature_matrix_pd.columns:
         feature_matrix_pd['rfm__div__recency_days__life'] = feature_matrix_pd[div_rec_col]
+    # Cycle-aware transforms: log-recency and hazard/decay with configurable half-lives
+    try:
+        # Log-recency
+        if 'rfm__all__recency_days__life' in feature_matrix_pd.columns:
+            feature_matrix_pd['rfm__all__log_recency__life'] = np.log1p(pd.to_numeric(feature_matrix_pd['rfm__all__recency_days__life'], errors='coerce').fillna(999.0))
+        if 'rfm__div__recency_days__life' in feature_matrix_pd.columns:
+            feature_matrix_pd['rfm__div__log_recency__life'] = np.log1p(pd.to_numeric(feature_matrix_pd['rfm__div__recency_days__life'], errors='coerce').fillna(999.0))
+        # Hazard/decay transforms
+        half_lives = list(cfg.load_config().features.recency_decay_half_lives_days or [30, 90, 180])
+        for hl in half_lives:
+            try:
+                hl = float(hl) if float(hl) > 0 else 30.0
+            except Exception:
+                hl = 30.0
+            if 'rfm__all__recency_days__life' in feature_matrix_pd.columns:
+                d = pd.to_numeric(feature_matrix_pd['rfm__all__recency_days__life'], errors='coerce').fillna(999.0)
+                feature_matrix_pd[f'rfm__all__recency_decay__hl{int(hl)}'] = np.exp(-d / hl)
+            if 'rfm__div__recency_days__life' in feature_matrix_pd.columns:
+                dd = pd.to_numeric(feature_matrix_pd['rfm__div__recency_days__life'], errors='coerce').fillna(999.0)
+                feature_matrix_pd[f'rfm__div__recency_decay__hl{int(hl)}'] = np.exp(-dd / hl)
+    except Exception:
+        pass
     # RFM windows (all scope)
     for w in window_months:
         if f'tx_count_last_{w}m' in feature_matrix_pd.columns:
@@ -834,6 +896,39 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
     except Exception:
         pass
 
+    # Window deltas: 12m vs previous 12m (from 24m)
+    try:
+        cfgf = cfg.load_config().features
+        if bool(getattr(cfgf, 'enable_window_deltas', True)):
+            # All-scope deltas
+            if all(c in feature_matrix_pd.columns for c in [f'rfm__all__gp_sum__12m', f'rfm__all__gp_sum__24m']):
+                last12 = pd.to_numeric(feature_matrix_pd[f'rfm__all__gp_sum__12m'], errors='coerce').fillna(0.0)
+                tot24 = pd.to_numeric(feature_matrix_pd[f'rfm__all__gp_sum__24m'], errors='coerce').fillna(0.0)
+                prev12 = (tot24 - last12).clip(lower=0.0)
+                feature_matrix_pd['rfm__all__gp_sum__delta_12m_prev12m'] = last12 - prev12
+                feature_matrix_pd['rfm__all__gp_sum__ratio_12m_prev12m'] = (last12 / (prev12 + 1e-9)).replace([np.inf, -np.inf], 0.0)
+            if all(c in feature_matrix_pd.columns for c in [f'rfm__all__tx_n__12m', f'rfm__all__tx_n__24m']):
+                last12 = pd.to_numeric(feature_matrix_pd[f'rfm__all__tx_n__12m'], errors='coerce').fillna(0.0)
+                tot24 = pd.to_numeric(feature_matrix_pd[f'rfm__all__tx_n__24m'], errors='coerce').fillna(0.0)
+                prev12 = (tot24 - last12).clip(lower=0.0)
+                feature_matrix_pd['rfm__all__tx_n__delta_12m_prev12m'] = last12 - prev12
+                feature_matrix_pd['rfm__all__tx_n__ratio_12m_prev12m'] = (last12 / (prev12 + 1e-9)).replace([np.inf, -np.inf], 0.0)
+            # Division-scope deltas
+            if all(c in feature_matrix_pd.columns for c in [f'rfm__div__gp_sum__12m', f'rfm__div__gp_sum__24m']):
+                last12 = pd.to_numeric(feature_matrix_pd[f'rfm__div__gp_sum__12m'], errors='coerce').fillna(0.0)
+                tot24 = pd.to_numeric(feature_matrix_pd[f'rfm__div__gp_sum__24m'], errors='coerce').fillna(0.0)
+                prev12 = (tot24 - last12).clip(lower=0.0)
+                feature_matrix_pd['rfm__div__gp_sum__delta_12m_prev12m'] = last12 - prev12
+                feature_matrix_pd['rfm__div__gp_sum__ratio_12m_prev12m'] = (last12 / (prev12 + 1e-9)).replace([np.inf, -np.inf], 0.0)
+            if all(c in feature_matrix_pd.columns for c in [f'rfm__div__tx_n__12m', f'rfm__div__tx_n__24m']):
+                last12 = pd.to_numeric(feature_matrix_pd[f'rfm__div__tx_n__12m'], errors='coerce').fillna(0.0)
+                tot24 = pd.to_numeric(feature_matrix_pd[f'rfm__div__tx_n__24m'], errors='coerce').fillna(0.0)
+                prev12 = (tot24 - last12).clip(lower=0.0)
+                feature_matrix_pd['rfm__div__tx_n__delta_12m_prev12m'] = last12 - prev12
+                feature_matrix_pd['rfm__div__tx_n__ratio_12m_prev12m'] = (last12 / (prev12 + 1e-9)).replace([np.inf, -np.inf], 0.0)
+    except Exception:
+        pass
+
     # Fallback: ensure margin proxy columns exist based on rfm__all__gp_sum__{w}m
     try:
         for w in window_months:
@@ -847,6 +942,18 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
     # Lifecycle naming
     if 'tenure_days' in feature_matrix_pd.columns:
         feature_matrix_pd['lifecycle__all__tenure_days__life'] = feature_matrix_pd['tenure_days']
+        # Tenure months and buckets for cycle awareness
+        try:
+            t = pd.to_numeric(feature_matrix_pd['tenure_days'], errors='coerce').fillna(0.0)
+            feature_matrix_pd['lifecycle__all__tenure_months__life'] = (t / 30.0).astype(float)
+            # Buckets: <3m, 3-6m, 6-12m, 1-2y, >=2y
+            bins = [0, 90, 180, 365, 730, np.inf]
+            labels = ['lt3m','3to6m','6to12m','1to2y','ge2y']
+            b = pd.cut(t, bins=bins, labels=labels, right=True, include_lowest=True)
+            for lab in labels:
+                feature_matrix_pd[f'lifecycle__all__tenure_bucket__{lab}'] = (b == lab).astype(int)
+        except Exception:
+            pass
     if 'last_gap_days' in feature_matrix_pd.columns:
         feature_matrix_pd['lifecycle__all__gap_days__life'] = feature_matrix_pd['last_gap_days']
     # Diversity/division counts
@@ -986,7 +1093,7 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
 
             # Convert to polars and join
             industry_features = pl.from_pandas(customers_with_industry_pd)
-            feature_columns = ["customer_id"] + \
+            feature_columns = ["customer_id","industry","industry_sub"] + \
                 [f"is_{industry_key_map[i]}" for i in top_industries] + \
                 [f"is_sub_{sub_key_map[s]}" for s in top_subs]
 
@@ -997,6 +1104,66 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
             ).fill_null(0)
             
             logger.info(f"Successfully joined industry data. Added {len(top_industries)} industry and {len(top_subs)} sub-industry dummies.")
+
+            # Pooled/hierarchical encoders for sparse industries (non-leaky: pre-cutoff history only)
+            try:
+                cfgf = cfg.load_config().features
+                if bool(getattr(cfgf, 'pooled_encoders_enable', True)):
+                    lookback_m = int(getattr(cfgf, 'pooled_encoders_lookback_months', 24))
+                    alpha_ind = float(getattr(cfgf, 'pooled_alpha_industry', 50.0))
+                    alpha_sub = float(getattr(cfgf, 'pooled_alpha_sub', 50.0))
+                    # Build last-<lookback_m> months transaction slice
+                    fd2 = feature_data.copy()
+                    fd2['order_date'] = pd.to_datetime(fd2['order_date'])
+                    start_lb = cutoff_dt - pd.DateOffset(months=lookback_m)
+                    mask_lb = (fd2['order_date'] > start_lb) & (fd2['order_date'] <= cutoff_dt)
+                    hist = fd2.loc[mask_lb, ['customer_id','order_date','product_division','product_sku','gross_profit']].copy()
+                    # Attach industry/sub to each transaction
+                    cust_ind = customers_with_industry_pd[['customer_id','industry','industry_sub']].copy()
+                    hist = hist.merge(cust_ind, on='customer_id', how='left')
+                    # Target membership per tx
+                    if use_custom_targets:
+                        hist['is_target'] = hist['product_sku'].astype(str).isin(target_skus)
+                    else:
+                        hist['is_target'] = hist['product_division'].astype(str).str.strip() == norm_division_name
+                    # Industry-level counts and rates
+                    ind_tx = hist.groupby('industry', dropna=False)['order_date'].count().rename('tx_n').reset_index()
+                    ind_ttx = hist.loc[hist['is_target']].groupby('industry', dropna=False)['order_date'].count().rename('tx_n_target').reset_index()
+                    ind_gp = hist.groupby('industry', dropna=False)['gross_profit'].sum().rename('gp_sum').reset_index()
+                    ind_tgp = hist.loc[hist['is_target']].groupby('industry', dropna=False)['gross_profit'].sum().rename('gp_sum_target').reset_index()
+                    ind = ind_tx.merge(ind_ttx, on='industry', how='left').merge(ind_gp, on='industry', how='left').merge(ind_tgp, on='industry', how='left').fillna(0.0)
+                    # Global priors
+                    g_tx = float(ind['tx_n'].sum())
+                    g_ttx = float(ind['tx_n_target'].sum())
+                    g_gp = float(ind['gp_sum'].sum())
+                    g_tgp = float(ind['gp_sum_target'].sum())
+                    p_tx_global = (g_ttx / g_tx) if g_tx > 0 else 0.0
+                    p_gp_global = (g_tgp / g_gp) if g_gp > 0 else 0.0
+                    # Smoothed industry encoders
+                    ind['enc__industry__tx_rate_24m_smooth'] = (ind['tx_n_target'] + alpha_ind * p_tx_global) / (ind['tx_n'] + alpha_ind)
+                    # For GP share smoothing, weight prior by magnitude to be on same scale
+                    ind['enc__industry__gp_share_24m_smooth'] = (ind['gp_sum_target'] + alpha_ind * p_gp_global * ind['gp_sum']) / (ind['gp_sum'] + alpha_ind)
+                    ind_enc = ind[['industry','enc__industry__tx_rate_24m_smooth','enc__industry__gp_share_24m_smooth']]
+                    # Sub-industry encoders with hierarchical shrink to parent industry
+                    sub_tx = hist.groupby('industry_sub', dropna=False)['order_date'].count().rename('tx_n').reset_index()
+                    sub_ttx = hist.loc[hist['is_target']].groupby('industry_sub', dropna=False)['order_date'].count().rename('tx_n_target').reset_index()
+                    sub_gp = hist.groupby('industry_sub', dropna=False)['gross_profit'].sum().rename('gp_sum').reset_index()
+                    sub_tgp = hist.loc[hist['is_target']].groupby('industry_sub', dropna=False)['gross_profit'].sum().rename('gp_sum_target').reset_index()
+                    sub = sub_tx.merge(sub_ttx, on='industry_sub', how='left').merge(sub_gp, on='industry_sub', how='left').merge(sub_tgp, on='industry_sub', how='left').fillna(0.0)
+                    # Map sub -> dominant parent industry
+                    parents = hist.groupby('industry_sub')['industry'].agg(lambda s: s.value_counts().index[0] if not s.value_counts().empty else None).reset_index().rename(columns={'industry':'parent_industry'})
+                    sub = sub.merge(parents, on='industry_sub', how='left')
+                    sub = sub.merge(ind_enc, left_on='parent_industry', right_on='industry', how='left', suffixes=('','_parent'))
+                    sub['p_tx_parent'] = sub['enc__industry__tx_rate_24m_smooth'].fillna(p_tx_global)
+                    sub['p_gp_parent'] = sub['enc__industry__gp_share_24m_smooth'].fillna(p_gp_global)
+                    sub['enc__industry_sub__tx_rate_24m_smooth'] = (sub['tx_n_target'] + alpha_sub * sub['p_tx_parent']) / (sub['tx_n'] + alpha_sub)
+                    sub['enc__industry_sub__gp_share_24m_smooth'] = (sub['gp_sum_target'] + alpha_sub * sub['p_gp_parent'] * sub['gp_sum']) / (sub['gp_sum'] + alpha_sub)
+                    sub_enc = sub[['industry_sub','enc__industry_sub__tx_rate_24m_smooth','enc__industry_sub__gp_share_24m_smooth']]
+                    # Join encoders onto feature matrix by industry keys
+                    feature_matrix = feature_matrix.join(pl.from_pandas(ind_enc), on='industry', how='left')
+                    feature_matrix = feature_matrix.join(pl.from_pandas(sub_enc), on='industry_sub', how='left')
+            except Exception as e:
+                logger.warning(f"Pooled encoder features failed (non-blocking): {e}")
         else:
             logger.warning("No industry data available for joining.")
             

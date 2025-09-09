@@ -88,6 +88,20 @@ class Features:
     expiring_guard_days: int = 14
     # Floor for recency features to avoid near-cutoff signals (e.g., 14 days)
     recency_floor_days: int = 0
+    # Half-lives (days) for hazard/decay recency transforms (e.g., [30, 90, 180])
+    recency_decay_half_lives_days: list[int] = field(default_factory=lambda: [30, 90, 180])
+    # Offset windows (end at cutoff - offset_days) to decorrelate from boundary
+    enable_offset_windows: bool = True
+    offset_days: list[int] = field(default_factory=lambda: [60])
+    # Window delta features (e.g., 12m vs previous 12m from 24m)
+    enable_window_deltas: bool = True
+    # Affinity (market-basket) embargo days before cutoff for exposure
+    affinity_lag_days: int = 60
+    # Pooled/hierarchical encoders for sparse categories (industry/industry_sub)
+    pooled_encoders_enable: bool = True
+    pooled_encoders_lookback_months: int = 24
+    pooled_alpha_industry: float = 50.0
+    pooled_alpha_sub: float = 50.0
 
 
 @dataclass
@@ -108,6 +122,8 @@ class ModelingConfig:
     class_weight: str = "balanced"  # 'balanced' or 'none'
     use_scale_pos_weight: bool = True
     scale_pos_weight_cap: float = 10.0
+    # Divisions to train in SAFE feature policy (drop adjacency-heavy/short-window families)
+    safe_divisions: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -350,6 +366,15 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
             use_assets=bool(feat_cfg.get("use_assets", True)),
             expiring_guard_days=int(feat_cfg.get("expiring_guard_days", 14)),
             recency_floor_days=int(feat_cfg.get("recency_floor_days", 0)),
+            recency_decay_half_lives_days=list(feat_cfg.get("recency_decay_half_lives_days", [30, 90, 180])),
+            enable_offset_windows=bool(feat_cfg.get("enable_offset_windows", True)),
+            offset_days=list(feat_cfg.get("offset_days", [60])),
+            enable_window_deltas=bool(feat_cfg.get("enable_window_deltas", True)),
+            affinity_lag_days=int(feat_cfg.get("affinity_lag_days", 60)),
+            pooled_encoders_enable=bool(feat_cfg.get("pooled_encoders_enable", True)),
+            pooled_encoders_lookback_months=int(feat_cfg.get("pooled_encoders_lookback_months", 24)),
+            pooled_alpha_industry=float(feat_cfg.get("pooled_alpha_industry", 50.0)),
+            pooled_alpha_sub=float(feat_cfg.get("pooled_alpha_sub", 50.0)),
         ),
         modeling=ModelingConfig(
             seed=int(mdl_cfg.get("seed", 42)),
@@ -364,6 +389,7 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
             class_weight=str(mdl_cfg.get("class_weight", "balanced")),
             use_scale_pos_weight=bool(mdl_cfg.get("use_scale_pos_weight", True)),
             scale_pos_weight_cap=float(mdl_cfg.get("scale_pos_weight_cap", 10.0)),
+            safe_divisions=list(mdl_cfg.get("safe_divisions", [])),
         ),
         whitespace=WhitespaceConfig(
             weights=ws_weights,

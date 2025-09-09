@@ -65,10 +65,19 @@ features:
   # Leakage guards
   expiring_guard_days: 30      # exclude [cutoff, cutoff+30d] from expiring_{30,60,90}d windows
   recency_floor_days: 30       # floor 'days_since_last_*' features to >=30 days
+  recency_decay_half_lives_days: [30, 90, 180]
+  enable_offset_windows: true
+  offset_days: [60]
+  enable_window_deltas: true
+  affinity_lag_days: 60
+  pooled_encoders_enable: true
+  pooled_encoders_lookback_months: 24
+  pooled_alpha_industry: 50.0
+  pooled_alpha_sub: 50.0
 modeling:
   seed: 42
   folds: 3
-  models: [logreg, lgbm]
+  models: [lgbm, logreg]
   lr_grid:
     l1_ratio: [0.0, 0.2, 0.5]
     C: [0.1, 1.0, 10.0]
@@ -86,6 +95,8 @@ modeling:
   class_weight: balanced        # balanced | none
   use_scale_pos_weight: true    # LightGBM scale_pos_weight toggle
   scale_pos_weight_cap: 10.0
+  # Adopt SAFE feature policy for specific divisions (drops adjacency-heavy/short-window families)
+  safe_divisions: ["Solidworks"]
 
 whitespace:
   weights: [0.60, 0.20, 0.10, 0.10]   # [p_icp_pct, lift_norm, als_norm, EV_norm]; non-negative, auto-normalized

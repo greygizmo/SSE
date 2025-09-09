@@ -239,10 +239,13 @@ def _read_csv(path: Path) -> pd.DataFrame:
         df = pd.read_csv(path)
         if df.empty:
             st.info(f"Dataset is empty: {path.name}")
-        return pd.DataFrame()
+            return df
 
         # Basic data validation
-        st.info(f"Loaded {len(df):,} rows, {len(df.columns)} columns from {path.name}")
+        try:
+            st.info(f"Loaded {len(df):,} rows, {len(df.columns)} columns from {path.name}")
+        except Exception:
+            pass
         return df
 
     except FileNotFoundError:
@@ -381,7 +384,7 @@ with st.sidebar:
     # Use radio buttons for navigation
     tab = st.radio(
         "Select Page",
-        ["Overview", "Metrics", "Explainability", "Whitespace", "Validation", "Runs", "Monitoring", "Architecture", "Quality Assurance", "Configuration & Launch"],
+        ["Overview", "Metrics", "Explainability", "Whitespace", "Validation", "Runs", "Monitoring", "Architecture", "Quality Assurance", "Configuration & Launch", "Feature Guide"],
         index=0,
         label_visibility="collapsed",
         help="Choose the dashboard section to view"
@@ -704,16 +707,78 @@ elif tab == "Metrics":
             st.markdown("- Brier: accuracy of predicted probabilities (lower is better). 0.0 means perfectly calibrated.")
             st.markdown("- Gains: average conversion rate within each decile (1=top 10% by score); should generally decrease from decile 1 to 10.")
             st.markdown("- Thresholds: score cutoffs to select top-K% customers; use for capacity planning.")
-        # Model card
+        # Model card + Metrics JSON
         mc_path = OUTPUTS_DIR / f"model_card_{div.lower()}.json"
-        if mc_path.exists():
-            st.subheader("Model Card")
-            st.code(_read_text(mc_path))
-        # Metrics JSON
         mt_path = OUTPUTS_DIR / f"metrics_{div.lower()}.json"
+        mc_payload = None
+        mt_payload = None
         if mt_path.exists():
-            st.subheader("Training Metrics (JSON)")
-            st.code(_read_text(mt_path))
+            try:
+                mt_payload = json.loads(mt_path.read_text(encoding='utf-8'))
+            except Exception:
+                mt_payload = None
+        if mc_path.exists():
+            try:
+                mc_payload = json.loads(mc_path.read_text(encoding='utf-8'))
+            except Exception:
+                mc_payload = None
+
+        # Summary metrics
+        if mt_payload and isinstance(mt_payload, dict):
+            final = mt_payload.get('final', {}) or {}
+            c1, c2, c3, c4 = st.columns(4)
+            with c1:
+                auc = final.get('auc')
+                st.metric('AUC', f"{auc:.3f}" if isinstance(auc, (int,float)) else 'N/A')
+            with c2:
+                pra = final.get('pr_auc')
+                st.metric('PR-AUC', f"{pra:.3f}" if isinstance(pra, (int,float)) else 'N/A')
+            with c3:
+                brier = final.get('brier')
+                st.metric('Brier', f"{brier:.3f}" if isinstance(brier, (int,float)) else 'N/A', delta=None)
+            with c4:
+                cal_mae = final.get('cal_mae')
+                st.metric('Cal MAE', f"{cal_mae:.3f}" if isinstance(cal_mae, (int,float)) else 'N/A', delta=None)
+
+        # Business yield (Top-K) from model card
+        if mc_payload and isinstance(mc_payload, dict):
+            st.subheader('Business Yield (Top-K)')
+            # Calibration method
+            cal = mc_payload.get('calibration', {}) or {}
+            method = cal.get('method') or 'N/A'
+            mae_w = cal.get('mae_weighted')
+            st.caption(f"Calibration: method={method}, weighted MAE={mae_w:.3f}" if isinstance(mae_w, (int,float)) else f"Calibration: method={method}")
+            # Table
+            topk = mc_payload.get('topk') or []
+            try:
+                df_topk = pd.DataFrame(topk)
+                if not df_topk.empty:
+                    # Pretty columns
+                    df_show = df_topk.rename(columns={'k_percent':'K%','pos_rate':'Pos Rate','capture':'Capture'})
+                    st.dataframe(df_show, use_container_width=True)
+                    # Coverage curve: Capture vs K%
+                    import plotly.graph_objects as go
+                    fig = go.Figure()
+                    fig.add_trace(go.Scatter(x=df_topk['k_percent'], y=df_topk['capture'], mode='lines+markers', name='Capture'))
+                    if 'pos_rate' in df_topk.columns:
+                        fig.add_trace(go.Scatter(x=df_topk['k_percent'], y=df_topk['pos_rate'], mode='lines+markers', name='Pos Rate', yaxis='y2'))
+                        fig.update_layout(yaxis2=dict(overlaying='y', side='right', title='Pos Rate'))
+                    fig.update_layout(title='Coverage Curve (Capture vs K)', xaxis_title='K (%)', yaxis_title='Capture')
+                    st.plotly_chart(fig, use_container_width=True)
+            except Exception as e:
+                st.info(f"No Top-K summary available: {e}")
+
+        # Raw JSONs for audit
+        with st.expander('Raw Model Card JSON', expanded=False):
+            if mc_path.exists():
+                st.code(_read_text(mc_path))
+            else:
+                st.info('Model card not found.')
+        with st.expander('Raw Training Metrics JSON', expanded=False):
+            if mt_path.exists():
+                st.code(_read_text(mt_path))
+            else:
+                st.info('Metrics JSON not found.')
         # Enhanced Calibration Plot
         cal_path = OUTPUTS_DIR / f"calibration_{div.lower()}.csv"
         if cal_path.exists():
@@ -1786,6 +1851,86 @@ elif tab == "Quality Assurance":
             st.markdown("**Custom Feature Removal:** Select specific features to remove and test impact.")
             st.info("Feature removal ablation coming soon...")
 
+        # Adjacency Ablation Triad: Results viewer (artifacts browser)
+        st.markdown("---")
+        st.subheader("Adjacency Ablation Triad Results")
+        try:
+            ablation_root = OUTPUTS_DIR / 'ablation' / 'adjacency'
+            if not ablation_root.exists():
+                st.info("No adjacency ablation results found yet.")
+            else:
+                # Discover available divisions and runs
+                divisions_avail = sorted([p.name for p in ablation_root.iterdir() if p.is_dir()])
+                if not divisions_avail:
+                    st.info("No divisions found under ablation/adjacency.")
+                else:
+                    c1, c2 = st.columns([1,2])
+                    with c1:
+                        sel_div = st.selectbox("Division", divisions_avail, key="adjtriad_div")
+                    run_dir = ablation_root / sel_div
+                    runs = sorted([p.name for p in run_dir.iterdir() if p.is_dir()])
+                    if not runs:
+                        st.info("No runs found for the selected division.")
+                    else:
+                        with c2:
+                            sel_run = st.selectbox("Train → Holdout", runs, key="adjtriad_run")
+                        sel_path = run_dir / sel_run
+                        # Locate JSON/CSV
+                        js_files = list(sel_path.glob("adjacency_ablation*.json"))
+                        csv_files = list(sel_path.glob("adjacency_ablation*.csv"))
+                        if not js_files:
+                            st.info("No results file found in the selected run.")
+                        else:
+                            js_path = js_files[0]
+                            try:
+                                payload = json.loads(js_path.read_text(encoding='utf-8'))
+                            except Exception:
+                                payload = {}
+                            # Header metrics
+                            res = payload.get('results', {}) or {}
+                            full_auc = (res.get('full') or {}).get('auc')
+                            safe_auc = (res.get('safe') or {}).get('auc')
+                            delta = None
+                            try:
+                                if full_auc is not None and safe_auc is not None:
+                                    delta = float(full_auc) - float(safe_auc)
+                            except Exception:
+                                delta = None
+                            m1, m2, m3 = st.columns(3)
+                            with m1:
+                                st.metric("Full AUC", f"{full_auc:.4f}" if full_auc is not None else "N/A")
+                            with m2:
+                                st.metric("SAFE AUC", f"{safe_auc:.4f}" if safe_auc is not None else "N/A")
+                            with m3:
+                                st.metric("ΔAUC (Full−SAFE)", f"{delta:+.4f}" if delta is not None else "N/A",
+                                          delta_color="normal")
+                            # Variants table
+                            try:
+                                rows = []
+                                for variant, vals in res.items():
+                                    row = {'variant': variant}
+                                    if isinstance(vals, dict):
+                                        for k, v in vals.items():
+                                            row[k] = v
+                                    rows.append(row)
+                                if rows:
+                                    dfv = pd.DataFrame(rows)
+                                    st.dataframe(dfv)
+                            except Exception:
+                                st.json(res)
+                            # Download links
+                            cdl1, cdl2 = st.columns(2)
+                            with cdl1:
+                                st.download_button("Download JSON", js_path.read_text(encoding='utf-8'),
+                                                   file_name=js_path.name, mime='application/json')
+                            with cdl2:
+                                if csv_files:
+                                    csv_path = csv_files[0]
+                                    st.download_button("Download CSV", csv_path.read_text(encoding='utf-8'),
+                                                       file_name=csv_path.name, mime='text/csv')
+        except Exception as e:
+            st.warning(f"Adjacency ablation results viewer error: {e}")
+
     with qa_tabs[2]:
         st.subheader("📊 Drift Monitoring")
         st.markdown("""
@@ -1979,6 +2124,33 @@ elif tab == "Quality Assurance":
                                 st.markdown(f"JSON: `{js}`")
                             if csv.exists():
                                 st.markdown(f"CSV: `{csv}`")
+                            # Toggle to display table and trend summary
+                            show_tbl = st.checkbox("Show table + trend summary", key=f"preq_tbl_{div_dir.name}_{cut_dir.name}")
+                            if show_tbl and js.exists():
+                                try:
+                                    data = json.loads(js.read_text(encoding='utf-8'))
+                                    results = data.get('results', [])
+                                    if results:
+                                        import pandas as pd
+                                        dfp = pd.DataFrame(results)
+                                        # Display table
+                                        st.dataframe(dfp, use_container_width=True)
+                                        # Trend summary: earliest vs latest non-null
+                                        try:
+                                            dfp = dfp.sort_values('cutoff')
+                                            auc_series = dfp['auc'].dropna()
+                                            lift_series = dfp['lift@10'].dropna()
+                                            auc_delta = None if auc_series.empty else float(auc_series.iloc[-1] - auc_series.iloc[0])
+                                            lift_delta = None if lift_series.empty else float(lift_series.iloc[-1] - lift_series.iloc[0])
+                                            colA, colB = st.columns(2)
+                                            with colA:
+                                                st.metric("ΔAUC (last - first)", f"{auc_delta:+.4f}" if auc_delta is not None else "N/A")
+                                            with colB:
+                                                st.metric("ΔLift@10 (last - first)", f"{lift_delta:+.3f}" if lift_delta is not None else "N/A")
+                                        except Exception:
+                                            pass
+                                except Exception as _e:
+                                    st.write("Unable to render table for prequential JSON.")
             else:
                 st.info("No prequential artifacts found")
         except Exception:
@@ -2393,3 +2565,47 @@ elif tab == "Configuration & Launch":
             uploaded_config = st.file_uploader("📥 Upload Config File", type=["yaml", "yml"])
             if uploaded_config is not None:
                 st.info("Configuration file uploaded. Ready to apply on next pipeline run.")
+
+elif tab == "Feature Guide":
+    st.header("Feature Families & Configuration Guide")
+    st.markdown("Use this guide to understand engineered features and how to tune them via config.")
+
+    with st.expander("Feature Families", expanded=True):
+        st.markdown("""
+        - Recency: `rfm__all|div__recency_days__life`, `log_recency`, and hazard decays `recency_decay__hl{30|90|180}`.
+        - RFM Windows: `rfm__all|div__{tx_n,gp_sum,gp_mean}__{3|6|12|24}m` (audits may mask tail days).
+        - Offset Windows: RFM windows ending at `cutoff - offset_days` (e.g., `__12m_off60d`).
+        - Window Deltas: 12m vs previous 12m from 24m totals (delta and ratio), all and division scope.
+        - Tenure: `lifecycle__all__tenure_days__life`, months and bucket dummies (`lt3m, 3to6m, 6to12m, 1to2y, ge2y`).
+        - Industry/Sub Dummies: top‑N one‑hots `is_<industry>`, `is_sub_<sub>`.
+        - Pooled Encoders (Industry/Sub): smoothed rates `enc__industry__tx_rate_24m_smooth`, `enc__industry_sub__gp_share_24m_smooth` (pre‑cutoff only).
+        - Affinity (Market Basket with lag): `mb_lift_max_lag{N}d`, `mb_lift_mean_lag{N}d`, `affinity__div__lift_topk__12m_lag{N}d` (N = features.affinity_lag_days).
+        - Diversity: SKU/division uniqueness counts (12m).
+        - Dynamics: Monthly slopes/std for GP and TX over last 12m.
+        - Assets: `assets_expiring_{30|60|90}d_*`, `assets_*_subs_share_*` (joined at cutoff).
+        - ALS: `als_f*` customer embeddings if enabled.
+        - SKU Aggregates: `sku_gp_12m_*`, `sku_qty_12m_*`, `sku_gp_per_unit_12m_*`.
+        """)
+
+    with st.expander("Configuration Reference", expanded=True):
+        from gosales.utils.config import load_config
+        cfg = load_config()
+        st.markdown("- Features:")
+        st.json(cfg.to_dict().get('features', {}))
+        st.markdown("- Modeling:")
+        st.json(cfg.to_dict().get('modeling', {}))
+        st.markdown("- Validation:")
+        st.json(cfg.to_dict().get('validation', {}))
+        st.markdown("- ETL:")
+        st.json(cfg.to_dict().get('etl', {}))
+        st.markdown("- Paths/Database (context):")
+        st.json({k: cfg.to_dict().get(k, {}) for k in ['paths','database']})
+
+    with st.expander("Tuning Tips", expanded=False):
+        st.markdown("""
+        - Increase `features.recency_floor_days` to reduce near‑boundary adjacency.
+        - Adjust `features.recency_decay_half_lives_days` to match your sales cycle.
+        - Use `features.offset_days` to move windows away from the cutoff (e.g., 60–90d).
+        - Toggle `pooled_encoders_enable` and tune `pooled_alpha_*` to control shrinkage.
+        - Set `modeling.safe_divisions` for divisions that benefit from SAFE policy.
+        """)
