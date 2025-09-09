@@ -9,7 +9,9 @@ This list merges GPT-5-Pro’s recommendations with our proposed upgrades. Forma
     gosales/outputs/leakage/Printers/2024-12-31/permutation_diag.json
   - Solidworks: baseline_auc 0.5774, perm_mean 0.4948, degradation 0.0826, p≈0.0476
     gosales/outputs/leakage/Solidworks/2024-12-31/permutation_diag.json
-- [ ] [HI] Make Gauntlet PASS reproducible (pin seeds; ensure 0 customer overlap; two runs within tiny deltas; emit overlap CSVs).
+- [x] [HI] Make Gauntlet PASS reproducible (pin seeds; ensure 0 customer overlap; two runs within tiny deltas; emit overlap CSVs).
+  - Printers: PASS (delta_auc=0.0000, delta_lift10=0.0000, overlap=0) — repro_check_Printers_2024-12-31.json
+  - Solidworks: PASS (delta_auc=0.0000, delta_lift10=0.0000, overlap=0) — repro_check_Solidworks_2024-12-31.json
 - [x] [HI] Add Shift-grid sanity to Gauntlet (evaluate {7,14,28,56}; ensure non-improving metrics as we shift earlier).
   - Implemented CLI + artifacts; initial run for {7,14} PASS
     gosales/outputs/leakage/Printers/2024-12-31/shift_grid_Printers_2024-12-31.json
@@ -52,4 +54,3 @@ This list merges GPT-5-Pro’s recommendations with our proposed upgrades. Forma
 - [ ] Permutation: p ≤ 0.01 and meaningful degradation.
 - [ ] Forward-months: gentle decline; no paradoxical early gains.
 - [ ] Rollback toggles documented (disable SAFE/purge/permutation/shift-grid) for forensics only.
-

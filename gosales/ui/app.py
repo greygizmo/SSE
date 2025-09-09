@@ -1546,6 +1546,72 @@ elif tab == "Quality Assurance":
                                 st.error(f"Failed to load results: {e}")
                         else:
                             st.warning("Results file not found")
+                        # Fallback diagnostics and plots (search both dashed and no-dash cutoff dirs)
+                        try:
+                            div_keys = [selected_division, selected_division.lower()]
+                            cut_keys = [selected_cutoff, selected_cutoff.replace('-', '')]
+                            base_dir = None
+                            for dv in div_keys:
+                                for ct in cut_keys:
+                                    p = OUTPUTS_DIR / 'leakage' / dv / ct
+                                    if p.exists():
+                                        base_dir = p
+                                        break
+                                if base_dir is not None:
+                                    break
+                            if base_dir is not None:
+                                diag_summary = base_dir / f"diagnostics_summary_{selected_division}_{base_dir.name}.json"
+                                if diag_summary.exists():
+                                    st.markdown("**Diagnostics Summary**")
+                                    try:
+                                        diag = json.loads(diag_summary.read_text(encoding='utf-8'))
+                                        st.json(diag)
+                                    except Exception:
+                                        st.write("Diagnostics summary present but could not be parsed.")
+                                # Plots
+                                perm_png = base_dir / 'perm_auc_hist.png'
+                                imp_png = base_dir / 'importance_top_mean_abscoef.png'
+                                if perm_png.exists():
+                                    st.image(str(perm_png), caption='Label Permutation AUCs', use_container_width=True)
+                                if imp_png.exists():
+                                    st.image(str(imp_png), caption='Top Mean |Coef| (bootstrapped)', use_container_width=True)
+                                # Shift-grid summary table
+                                grid_json = base_dir / f"shift_grid_{selected_division}_{base_dir.name}.json"
+                                if grid_json.exists():
+                                    st.markdown("**Shift-Grid Summary**")
+                                    try:
+                                        grd = json.loads(grid_json.read_text(encoding='utf-8'))
+                                        rows = []
+                                        for s in grd.get('shifts', []):
+                                            cmp = s.get('comparison', {}) or {}
+                                            try:
+                                                d_auc = (float(cmp.get('auc_shift')) - float(cmp.get('auc_base')))
+                                            except Exception:
+                                                d_auc = None
+                                            try:
+                                                d_l10 = (float(cmp.get('lift10_shift')) - float(cmp.get('lift10_base')))
+                                            except Exception:
+                                                d_l10 = None
+                                            rows.append({
+                                                'days': s.get('days'),
+                                                'auc_base': cmp.get('auc_base'),
+                                                'auc_shift': cmp.get('auc_shift'),
+                                                'Δauc': d_auc,
+                                                'lift10_base': cmp.get('lift10_base'),
+                                                'lift10_shift': cmp.get('lift10_shift'),
+                                                'Δlift10': d_l10,
+                                                'status': s.get('status'),
+                                            })
+                                        if rows:
+                                            try:
+                                                import pandas as pd
+                                                st.table(pd.DataFrame(rows))
+                                            except Exception:
+                                                st.json(rows)
+                                    except Exception:
+                                        pass
+                        except Exception:
+                            pass
 
                     else:
                         st.error("❌ Leakage gauntlet failed!")
@@ -1579,6 +1645,60 @@ elif tab == "Quality Assurance":
                             status_icon = "✅" if status == "PASS" else "❌" if status == "FAIL" else "⚠️"
                             st.write(f"**Status:** {status_icon} {status}")
                             st.json(report)
+                            # Diagnostics summary + plots if present
+                            try:
+                                base_dir = report_path.parent
+                                diag_summary = base_dir / f"diagnostics_summary_{division}_{base_dir.name}.json"
+                                if diag_summary.exists():
+                                    st.markdown("**Diagnostics Summary**")
+                                    try:
+                                        diag = json.loads(diag_summary.read_text(encoding='utf-8'))
+                                        st.json(diag)
+                                    except Exception:
+                                        st.write("Diagnostics summary present but could not be parsed.")
+                                perm_png = base_dir / 'perm_auc_hist.png'
+                                imp_png = base_dir / 'importance_top_mean_abscoef.png'
+                                if perm_png.exists():
+                                    st.image(str(perm_png), caption='Label Permutation AUCs', use_container_width=True)
+                                if imp_png.exists():
+                                    st.image(str(imp_png), caption='Top Mean |Coef| (bootstrapped)', use_container_width=True)
+                                # Shift-grid summary table
+                                grid_json = base_dir / f"shift_grid_{division}_{base_dir.name}.json"
+                                if grid_json.exists():
+                                    st.markdown("**Shift-Grid Summary**")
+                                    try:
+                                        grd = json.loads(grid_json.read_text(encoding='utf-8'))
+                                        rows = []
+                                        for s in grd.get('shifts', []):
+                                            cmp = s.get('comparison', {}) or {}
+                                            try:
+                                                d_auc = (float(cmp.get('auc_shift')) - float(cmp.get('auc_base')))
+                                            except Exception:
+                                                d_auc = None
+                                            try:
+                                                d_l10 = (float(cmp.get('lift10_shift')) - float(cmp.get('lift10_base')))
+                                            except Exception:
+                                                d_l10 = None
+                                            rows.append({
+                                                'days': s.get('days'),
+                                                'auc_base': cmp.get('auc_base'),
+                                                'auc_shift': cmp.get('auc_shift'),
+                                                'Δauc': d_auc,
+                                                'lift10_base': cmp.get('lift10_base'),
+                                                'lift10_shift': cmp.get('lift10_shift'),
+                                                'Δlift10': d_l10,
+                                                'status': s.get('status'),
+                                            })
+                                        if rows:
+                                            try:
+                                                import pandas as pd
+                                                st.table(pd.DataFrame(rows))
+                                            except Exception:
+                                                st.json(rows)
+                                    except Exception:
+                                        pass
+                            except Exception:
+                                pass
                         except Exception as e:
                             st.error(f"Failed to load report: {e}")
             else:
