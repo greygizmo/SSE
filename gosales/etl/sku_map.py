@@ -127,12 +127,19 @@ def get_sku_mapping() -> Dict[str, Dict[str, str]]:
         # Additive Manufacturing ecosystem (predictors for Printers)
         "Post_Processing": {
             "qty_col": "Post_Processing_Qty",
-            "division": "Hardware",
+            "division": "Post_Processing",
             "family": "Hardware",
             "sale_type": "Post_Processing",
         },
         "AM_Software": {
             "qty_col": "AM_Software_Qty",
+            "division": "Hardware",
+            "family": "Hardware",
+            "sale_type": "AM_Software",
+        },
+        # Treat _3DP_Software the same as AM_Software; do not create a new division
+        "_3DP_Software": {
+            "qty_col": "_3DP_Software_Qty",
             "division": "Hardware",
             "family": "Hardware",
             "sale_type": "AM_Software",
@@ -320,6 +327,7 @@ def get_model_targets(model: str) -> Tuple[str, ...]:
     if model == "PDM_Seats":
         return tuple(x for x in ("PDM", "EPDM_CAD_Editor_Seats") if x in m)
     if model == "Printers":
+        # Include generic and current series; obsolete SKUs are aliased to these families in mapping
         printer_keys = (
             "FormLabs",
             "FDM",
@@ -329,8 +337,6 @@ def get_model_targets(model: str) -> Tuple[str, ...]:
             "Metals",
             "Polyjet",
             "Fortus",
-            "uPrint",
-            "_1200_Elite_Fortus250",
         )
         return tuple(x for x in printer_keys if x in m)
     if model == "Services":

@@ -93,3 +93,115 @@ This list merges GPT-5-Proâ€™s recommendations with our proposed upgrades. 
 - [ ] Rollback toggles documented (disable SAFE/purge/permutation/shift-grid) for forensics only.
 
 
+
+
+---
+
+## Addendum — Post–Gauntlet PASS Hardening & Roadmap (2025‑09‑09)
+
+The items below **do not remove or replace** anything above; they extend it with
+the most valuable next steps to make GoSales world‑class and production‑ready. Each
+item is small, testable, and references target files/CLIs.
+
+### A) Gauntlet & CV Hardening (now)
+
+- [ ] **Enforce GroupCV + Purge in all Gauntlet paths**
+  - Patch `gosales/pipeline/run_leakage_gauntlet.py` to pass `--group-cv` and `--purge-days 45` into every internal training call.
+  - Patch `gosales/models/train.py` to default to `group_cv=True` when `--safe-mode` is set and respect `--purge-days` for time‑adjacent splits.
+  - **Artifact:** write `cv_manifest_{division}_{cutoff}.json` with: seed, folds, purge_days, per‑fold customer counts.
+  - **Test:** add `tests/test_phase3_determinism_and_leakage.py::test_gauntlet_uses_groupcv_and_purge` to assert flags are plumbed through.
+
+- [ ] **Shift‑Grid completion and guard**
+  - Run {28, 56} days and append to `shift_grid_*.json`.
+  - Add guard: earlier cutoffs **must not** improve by more than `epsilons` (AUC≤0.01; Lift@10≤0.25). Fail Gauntlet on breach; include offending rows in `leakage_report_*`.
+
+- [ ] **Reproducibility receipts**
+  - Persist `fold_assignments_{division}_{cutoff}.csv` (customer_id → fold) and `random_state` for each estimator.
+  - Add CI check that two Gauntlet runs with same seed hash to identical `shift_grid_*.json`.
+
+### B) SAFE‑Mode Expansion (time‑adjacent risk reduction)
+
+- [ ] **Feature family minimum window**
+  - New config: `features.safe_windows_min_months: 6` (applies when `safe_mode=True`). Drop or swap `{1–3m}` windows for `{6–12m}` in: `rfm__*`, `sku_nunique__*`, `division_share__*`.
+  - Files: `gosales/features/engine.py` (feature registry), `gosales/utils/config.py` (defaults), tests in `tests/test_features.py`.
+
+- [ ] **Recency & expiry lags**
+  - When `safe_mode=True`, drop: `days_since_last_*`, `assets_*_expiring_*`, and any `*_recency_days_*` that look within 30 days of cutoff.
+  - Add lagged proxies instead: 30‑day offset versions of short‑window rates (compute on `[cutoff-90d, cutoff-30d]`).
+
+- [ ] **Adjacency audit**
+  - New CLI: `python -m gosales.pipeline.leakage_diagnostics --division <Div> --cutoff <Date> --mode time_adjacency`
+  - Emits `adjacency_report_{division}_{cutoff}.json` with: top features within 60 days of cutoff, correlation to `order_date`, and SAFE‑drop recommendations.
+
+### C) Forward Validation (Phase‑5) upgrades
+
+- [ ] **Block bootstrap CIs (1,000 reps, by customer)**
+  - Implement in `gosales/validation/forward.py` → `bootstrap_ci` with fixed seed; write CI columns for capture@K, precision@K, rev_capture, realized_GP.
+  - Tests: `tests/test_phase5_scenarios_and_segments.py` expands to check CI determinism across two identical runs.
+
+- [ ] **Scenario ranking policy**
+  - If `cal_mae ≤ threshold`: rank scenarios by **expected GP**; else by **capture@K**. Add to `topk_scenarios_sorted.csv` and `metrics.json`.
+
+- [ ] **Censoring & base‑rate guards**
+  - Flag incomplete holdouts (`censored_flag`); warn on prevalence outside [0.2%, 50%]. Fail “harsh” CI gate when both present.
+
+### D) Business‑grade Whitespace
+
+- [ ] **Bias & diversification**
+  - Post‑ranking diversification when one division exceeds `whitespace.division_share_cap` (config). Emit `diversification_report_{cutoff}.json` and log which candidates were swapped.
+  - Segment fairness table: capture@K by `industry/size/region`. File: `whitespace_metrics_{cutoff}.json`.
+
+- [ ] **ALS/affinity coverage‑aware weights**
+  - Already implemented dynamic weight scaling; add explicit coverage thresholds to the metrics JSON and the UI badges.
+
+- [ ] **Rep capacity modes & hybrid**
+  - Ensure `rank_whitespace.py` supports `per_rep` and `hybrid_segment` (done in tests). Expose config examples in `gosales/docs/OPERATIONS.md`.
+
+### E) Data & Mapping correctness (high leverage)
+
+- [ ] **Adopt CPE & Post_Processing mapping**
+  - Implement SKU/division updates per `docs/Repo review feedback.txt` (CPE, Post_Processing, SW_Plastics, DraftSight rules). Update `etl/sku_map.py` and `etl/build_star.py`.
+  - Tests: extend `tests/test_sku_map.py` and add ETL smoke tests to ensure division counts/GP match expectations.
+
+- [ ] **Contracts & schema gates**
+  - Add Pandera‑style checks for `fact_transactions` and `dim_customer` to catch type drifts and date bounds before features.
+
+### F) Model Cards & Governance
+
+- [ ] **Complete model cards**
+  - Include: Gauntlet status (shift‑14/grid), permutation p‑value, SAFE status, CV settings (folds, purge_days), calibration metrics, top‑K tables, links to artifacts.
+  - File: `gosales/models/train.py` (writer), rendered in UI.
+
+- [ ] **Run registry / manifest**
+  - Ensure every pipeline invocation writes `outputs/runs/<run_id>/{manifest.json, config_resolved.yaml, logs.jsonl}`
+  - Add `whitespace_metrics_{cutoff}.json` checksum & run_id for determinism tracking.
+
+### G) Reporting & UI polish
+
+- [ ] **Leakage dashboard**
+  - New UI section to render: Gauntlet results (shift‑grid table & plots), permutation histogram, feature stability chart. Link back to artifacts.
+
+- [ ] **Validation badges**
+  - Surface Cal‑MAE, PSI(EV vs GP), KS(train vs holdout) with thresholds in config. Already partially implemented; wire to `validation/forward` outputs.
+
+### H) Hygiene & Docs
+
+- [ ] **Encoding cleanup**
+  - Normalize smart quotes/dashes in this file and docs (UTF‑8). Add a pre‑commit hook to fix mojibake automatically.
+
+- [ ] **End‑to‑end smoke on sample DB**
+  - Add `scripts/smoke_run.ps1` to train → score → rank → validate on a small slice and verify artifacts presence + schema with one command.
+
+---
+
+### Acceptance Add‑Ons
+
+- [ ] **Shift‑Grid:** For each division, the metric curves **monotonically degrade** as the shift increases; any violation < eps becomes a **warning**, ≥ eps a **failure**.
+- [ ] **Forward Validation:** All metrics reported with 95% CIs; CI widths shrink with increased positives vs prior run.
+- [ ] **Governance:** Model card present for each division with Gauntlet & CV details; UI badges OK.
+
+### Rollback Safety
+
+- [ ] One‑flag revert for SAFE mode (`features.safe_mode=false`) and for purge CV (`--purge-days 0`), documented in `docs/OPERATIONS.md`.
+- [ ] Snapshot copy of the last known‑good artifacts (run registry) with quick restore instructions.
+
