@@ -327,7 +327,8 @@ def get_model_targets(model: str) -> Tuple[str, ...]:
     if model == "PDM_Seats":
         return tuple(x for x in ("PDM", "EPDM_CAD_Editor_Seats") if x in m)
     if model == "Printers":
-        # Include generic and current series; obsolete SKUs are aliased to these families in mapping
+        # Include series/brands used in current and legacy naming that still roll up in data.
+        # Consumables and Post_Processing are predictors, not positives, so they are intentionally excluded.
         printer_keys = (
             "FormLabs",
             "FDM",
@@ -337,6 +338,8 @@ def get_model_targets(model: str) -> Tuple[str, ...]:
             "Metals",
             "Polyjet",
             "Fortus",
+            "uPrint",
+            "_1200_Elite_Fortus250",
         )
         return tuple(x for x in printer_keys if x in m)
     if model == "Services":
