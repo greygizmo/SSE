@@ -1443,7 +1443,7 @@ elif tab == "Quality Assurance":
     Run automated tests to ensure pipeline reliability and prevent data leakage issues.
     """)
 
-    qa_tabs = st.tabs(["🔍 Leakage Gauntlet", "⚖️ Ablation Testing", "📊 Drift Monitoring", "🔧 QA Scripts", "📋 Documentation"])
+    qa_tabs = st.tabs(["🔍 Leakage Gauntlet", "⚖️ Ablation Testing", "📊 Drift Monitoring", "🔧 QA Scripts", "📋 Documentation", "?? Prequential"])
 
     with qa_tabs[0]:
         st.subheader("🔍 Leakage Gauntlet")
@@ -1915,6 +1915,74 @@ elif tab == "Quality Assurance":
                 st.markdown(content)
             else:
                 st.error(f"Documentation file not found: {doc_path}")
+
+    # Prequential evaluation tab
+    with qa_tabs[5]:
+        st.subheader("📈 Prequential Evaluation")
+        st.markdown("""
+        Train (or reuse) a model at a fixed cutoff and evaluate month-by-month forward performance.
+        Curves reflect AUC, Lift@10, and Brier over time. Evaluation months are clamped to ensure labels are fully observable
+        (cutoff + window_months ≤ today).
+        """)
+
+        col1, col2 = st.columns([1,1])
+        with col1:
+            divisions = _discover_divisions()
+            preq_div = st.selectbox("Division", divisions, key="preq_div")
+            preq_train = st.text_input("Train Cutoff (YYYY-MM-DD)", value="2024-06-30", key="preq_train")
+            preq_win = st.slider("Prediction Window (months)", 3, 12, 6, key="preq_win")
+        with col2:
+            preq_start = st.text_input("Start Month (YYYY-MM)", value="2025-01", key="preq_start")
+            preq_end = st.text_input("End Month (YYYY-MM)", value="2025-12", key="preq_end")
+            preq_k = st.slider("K for Lift@K", 5, 20, 10, key="preq_k")
+
+        if st.button("Run Prequential Evaluation", type="primary"):
+            with st.spinner("Running prequential evaluation..."):
+                try:
+                    cmd = [
+                        sys.executable, "-m", "gosales.pipeline.prequential_eval",
+                        "--division", preq_div,
+                        "--train-cutoff", preq_train,
+                        "--start", preq_start,
+                        "--end", preq_end,
+                        "--window-months", str(preq_win),
+                        "--k-percent", str(preq_k),
+                    ]
+                    result = subprocess.run(cmd, capture_output=True, text=True, cwd=Path.cwd())
+                    if result.returncode == 0:
+                        st.success("Prequential evaluation complete!")
+                    else:
+                        st.error("Prequential evaluation failed")
+                        st.code(result.stderr)
+                except Exception as e:
+                    st.error(f"Failed to run prequential evaluation: {e}")
+
+        # Display existing prequential artifacts
+        try:
+            base = OUTPUTS_DIR / 'prequential'
+            if base.exists():
+                st.markdown("---")
+                st.subheader("Recent Prequential Artifacts")
+                for div_dir in base.iterdir():
+                    if not div_dir.is_dir():
+                        continue
+                    for cut_dir in sorted(div_dir.iterdir()):
+                        if not cut_dir.is_dir():
+                            continue
+                        with st.expander(f"{div_dir.name} @ {cut_dir.name}"):
+                            png = cut_dir / f"prequential_curves_{div_dir.name}_{cut_dir.name}.png"
+                            js = cut_dir / f"prequential_{div_dir.name}_{cut_dir.name}.json"
+                            csv = cut_dir / f"prequential_{div_dir.name}_{cut_dir.name}.csv"
+                            if png.exists():
+                                st.image(str(png), caption="Prequential Curves", use_container_width=True)
+                            if js.exists():
+                                st.markdown(f"JSON: `{js}`")
+                            if csv.exists():
+                                st.markdown(f"CSV: `{csv}`")
+            else:
+                st.info("No prequential artifacts found")
+        except Exception:
+            pass
 
 elif tab == "Configuration & Launch":
     st.header("⚙️ Configuration & Launch Center")
