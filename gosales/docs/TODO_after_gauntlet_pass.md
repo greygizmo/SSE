@@ -16,11 +16,15 @@ This list merges GPT-5-Pro’s recommendations with our proposed upgrades. Forma
   - Implemented CLI + artifacts; initial run for {7,14} PASS
     gosales/outputs/leakage/Printers/2024-12-31/shift_grid_Printers_2024-12-31.json
   - Pending: execute {28,56} and add to summary
-- [ ] [HI] Attach diagnostics to Gauntlet report and UI (include permutation/stability artifacts; surface PASS/FAIL gates + links).
+- [x] [HI] Attach diagnostics to Gauntlet report and UI (include permutation/stability artifacts; surface PASS/FAIL gates + links).
+  - Gauntlet report now includes diagnostics_summary_* when artifacts exist.
+  - UI panel renders diagnostics summary JSON and plots; adds Shift-Grid summary table.
 
 ## Prove Horizon-Robust Accuracy (1–2 weeks)
 
-- [ ] Prequential forward-month evaluation (freeze at 2024-06-30; score monthly through 2025; plots for AUC, lift@K, Brier vs horizon).
+- [x] Prequential forward-month evaluation (freeze at 2024-06-30; score monthly through 2025; plots for AUC, lift@K, Brier vs horizon).
+  - Implemented: `python -m gosales.pipeline.prequential_eval --division <Div> --train-cutoff 2024-06-30 --start 2025-01 --end 2025-12 --window-months 6`
+  - Artifacts under `gosales/outputs/prequential/<division>/<train_cutoff>/`: JSON, CSV, and curves PNG.
 - [ ] Adjacency ablation triad (Full vs No-recency/short-windows vs SAFE under GroupCV+purge; require Full≈SAFE on far-month holdouts).
 - [ ] Calibration & business yield reporting (Platt/Isotonic metrics, top-K yield, coverage curves; include in model cards).
 
