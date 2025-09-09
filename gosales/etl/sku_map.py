@@ -358,6 +358,8 @@ def get_model_targets(model: str) -> Tuple[str, ...]:
         return tuple(x for x in ("SW_Electrical",) if x in m)
     if model == "SW_Inspection":
         return tuple(x for x in ("SW_Inspection",) if x in m)
+    if model == "Post_Processing":
+        return tuple(x for x in ("Post_Processing",) if x in m)
     return tuple()
 
 
