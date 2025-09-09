@@ -47,6 +47,8 @@ graph TB
     subgraph "Model Evaluation"
         EvaluateOnValidationSet[Evaluate on Validation Set<br/>Holdout Performance]
         CalculatePerformanceMetrics[Calculate Performance Metrics<br/>Comprehensive Metrics]
+        SelectCalibrationMethod[Select Calibration Method<br/>Platt vs Isotonic]
+        WriteCalibrationArtifacts[Write Calibration Artifacts<br/>calibration_<div>.csv/png]
         GenerateConfusionMatrix[Generate Confusion Matrix<br/>Classification Performance]
         CreateROCPlots[Create ROC/PR Curves<br/>Threshold Analysis]
         AssessModelStability[Assess Model Stability<br/>Cross-validation Variance]
@@ -129,7 +131,9 @@ graph TB
 
     GenerateFeatureImportance --> EvaluateOnValidationSet
     EvaluateOnValidationSet --> CalculatePerformanceMetrics
-    CalculatePerformanceMetrics --> GenerateConfusionMatrix
+    CalculatePerformanceMetrics --> SelectCalibrationMethod
+    SelectCalibrationMethod --> WriteCalibrationArtifacts
+    WriteCalibrationArtifacts --> GenerateConfusionMatrix
     GenerateConfusionMatrix --> CreateROCPlots
     CreateROCPlots --> AssessModelStability
 
@@ -196,7 +200,7 @@ graph TB
     class LoadFeatureMatrix,LoadTargetLabels,SplitTrainValidation,ApplyFeatureScaling,HandleClassImbalance data
     class SelectModelArchitecture,ConfigureHyperparameters,SetupCrossValidation,DefineEvaluationMetrics,ConfigureEarlyStopping config
     class TrainInitialModel,PerformCrossValidation,OptimizeModelParameters,TrainFinalModel,GenerateFeatureImportance training
-    class EvaluateOnValidationSet,CalculatePerformanceMetrics,GenerateConfusionMatrix,CreateROCPlots,AssessModelStability evaluation
+    class EvaluateOnValidationSet,CalculatePerformanceMetrics,SelectCalibrationMethod,WriteCalibrationArtifacts,GenerateConfusionMatrix,CreateROCPlots,AssessModelStability evaluation
     class PerformHoldoutValidation,ValidateBusinessMetrics,CheckModelFairness,AssessModelRobustness,GenerateValidationReport validation
     class SaveModelArtifacts,CreateModelMetadata,GenerateModelCard,PackageModelFiles,CreateDeploymentManifest packaging
     class LogModelParameters,LogPerformanceMetrics,LogFeatureImportance,LogModelArtifacts,CreateModelVersion,RegisterModel mlflow
