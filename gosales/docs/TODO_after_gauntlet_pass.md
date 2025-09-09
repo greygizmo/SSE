@@ -65,7 +65,10 @@ This list merges GPT-5-Proâ€™s recommendations with our proposed upgrades. 
 - [x] Sparse divisions (hierarchical/pooled encoders for niche industries).
   - Added pooled/hierarchical encoders for industry and industry_sub: pre-cutoff transaction rates and GP shares smoothed with priors (global and parent-industry). Configurable via features.pooled_encoders_*.
 - [ ] Model class exploration (GBDT with monotonic constraints on known monotone features; keep LR baseline).
-- [ ] Calibration stability (per-division choice Platt vs Isotonic; persist curves).
+- [x] Calibration stability (per-division choice Platt vs Isotonic; persist curves).
+  - Final calibration method now chosen per-division by volume: if positives >= modeling.sparse_isotonic_threshold_pos → Isotonic; else Platt (sigmoid). Falls back to available methods.
+  - Training still evaluates both on validation (Brier); model card records method + cal_MAE.
+  - Artifacts: calibration_<div>.csv (bins) and calibration_plot_<div>.png (curve) written to outputs.
 
 ## Whitespace Improvements
 

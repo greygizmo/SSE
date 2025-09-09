@@ -1,4 +1,4 @@
-# Feature Families and Configuration Guide
+﻿# Feature Families and Configuration Guide
 
 This document summarizes the engineered feature families used by GoSales and how to control them via configuration.
 
@@ -77,4 +77,5 @@ All options live in `gosales/config.yaml`. Key entries:
   - `gauntlet_*`: e.g., mask tail days, purge days, label buffer
   - thresholds: `shift14_epsilon_*`, `ablation_epsilon_*`
 
-See the UI “Feature Guide” tab for a rendered view of the current configuration.
+See the UI â€œFeature Guideâ€ tab for a rendered view of the current configuration.
+

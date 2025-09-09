@@ -577,14 +577,21 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
         except Exception:
             pass
     # Minimal: refit winner without hyper search for brevity (could repeat best params)
-    # Choose calibration method that minimized Brier during validation search
+    # Choose calibration method per-division based on volume (stability heuristic)
+    # If positives >= sparse_isotonic_threshold_pos -> prefer isotonic; else Platt (sigmoid)
     final_cal_method = None
     try:
-        # Prefer the best method from the per-model grid we already computed
-        # Fallback to isotonic if available in config
+        pos_final = int(np.sum(y_final))
+        thr = int(getattr(getattr(cfg, 'modeling', object()), 'sparse_isotonic_threshold_pos', 1000) or 1000)
         avail = set([m for m in cal_methods])
-        prefer = 'isotonic' if 'isotonic' in avail else ('sigmoid' if 'platt' in avail else 'sigmoid')
-        final_cal_method = prefer
+        if pos_final >= thr and 'isotonic' in avail:
+            final_cal_method = 'isotonic'
+        elif 'platt' in avail or 'sigmoid' in avail:
+            final_cal_method = 'sigmoid'
+        elif 'isotonic' in avail:
+            final_cal_method = 'isotonic'
+        else:
+            final_cal_method = 'sigmoid'
     except Exception:
         final_cal_method = 'sigmoid'
 
@@ -681,13 +688,32 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
         gains.to_csv(gains_path, index=False)
         artifacts[gains_path.name] = str(gains_path)
 
-        # Calibration bins & MAE
+        # Calibration bins & MAE (and plot)
         try:
             calib = calibration_bins(y_final, p_final, n_bins=10)
             calib_path = OUTPUTS_DIR / f"calibration_{division.lower()}.csv"
             calib.to_csv(calib_path, index=False)
             artifacts[calib_path.name] = str(calib_path)
             cal_mae = calibration_mae(calib, weighted=True)
+            # Also emit a PNG plot for quick viewing
+            try:
+                import matplotlib.pyplot as plt
+                fig, ax = plt.subplots(figsize=(6, 4))
+                x = calib['mean_predicted'].values
+                y = calib['fraction_positives'].values
+                ax.plot([0,1], [0,1], linestyle='--', color='#2ca02c', label='Perfect')
+                ax.plot(x, y, marker='o', color='#1f77b4', label='Observed')
+                ax.set_xlabel('Predicted probability')
+                ax.set_ylabel('Observed rate')
+                ax.set_title(f'Calibration Curve - {division} (@ {last_cut})')
+                ax.legend(loc='best')
+                fig.tight_layout()
+                png_path = OUTPUTS_DIR / f"calibration_plot_{division.lower()}.png"
+                fig.savefig(png_path)
+                plt.close(fig)
+                artifacts[png_path.name] = str(png_path)
+            except Exception:
+                pass
         except Exception:
             cal_mae = None
 
