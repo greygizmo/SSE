@@ -69,6 +69,13 @@ graph TB
         FlagAnomalies[Flag Anomalies & Issues<br/>Alert Generation]
     end
 
+    %% Horizon & Adjacency Analysis
+    subgraph "Horizon & Adjacency Analysis"
+        RunPrequential[Run Prequential Evaluation<br/>prequential_eval.py]
+        RunAdjacencyAbl[Run Adjacency Ablation Triad<br/>adjacency_ablation.py]
+        ApplyAutoSAFE[Apply Auto‑SAFE Policy<br/>auto_safe_from_ablation.py]
+    end
+
     %% Customer-Specific Scoring Phase
     subgraph "Customer-Specific Processing"
         LoadCustomerData[Load Customer Data<br/>Individual Customer]
@@ -137,6 +144,9 @@ graph TB
     UpdateOutputMetadata --> ArchivePreviousResults
 
     ArchivePreviousResults --> ValidateOutputSchema
+    ArchivePreviousResults --> RunPrequential
+    RunPrequential --> GeneratePerformanceReports
+    RunAdjacencyAbl --> ApplyAutoSAFE
     ValidateOutputSchema --> PerformStatisticalValidation
     PerformStatisticalValidation --> CheckBusinessLogic
     CheckBusinessLogic --> GenerateQualityReport

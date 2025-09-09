@@ -140,6 +140,7 @@ graph TB
     CompareWithBaseline --> GenerateHoldoutReport
 
     GenerateHoldoutReport --> ExecuteDecilesAnalysis
+    GenerateHoldoutReport --> PrequentialEval
     ExecuteDecilesAnalysis --> SortPredictionsByScore
     SortPredictionsByScore --> CreateDecileBuckets
     CreateDecileBuckets --> CalculateDecileMetrics
@@ -174,6 +175,10 @@ graph TB
     ValidateConcurrency --> GeneratePerformanceReport
 
     GeneratePerformanceReport --> ExecuteCIGate
+    PrequentialEval --> ExecuteCIGate
+    PermutationTest --> ExecuteCIGate
+    ShiftGridTest --> ExecuteCIGate
+    AdjacencyGate --> ExecuteCIGate
     ExecuteCIGate --> CheckAllValidationResults
     CheckAllValidationResults --> ValidateQualityThresholds
     ValidateQualityThresholds --> GenerateFinalReport
@@ -206,6 +211,7 @@ graph TB
     classDef integration fill:#f9fbe7,stroke:#689f38,stroke-width:2px
     classDef performance fill:#ffebee,stroke:#d32f2f,stroke-width:2px
     classDef ci fill:#e0f2f1,stroke:#00695c,stroke-width:2px
+    classDef horizon fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px
     classDef success fill:#c8e6c9,stroke:#2e7d32,stroke-width:3px
     classDef failure fill:#ffcdd2,stroke:#c62828,stroke-width:3px
 
@@ -216,8 +222,16 @@ graph TB
     class ExecuteDecilesAnalysis,SortPredictionsByScore,CreateDecileBuckets,CalculateDecileMetrics,AnalyzeDecileTrends,GenerateDecilePlots,CreateDecileReport deciles
     class ValidateBusinessRules,CheckScoringThresholds,ValidateCustomerFilters,AssessBusinessImpact,GenerateBusinessReport business
     class PerformDistributionTests,CheckFeatureStability,ValidateModelCalibration,AssessPredictionVariance,GenerateStatisticalReport statistical
+    %% Horizon Evaluation & Adjacency Gates
+    subgraph "Horizon Evaluation & Adjacency Gates"
+        PrequentialEval[Prequential Evaluation<br/>AUC/Lift/Brier by month]
+        PermutationTest[Permutation Test<br/>p‑value]
+        ShiftGridTest[Shift‑Grid {7,14,28,56}<br/>non‑improving]
+        AdjacencyGate[Adjacency Ablation Gate<br/>Full ≥ SAFE or SAFE policy]
+    end
     class TestETLIntegration,TestFeatureIntegration,TestModelIntegration,TestAPIIntegration,ValidateSystemIntegration,GenerateIntegrationReport integration
     class ExecutePerformanceTests,MeasureExecutionTime,MonitorResourceUsage,TestScalability,ValidateConcurrency,GeneratePerformanceReport performance
+    class PrequentialEval,PermutationTest,ShiftGridTest,AdjacencyGate horizon
     class ExecuteCIGate,CheckAllValidationResults,ValidateQualityThresholds,GenerateFinalReport,DetermineBuildStatus,SendNotification ci
     class Success success
     class Failure failure

@@ -1,8 +1,8 @@
-# GoSales Engine Architecture Documentation
+﻿# GoSales Engine Architecture Documentation
 
 This directory contains comprehensive Mermaid diagrams documenting every phase of the GoSales Engine repository architecture. These diagrams provide detailed insights into the system's components, data flows, and interactions.
 
-## 📋 Diagram Overview
+## ðŸ“‹ Diagram Overview
 
 ### 1. Overall Architecture (`01_overall_architecture.mmd`)
 **Purpose:** High-level overview of the entire GoSales Engine system
@@ -74,7 +74,7 @@ This directory contains comprehensive Mermaid diagrams documenting every phase o
 **Purpose:** Complete pipeline execution flow
 **Orchestration Components:**
 - Pipeline initialization and configuration
-- Sequential phase execution (ETL → Features → Training → Validation)
+- Sequential phase execution (ETL â†’ Features â†’ Training â†’ Validation)
 - Customer-specific scoring
 - Whitespace analysis
 - Results processing and storage
@@ -139,7 +139,7 @@ This directory contains comprehensive Mermaid diagrams documenting every phase o
 - Customer recommendation workflow
 - Automated scheduling and alerting
 
-## 🎯 How to Use These Diagrams
+## ðŸŽ¯ How to Use These Diagrams
 
 ### Viewing Diagrams
 1. **GitHub:** Diagrams render automatically when viewing `.mmd` files
@@ -154,15 +154,15 @@ This directory contains comprehensive Mermaid diagrams documenting every phase o
 5. **End States:** Green boxes show success, red show failure
 
 ### Color Coding
-- 🔵 **Setup/Initialization:** Light blue
-- 🟣 **Data Processing:** Purple
-- 🟢 **Success States:** Green
-- 🔴 **Error States:** Red
-- 🟠 **Processing Steps:** Orange
-- 🩷 **UI/Dashboard:** Pink
-- 🩶 **Storage/Output:** Gray
+- ðŸ”µ **Setup/Initialization:** Light blue
+- ðŸŸ£ **Data Processing:** Purple
+- ðŸŸ¢ **Success States:** Green
+- ðŸ”´ **Error States:** Red
+- ðŸŸ  **Processing Steps:** Orange
+- ðŸ©· **UI/Dashboard:** Pink
+- ðŸ©¶ **Storage/Output:** Gray
 
-## 🔧 Key Architecture Principles
+## ðŸ”§ Key Architecture Principles
 
 ### 1. Modular Design
 - Each phase is independently executable
@@ -189,25 +189,25 @@ This directory contains comprehensive Mermaid diagrams documenting every phase o
 - Comprehensive logging
 - CI/CD integration with quality gates
 
-## 🚀 Pipeline Execution Flow
+## ðŸš€ Pipeline Execution Flow
 
 ```
 Raw Data (Azure SQL)
-    ↓
+    â†“
 ETL Process (ingest.py, cleaners.py, build_star.py)
-    ↓
+    â†“
 Feature Engineering (engine.py, als_embed.py)
-    ↓
+    â†“
 Model Training (train_division_model.py)
-    ↓
+    â†“
 Validation (data_validator.py, validate_holdout.py)
-    ↓
+    â†“
 Scoring & Analysis (score_all.py, score_customers.py)
-    ↓
+    â†“
 Dashboard & Monitoring (app.py, pipeline_monitor.py)
 ```
 
-## 📊 Monitoring Dashboard Features
+## ðŸ“Š Monitoring Dashboard Features
 
 - **Pipeline Health:** Real-time status and metrics
 - **Data Quality:** Type consistency and completeness scores
@@ -216,16 +216,16 @@ Dashboard & Monitoring (app.py, pipeline_monitor.py)
 - **Data Lineage:** Complete audit trail of data transformations
 - **Configuration:** System settings and version tracking
 
-## 🔍 Key Integration Points
+## ðŸ” Key Integration Points
 
-- **Database:** Azure SQL (source) → SQLite (curated)
+- **Database:** Azure SQL (source) â†’ SQLite (curated)
 - **Models:** LightGBM with MLflow tracking
 - **Monitoring:** psutil for system metrics (with fallback)
 - **UI:** Streamlit with real-time data updates
 - **CI/CD:** GitHub Actions with quality gates
 - **Storage:** Local file system with structured outputs
 
-## 📝 Contributing
+## ðŸ“ Contributing
 
 When making architecture changes:
 1. Update relevant diagrams
@@ -234,7 +234,7 @@ When making architecture changes:
 4. Document new integration points
 5. Update this README with changes
 
-## 🏗️ Architecture Evolution
+## ðŸ—ï¸ Architecture Evolution
 
 This documentation reflects the current state of the GoSales Engine architecture. As the system evolves:
 - New diagrams will be added for new features
@@ -245,3 +245,28 @@ This documentation reflects the current state of the GoSales Engine architecture
 ---
 
 *These diagrams were generated to provide complete transparency into the GoSales Engine architecture, supporting development, debugging, and knowledge sharing across the team.*
+
+## Recent Enhancements (2025-09)
+
+- Feature Engineering
+  - Cycle-aware recency transforms (log, hazard decays)
+  - Offset windows (e.g., 12m ending cutoff−60d) and 12m vs previous 12m deltas
+  - Hierarchical/pooled encoders for industry and sub-industry (non-leaky; pre-cutoff)
+  - Lagged market‑basket affinity features with ≥60d embargo
+
+- Training & Evaluation
+  - Per-division SAFE policy in training; selection by lift@K + Brier
+  - Model cards include top‑K yield summaries and calibration method/MAE
+  - Prequential forward‑month evaluation (AUC, Lift@10, Brier) with label observability clamp
+
+- Validation & CI Gates
+  - Permutation test (train‑only shuffle within time buckets) with p‑value
+  - Shift‑grid {7,14,28,56} non‑improving check
+  - Adjacency Ablation Gate (Full ≥ SAFE or adopt SAFE) integrated into ci_gate
+  - Auto‑SAFE helper updates modeling.safe_divisions from ablation artifacts
+
+- UI
+  - Feature Guide tab (feature families + configuration + tuning tips)
+  - Business Yield (Top‑K) table and coverage curve in Metrics
+  - Prequential and Adjacency Ablation result viewers in QA
+

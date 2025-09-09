@@ -22,24 +22,31 @@ graph TB
 
         subgraph "Feature Engineering Phase"
             FeatureBuild[Feature Engineering<br/>engine.py]
+            CycleAware[Cycle-aware Recency<br/>log + hazard decays]
+            OffsetsDeltas[Offset Windows + Deltas<br/>cutoff−60d, 12m vs prev12m]
+            PooledEnc[Hierarchical/Pooled Encoders<br/>industry/sub (non-leaky)]
+            AffinityLag[Lagged Affinity (Market Basket)<br/>embargo ≥60d]
             ALSEmbedding[ALS Embedding<br/>als_embed.py]
             LabelGen[Label Generation<br/>targets.py]
             CacheSystem[Feature Caching<br/>cache.py]
         end
 
         subgraph "Model Training Phase"
-            TrainDivision[Division Training<br/>train_division_model.py]
-            ModelArtifacts[Model Artifacts<br/>model.pkl, MLmodel]
-            Metrics[Model Metrics<br/>metrics.py]
-            NewModels[New ML Models<br/>camworks, pdm_seats,<br/>printers, scanning,<br/>simulation]
+            TrainDivision[Division Training<br/>train.py (SAFE per-division)]
+            Calibration[Calibration<br/>Platt/Isotonic]
+            ModelCard[Model Card<br/>top‑K yield, calibration]
+            ModelArtifacts[Model Artifacts<br/>model.pkl, feature_list]
+            Metrics[Model Metrics<br/>metrics.json, gains, thresholds]
         end
 
         subgraph "Pipeline Orchestration"
             ScoreAll[Full Pipeline Runner<br/>score_all.py]
             ScoreCustomers[Customer Scoring<br/>score_customers.py]
             LabelAudit[Label Auditing<br/>label_audit.py]
+            Prequential[Prequential Evaluation<br/>prequential_eval.py]
             LeakageGauntlet[Leakage Gauntlet<br/>run_leakage_gauntlet.py]
-            AblationTesting[Ablation Testing<br/>ablation_assets_off.py]
+            AdjacencyAbl[Adjacency Ablation Triad<br/>adjacency_ablation.py]
+            AutoSAFE[Auto‑SAFE From Ablation<br/>auto_safe_from_ablation.py]
         end
     end
 
@@ -49,10 +56,11 @@ graph TB
         SchemaValidation[Schema Validation<br/>schema.py]
         HoldoutValidation[Holdout Testing<br/>validate_holdout.py]
         DecilesValidation[Deciles Analysis<br/>deciles.py]
+        PreqReports[Prequential Reports<br/>AUC/Lift/Brier curves]
+        Permutation[Permutation Test<br/>p‑value]
+        ShiftGrid[Shift‑Grid {7,14,28,56}<br/>non‑improving]
+        AdjGate[Adjacency Ablation Gate<br/>Full ≥ SAFE or SAFE policy]
         CIGate[CI Gate<br/>ci_gate.py]
-        LeakageChecks[Leakage Detection<br/>static_scan.py]
-        FeatureAudit[Feature Date Audit<br/>feature_date_audit.py]
-        ShiftTesting[Shift Testing<br/>shift14_check.py]
     end
 
     %% Monitoring & Observability
@@ -66,14 +74,16 @@ graph TB
     %% User Interface
     subgraph "User Interface"
         StreamlitApp[Streamlit Dashboard<br/>app.py]
-        APIGateways[API Endpoints<br/>utils.py]
-        ReportGeneration[Report Generation]
+        FeatureGuide[Feature Guide<br/>families + config]
+        BusinessYield[Business Yield (Top‑K)<br/>table + coverage]
+        PreqPanel[Prequential Viewer<br/>curves + table]
+        AblationPanel[Adjacency Ablation Viewer]
     end
 
     %% Storage Layer
     subgraph "Data Storage"
         SQLite[(SQLite<br/>Curated Database)]
-        Outputs[(Output Files<br/>CSV, JSON, PBIX)]
+        Outputs[(Output Files<br/>metrics, gains, thresholds,<br/>prequential, ablation)]
         Logs[(Log Files<br/>Pipeline Logs)]
     end
 
@@ -87,25 +97,36 @@ graph TB
 
     SQLite --> FeatureBuild
     SQLite --> LabelGen
+    FeatureBuild --> CycleAware
+    FeatureBuild --> OffsetsDeltas
+    FeatureBuild --> PooledEnc
+    FeatureBuild --> AffinityLag
     FeatureBuild --> ALSEmbedding
     ALSEmbedding --> CacheSystem
 
     CacheSystem --> TrainDivision
     LabelGen --> TrainDivision
-    TrainDivision --> ModelArtifacts
+    TrainDivision --> Calibration
+    Calibration --> ModelArtifacts
+    Calibration --> ModelCard
     TrainDivision --> Metrics
 
     ModelArtifacts --> ScoreAll
     Metrics --> ScoreAll
     ScoreAll --> ScoreCustomers
+    ScoreAll --> Prequential
     ScoreCustomers --> LabelAudit
+    AdjacencyAbl --> AutoSAFE
 
     SQLite --> DataValidation
     ModelArtifacts --> DataValidation
     DataValidation --> SchemaValidation
     SchemaValidation --> HoldoutValidation
     HoldoutValidation --> DecilesValidation
-    DecilesValidation --> CIGate
+    PreqReports --> CIGate
+    Permutation --> CIGate
+    ShiftGrid --> CIGate
+    AdjGate --> CIGate
 
     ScoreAll --> PipelineMonitor
     ScoreCustomers --> PipelineMonitor
@@ -117,8 +138,13 @@ graph TB
     ScoreAll --> StreamlitApp
     ScoreCustomers --> StreamlitApp
     ModelArtifacts --> StreamlitApp
+    ModelCard --> StreamlitApp
     DataCollector --> StreamlitApp
     Metrics --> StreamlitApp
+    PreqReports --> StreamlitApp
+    AdjacencyAbl --> StreamlitApp
+    FeatureGuide --> StreamlitApp
+    BusinessYield --> StreamlitApp
 
     StreamlitApp --> Outputs
     StreamlitApp --> Logs
