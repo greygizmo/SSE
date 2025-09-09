@@ -270,3 +270,14 @@ This documentation reflects the current state of the GoSales Engine architecture
   - Business Yield (Top‑K) table and coverage curve in Metrics
   - Prequential and Adjacency Ablation result viewers in QA
 
+
+
+### 11. Prequential Evaluation (11_prequential_evaluation.mmd)
+- Training frozen at a cutoff, monthly forward evaluation with label observability clamp; outputs JSON/CSV/PNG; UI panel renders curves and table.
+
+### 12. Adjacency Ablation & SAFE (12_adjacency_ablation_and_safe.mmd)
+- Triad: Full vs No‑Recency/Short vs SAFE; select model by holdout AUC, compute ΔAUC, gate; Auto‑SAFE updates config.
+
+### 3b. Feature Families (03b_feature_families.mmd)
+- Dedicated view of new families: cycle‑aware recency, offset windows, deltas, pooled encoders, lagged affinity, assets, ALS, and config toggles.
+

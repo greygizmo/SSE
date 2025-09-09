@@ -1,0 +1,35 @@
+---
+title: GoSales Engine - Prequential Forward-Month Evaluation
+---
+
+```mermaid
+graph TB
+    Start([Prequential Start]) --> Freeze
+
+    Freeze[Freeze Training @ cutoff<br/>e.g., 2024-06-30] --> EnsureModel
+    EnsureModel[Ensure Model @ cutoff<br/>train if missing] --> MonthList
+    MonthList[Build Monthly Cutoffs<br/>start..end (YYYY-MM)] --> Clamp
+    Clamp[Clamp Months by Label Observability<br/>(cutoff + window) ≤ today] --> Iterate
+
+    subgraph "Per-Month Evaluation"
+        Iterate[For each month cutoff]
+        FM[Build Feature Matrix at month<br/>align to training features]
+        Predict[Predict Probabilities]
+        Metrics[Compute Metrics<br/>AUC, Lift@K, Brier]
+    end
+
+    Iterate --> FM --> Predict --> Metrics --> Iterate
+
+    Metrics --> Collect[Collect Results Array]
+    Collect --> Write[Write Artifacts<br/>JSON, CSV, Curves PNG]
+    Write --> UI[UI Prequential Panel<br/>curves + table + trend]
+
+    %% Styling
+    classDef step fill:#e3f2fd,stroke:#1565c0,stroke-width:2px
+    classDef loop fill:#fff3e0,stroke:#f57c00,stroke-width:2px
+    classDef out fill:#f5f5f5,stroke:#424242,stroke-width:2px
+    class Freeze,EnsureModel,MonthList,Clamp,Collect,Write step
+    class Iterate,FM,Predict,Metrics loop
+    class UI out
+```
+
