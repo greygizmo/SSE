@@ -457,6 +457,30 @@ def generate_scoring_outputs(
             
     if all_scores:
         combined_scores = pl.concat(all_scores, how="vertical")
+        # Whitespace-only wiring for divisions without models (e.g., Post_Processing)
+        try:
+            from gosales.etl.sku_map import division_set as _division_set
+            need_pp = ("Post_Processing" in _division_set()) and ("Post_Processing" not in available_models)
+            if need_pp:
+                ws_df = generate_whitespace_opportunities(engine)
+                if not ws_df.is_empty():
+                    ws_pp = ws_df.filter(pl.col("whitespace_division") == "Post_Processing")
+                    if not ws_pp.is_empty():
+                        cols = [c for c in ["customer_id","whitespace_division","whitespace_score","customer_name"] if c in ws_pp.columns]
+                        ws_min = ws_pp.select(cols)
+                        # Rename to match ICP schema: division_name, icp_score
+                        rename_map = {}
+                        if "whitespace_division" in ws_min.columns:
+                            ws_min = ws_min.rename({"whitespace_division": "division_name"})
+                        if "whitespace_score" in ws_min.columns:
+                            ws_min = ws_min.rename({"whitespace_score": "icp_score"})
+                        # Cast types
+                        if "customer_id" in ws_min.columns:
+                            ws_min = ws_min.with_columns(pl.col("customer_id").cast(pl.Int64, strict=False))
+                        combined_scores = pl.concat([combined_scores, ws_min], how="vertical")
+                        logger.info("Added heuristic Post_Processing p_icp for whitespace (no model present)")
+        except Exception as _e:
+            logger.warning(f"Post_Processing whitespace backfill failed: {_e}")
         # Append run_id if available for provenance
         try:
             if run_manifest is not None and isinstance(run_manifest.get("run_id"), str):
