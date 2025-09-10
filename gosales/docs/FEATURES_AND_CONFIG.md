@@ -77,6 +77,14 @@ All options live in `gosales/config.yaml`. Key entries:
   - `gauntlet_*`: e.g., mask tail days, purge days, label buffer
   - thresholds: `shift14_epsilon_*`, `ablation_epsilon_*`
 
+### Whitespace (Phase‑4)
+
+- `weights`: base blend weights `[p_icp_pct, lift_norm, als_norm, EV_norm]`.
+- `als_coverage_threshold`: minimum ALS coverage to avoid shrinking ALS weight; below this threshold ALS is downweighted and, if available, item2vec is used to backfill.
+- `segment_columns`: optional list of segment keys (e.g., `['industry','size_bin']`) to apply coverage‑aware blending per segment; falls back to global when segment rows < `segment_min_rows`.
+- `segment_min_rows`: minimum rows per segment required to use segment‑specific weights.
+- `bias_division_max_share_topN`: max share per division in the selected top‑percent capacity; enforced by rebalancer.
+
 See the UI “Feature Guide” tab for a rendered view of the current configuration.
 
 ---

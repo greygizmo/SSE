@@ -10,7 +10,7 @@ import json
 from pathlib import Path
 import joblib
 
-from gosales.utils.db import get_db_connection, validate_connection
+from gosales.utils.db import get_db_connection, get_curated_connection, validate_connection
 from gosales.utils.logger import get_logger
 from gosales.utils.paths import MODELS_DIR, OUTPUTS_DIR
 from gosales.utils.normalize import normalize_division
@@ -278,6 +278,8 @@ def score_customers_for_division(
             'affinity__div__lift_topk__12m',# affinity aggregate (if present)
             'mb_lift_max',                  # primary basket-lift signal used by ranker
             'mb_lift_mean',                 # secondary (not required but useful)
+            'total_gp_all_time',            # size proxy for segment weighting
+            'total_transactions_all_time',  # size proxy for segment weighting
         ]
         for aux_col in aux_cols:
             if aux_col in feature_matrix_pd.columns and aux_col not in scores_df.columns:
@@ -288,6 +290,19 @@ def score_customers_for_division(
         if als_cols:
             for c in als_cols:
                 scores_df[c] = pd.to_numeric(feature_matrix_pd[c], errors='coerce').fillna(0.0)
+        # Optional item2vec embeddings (fallback if ALS coverage low)
+        i2v_cols = [c for c in feature_matrix_pd.columns if str(c).startswith('i2v_f')]
+        if i2v_cols:
+            for c in i2v_cols:
+                scores_df[c] = pd.to_numeric(feature_matrix_pd[c], errors='coerce').fillna(0.0)
+
+        # Segment columns (strings): copy as-is if present
+        for seg_str in ['industry', 'industry_sub']:
+            if seg_str in feature_matrix_pd.columns and seg_str not in scores_df.columns:
+                try:
+                    scores_df[seg_str] = feature_matrix_pd[seg_str].astype(str).fillna("")
+                except Exception:
+                    pass
 
         # Ownership flag for ALS centroid (last 12m div transactions)
         try:
@@ -433,7 +448,7 @@ def generate_scoring_outputs(
     except Exception as e:
         logger.warning(f"Could not prune legacy models: {e}")
     
-    all_scores = []
+    all_scores: list[pl.DataFrame] = []
     for division_name, model_path in available_models.items():
         if not model_path.exists():
             logger.warning(f"Model not found for {division_name}: {model_path}")
@@ -455,8 +470,47 @@ def generate_scoring_outputs(
                 run_manifest.setdefault("divisions_scored", []).append(division_name)
             all_scores.append(scores)
             
+    def _align_score_frames(frames: list[pl.DataFrame]) -> pl.DataFrame:
+        if not frames:
+            return pl.DataFrame()
+        # Union of columns across frames
+        cols: list[str] = []
+        seen = set()
+        for df in frames:
+            for c in df.columns:
+                if c not in seen:
+                    seen.add(c)
+                    cols.append(c)
+        # Normalize key columns' dtypes where present
+        normed: list[pl.DataFrame] = []
+        for df in frames:
+            d = df
+            if "customer_id" in d.columns:
+                try:
+                    d = d.with_columns(pl.col("customer_id").cast(pl.Utf8))
+                except Exception:
+                    pass
+            if "division_name" in d.columns:
+                try:
+                    d = d.with_columns(pl.col("division_name").cast(pl.Utf8))
+                except Exception:
+                    pass
+            if "icp_score" in d.columns:
+                try:
+                    d = d.with_columns(pl.col("icp_score").cast(pl.Float64))
+                except Exception:
+                    pass
+            # Add any missing columns as Nulls
+            missing = [c for c in cols if c not in d.columns]
+            if missing:
+                d = d.with_columns([pl.lit(None).alias(c) for c in missing])
+            # Reorder to common column order
+            d = d.select(cols)
+            normed.append(d)
+        return pl.concat(normed, how="vertical_relaxed")
+
     if all_scores:
-        combined_scores = pl.concat(all_scores, how="vertical")
+        combined_scores = _align_score_frames(all_scores)
         # Whitespace-only wiring for divisions without models (e.g., Post_Processing)
         try:
             from gosales.etl.sku_map import division_set as _division_set
@@ -632,7 +686,36 @@ def generate_scoring_outputs(
                     if mode == 'top_percent':
                         if len(ranked) > 0:
                             ksel = max(1, int(len(ranked) * (cfg.modeling.capacity_percent / 100.0)))
-                            selected = ranked.nlargest(ksel, sort_cols).copy() if sort_cols else ranked.head(0)
+                            initial = ranked.nlargest(ksel, sort_cols).copy() if sort_cols else ranked.head(0)
+                            # Capacity-aware rebalancing to enforce division max share when applicable
+                            try:
+                                max_share = float(getattr(getattr(cfg, 'whitespace', object()), 'bias_division_max_share_topN', 0.0))
+                            except Exception:
+                                max_share = 0.0
+                            def _rebalance(df_all: pd.DataFrame, sel_n: int, max_div_share: float) -> pd.DataFrame:
+                                if sel_n <= 0 or df_all.empty or max_div_share <= 0.0:
+                                    return df_all.head(sel_n)
+                                allowed = {d: int(sel_n * max_div_share) for d in df_all['division_name'].dropna().unique()}
+                                taken = {d: 0 for d in allowed}
+                                out_rows = []
+                                for _, row in df_all.sort_values(sort_cols, ascending=False).iterrows():
+                                    d = row.get('division_name')
+                                    if len(out_rows) >= sel_n:
+                                        break
+                                    if d not in allowed:
+                                        out_rows.append(row)
+                                        continue
+                                    if taken[d] < max(1, allowed[d]):
+                                        out_rows.append(row)
+                                        taken[d] += 1
+                                # If we could not fill capacity due to strict caps, top up with next best regardless of cap
+                                if len(out_rows) < sel_n:
+                                    rem = sel_n - len(out_rows)
+                                    pool = df_all.drop(pd.DataFrame(out_rows).index, errors='ignore') if out_rows else df_all
+                                    top_up = pool.sort_values(sort_cols, ascending=False).head(rem)
+                                    out_rows.extend(list(top_up.to_dict(orient='records')))
+                                return pd.DataFrame(out_rows, columns=df_all.columns)
+                            selected = _rebalance(initial if not initial.empty else ranked, ksel, max_share) if max_share > 0 else initial
                         else:
                             selected = ranked.head(0)
                     elif mode in ('per_rep', 'hybrid'):
@@ -703,7 +786,11 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    db_engine = get_db_connection()
+    # Prefer curated connection where fact tables exist; fallback to primary DB
+    try:
+        db_engine = get_curated_connection()
+    except Exception:
+        db_engine = get_db_connection()
     try:
         cfg = load_config()
         strict = bool(getattr(getattr(cfg, 'database', object()), 'strict_db', False))

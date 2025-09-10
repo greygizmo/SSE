@@ -297,6 +297,30 @@ def _scale_weights_by_coverage(base_weights: Iterable[float], als_norm: pd.Serie
     return w_div, adjustments
 
 
+def _compute_item2vec_norm(df: pd.DataFrame, owner_centroid: np.ndarray | None = None) -> pd.Series:
+    """Compute item2vec similarity to owner centroid if i2v features present.
+
+    Returns normalized [0,1] similarities; zeros if no features.
+    """
+    i2v_cols = [c for c in df.columns if c.startswith("i2v_f")]
+    if not i2v_cols:
+        return pd.Series(np.zeros(len(df)), index=df.index, dtype=float)
+    mat = df[i2v_cols].astype(float)
+    if mat.empty:
+        return pd.Series(np.zeros(len(df)), index=df.index, dtype=float)
+    if owner_centroid is not None and owner_centroid.size == mat.shape[1]:
+        centroid_vec = owner_centroid.astype(float)
+    else:
+        centroid_vec = mat.mean(axis=0).to_numpy(dtype=float)
+    # Cosine similarity to centroid
+    try:
+        sim = cosine_similarity(mat, centroid_vec.reshape(1, -1)).ravel()
+    except Exception:
+        sim = np.zeros(len(df), dtype=float)
+    # Percentile normalize
+    return _percentile_normalize(pd.Series(sim, index=df.index))
+
+
 def _explain(row: pd.Series) -> str:
     # Short reason, emphasize strongest 1-2 drivers, keep compliant
     parts: List[str] = []
@@ -351,6 +375,25 @@ def rank_whitespace(inputs: RankInputs, *, weights: Iterable[float] = (0.60, 0.2
     # Affinity lift and ALS similarity
     df['lift_norm'] = _compute_affinity_lift(df)
     df['als_norm'] = _compute_als_norm(df, owner_centroid=als_centroid)
+    # ALS coverage enforcement and optional item2vec backfill
+    try:
+        from gosales.utils.config import load_config
+        _cfg = load_config()
+        als_thr = float(getattr(getattr(_cfg, 'whitespace', object()), 'als_coverage_threshold', 0.30))
+        use_i2v = bool(getattr(getattr(_cfg, 'features', object()), 'use_item2vec', False))
+    except Exception:
+        als_thr = 0.30
+        use_i2v = False
+    try:
+        cov_als = (pd.to_numeric(df['als_norm'], errors='coerce').fillna(0.0) > 0).mean()
+    except Exception:
+        cov_als = 0.0
+    if use_i2v and cov_als < als_thr:
+        # Compute i2v similarity and use where ALS is missing/zero
+        i2v_norm = _compute_item2vec_norm(df, owner_centroid=None)
+        mask_zero_als = pd.to_numeric(df['als_norm'], errors='coerce').fillna(0.0) <= 0
+        if mask_zero_als.any():
+            df.loc[mask_zero_als, 'als_norm'] = i2v_norm[mask_zero_als]
     # EV proxy with cap and normalization
     try:
         from gosales.utils.config import load_config
@@ -363,17 +406,62 @@ def rank_whitespace(inputs: RankInputs, *, weights: Iterable[float] = (0.60, 0.2
     for _col in ['p_icp_pct', 'lift_norm', 'als_norm', 'EV_norm']:
         df[_col] = pd.to_numeric(df.get(_col, 0.0), errors='coerce').fillna(0.0)
 
-    # Scale weights by signal coverage
-    w_adj, _ = _scale_weights_by_coverage(list(weights), df['als_norm'], df['lift_norm'])
+    # Scale weights by signal coverage (global or by segment)
+    try:
+        als_cov_thr = float(getattr(getattr(cfg, 'whitespace', object()), 'als_coverage_threshold', 0.30)) if cfg else 0.30
+    except Exception:
+        als_cov_thr = 0.30
 
-    # Final blended score (champion)
-    champion_score = (
-        w_adj[0] * df['p_icp_pct'] +
-        w_adj[1] * df['lift_norm'] +
-        w_adj[2] * df['als_norm'] +
-        w_adj[3] * df['EV_norm']
-    ).astype(float)
-    df['score'] = champion_score
+    # Optional segment-wise weighting
+    seg_cols_cfg: List[str] = []
+    seg_min_rows = 0
+    try:
+        seg_cols_cfg = list(getattr(getattr(cfg, 'whitespace', object()), 'segment_columns', []))
+        seg_min_rows = int(getattr(getattr(cfg, 'whitespace', object()), 'segment_min_rows', 250))
+    except Exception:
+        seg_cols_cfg = []
+        seg_min_rows = 250
+
+    # Derive size_bin if requested and feasible
+    if any(c.lower() == 'size_bin' for c in seg_cols_cfg) and 'size_bin' not in df.columns:
+        base_size_col = None
+        for cand in ['total_gp_all_time', 'rfm__all__gp_sum__12m', 'transactions_last_12m', 'rfm__all__tx_n__12m']:
+            if cand in df.columns:
+                base_size_col = cand
+                break
+        if base_size_col is not None:
+            try:
+                q = pd.qcut(pd.to_numeric(df[base_size_col], errors='coerce').fillna(0.0), 3, labels=['small','mid','large'])
+                df['size_bin'] = q.astype(str)
+            except Exception:
+                pass
+
+    seg_cols = [c for c in seg_cols_cfg if c in df.columns]
+    if seg_cols:
+        df['score'] = 0.0
+        for keys, g in df.groupby(seg_cols, dropna=False):
+            idx = g.index
+            if len(g) < seg_min_rows:
+                # Fall back to global weights
+                w_adj, _ = _scale_weights_by_coverage(list(weights), df.loc[idx, 'als_norm'], df.loc[idx, 'lift_norm'], threshold=als_cov_thr)
+            else:
+                w_adj, _ = _scale_weights_by_coverage(list(weights), g['als_norm'], g['lift_norm'], threshold=als_cov_thr)
+            sc = (
+                w_adj[0] * g['p_icp_pct'] +
+                w_adj[1] * g['lift_norm'] +
+                w_adj[2] * g['als_norm'] +
+                w_adj[3] * g['EV_norm']
+            ).astype(float)
+            df.loc[idx, 'score'] = sc
+    else:
+        w_adj, _ = _scale_weights_by_coverage(list(weights), df['als_norm'], df['lift_norm'], threshold=als_cov_thr)
+        champion_score = (
+            w_adj[0] * df['p_icp_pct'] +
+            w_adj[1] * df['lift_norm'] +
+            w_adj[2] * df['als_norm'] +
+            w_adj[3] * df['EV_norm']
+        ).astype(float)
+        df['score'] = champion_score
 
     # Optional challenger: simple logistic meta-learner over normalized components
     try:

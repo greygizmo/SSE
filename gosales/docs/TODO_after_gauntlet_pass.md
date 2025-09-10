@@ -72,10 +72,18 @@ This list merges GPT-5-Proâ€™s recommendations with our proposed upgrades. 
 
 ## Whitespace Improvements
 
-- [ ] [HI] Enable challenger meta-learner for whitespace weights; compare vs current on last 3 cutoffs.
-- [ ] Segment-wise weights (industry/size); fallback to global when sparse.
-- [ ] ALS coverage enforcement + item2vec backfill to reduce cold-start.
-- [ ] Capacity-aware threshold optimization (hit capacity targets with stable capture@K across eras).
+- [x] [HI] Enable challenger meta-learner for whitespace weights; compare vs current on last 3 cutoffs.
+  - Implemented shadow challenger (logistic) over [p_icp_pct, lift_norm, als_norm, EV_norm] with no effect on champion ranking unless enabled. Outputs `score_challenger` alongside `score` in `whitespace.csv`.
+  - Toggle via `whitespace.challenger_enabled: true` and `whitespace.challenger_model: lr` in `config.yaml`. Overlap vs champion can be assessed by diffing top‑N.
+- [x] Segment-wise weights (industry/size); fallback to global when sparse.
+  - Added optional `whitespace.segment_columns` (e.g., `['industry','size_bin']`) and `whitespace.segment_min_rows` to apply coverage‑aware blending per segment; falls back to global weights for small groups.
+  - `size_bin` is derived from `total_gp_all_time` (or 12m GP/TX) into small/mid/large quantiles if requested.
+- [x] ALS coverage enforcement + item2vec backfill to reduce cold-start.
+  - If `features.use_item2vec: true` and ALS coverage < `whitespace.als_coverage_threshold`, ranker computes item2vec similarity and backfills rows with missing ALS.
+  - Weight scaling also shrinks ALS contribution proportional to coverage (config threshold honored).
+- [x] Capacity-aware threshold optimization (hit capacity targets with stable capture@K across eras).
+  - Selection rebalancer enforces `whitespace.bias_division_max_share_topN` at the top‑percent capacity by capping each division’s share and topping up from others by score.
+  - Emits capacity summary and bias/diversity warnings as before; now the selected set respects the share cap when configured.
 
 ## Reporting & Ops
 
