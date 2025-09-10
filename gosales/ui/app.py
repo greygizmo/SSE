@@ -5,7 +5,13 @@ import pandas as pd
 import streamlit as st
 
 from gosales.utils.paths import OUTPUTS_DIR, MODELS_DIR
-from gosales.ui.utils import discover_validation_runs, compute_validation_badges, load_thresholds, load_alerts, compute_default_validation_index, read_runs_registry
+from gosales.ui.utils import (
+    discover_validation_runs,
+    compute_validation_badges,
+    load_thresholds,
+    load_alerts,
+    compute_default_validation_index,
+)
 
 
 st.set_page_config(page_title="GoSales Engine", layout="wide")
@@ -129,13 +135,28 @@ if tab == "Overview":
     if cov.exists():
         try:
             df = _read_csv(cov)
-            total = int(df.loc[df['metric']=='total_customers','value'].iloc[0]) if not df.empty else None
-            with_ind = int(df.loc[df['metric']=='with_industry','value'].iloc[0]) if not df.empty else None
-            pct = float(df.loc[df['metric']=='coverage_pct','value'].iloc[0]) if not df.empty else None
+            total = (
+                int(df.loc[df["metric"] == "total_customers", "value"].iloc[0])
+                if not df.empty
+                else None
+            )
+            with_ind = (
+                int(df.loc[df["metric"] == "with_industry", "value"].iloc[0])
+                if not df.empty
+                else None
+            )
+            pct = (
+                float(df.loc[df["metric"] == "coverage_pct", "value"].iloc[0])
+                if not df.empty
+                else None
+            )
             c1, c2, c3 = st.columns(3)
-            if total is not None: c1.metric("Total Customers", f"{total:,}")
-            if with_ind is not None: c2.metric("With Industry", f"{with_ind:,}")
-            if pct is not None: c3.metric("Coverage %", f"{pct:.2f}%")
+            if total is not None:
+                c1.metric("Total Customers", f"{total:,}")
+            if with_ind is not None:
+                c2.metric("With Industry", f"{with_ind:,}")
+            if pct is not None:
+                c3.metric("Coverage %", f"{pct:.2f}%")
         except Exception:
             st.info("Coverage summary could not be parsed.")
     # Contracts
@@ -291,13 +312,47 @@ elif tab == "Whitespace":
             # Filters
             df = _read_csv(ws)
             if not df.empty:
-                # Simple filters on key columns when present
-                cols = st.multiselect("Columns to show", df.columns.tolist(), default=df.columns.tolist()[:12], help="Tip: reduce visible columns to focus on key signals")
+                filtered = df
+                if "division" in filtered.columns:
+                    div_query = st.text_input("Filter division")
+                    if div_query:
+                        filtered = filtered[
+                            filtered["division"].astype(str).str.contains(
+                                div_query, case=False, na=False
+                            )
+                        ]
+                if "customer_id" in filtered.columns:
+                    cust_query = st.text_input("Filter customer ID")
+                    if cust_query:
+                        filtered = filtered[
+                            filtered["customer_id"].astype(str).str.contains(
+                                cust_query, na=False
+                            )
+                        ]
+                if "score" in filtered.columns:
+                    min_score = float(filtered["score"].min())
+                    max_score = float(filtered["score"].max())
+                    score_thr = st.slider(
+                        "Score threshold", min_score, max_score, min_score
+                    )
+                    filtered = filtered[filtered["score"] >= score_thr]
+                cols = st.multiselect(
+                    "Columns to show",
+                    filtered.columns.tolist(),
+                    default=filtered.columns.tolist()[:12],
+                    help="Tip: reduce visible columns to focus on key signals",
+                )
                 if cols:
-                    st.dataframe(df[cols].head(200), use_container_width=True)
+                    st.dataframe(
+                        filtered[cols].head(200), use_container_width=True
+                    )
                 else:
-                    st.dataframe(df.head(200), use_container_width=True)
-                st.download_button("Download whitespace", data=df.to_csv(index=False), file_name=ws.name)
+                    st.dataframe(filtered.head(200), use_container_width=True)
+                st.download_button(
+                    "Download whitespace",
+                    data=filtered.to_csv(index=False),
+                    file_name=ws.name,
+                )
         # Explanations
         ex = OUTPUTS_DIR / f"whitespace_explanations_{sel_cut}.csv"
         if ex.exists():
