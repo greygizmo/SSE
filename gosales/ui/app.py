@@ -5,7 +5,7 @@ import pandas as pd
 import streamlit as st
 
 from gosales.utils.paths import OUTPUTS_DIR, MODELS_DIR
-from gosales.ui.utils import discover_validation_runs, compute_validation_badges, load_thresholds, load_alerts, compute_default_validation_index, read_runs_registry
+from gosales.ui.utils import discover_validation_runs, compute_validation_badges, load_thresholds, load_alerts, compute_default_validation_index
 
 
 st.set_page_config(page_title="GoSales Engine", layout="wide")
@@ -129,13 +129,16 @@ if tab == "Overview":
     if cov.exists():
         try:
             df = _read_csv(cov)
-            total = int(df.loc[df['metric']=='total_customers','value'].iloc[0]) if not df.empty else None
-            with_ind = int(df.loc[df['metric']=='with_industry','value'].iloc[0]) if not df.empty else None
-            pct = float(df.loc[df['metric']=='coverage_pct','value'].iloc[0]) if not df.empty else None
+            total = int(df.loc[df['metric'] == 'total_customers', 'value'].iloc[0]) if not df.empty else None
+            with_ind = int(df.loc[df['metric'] == 'with_industry', 'value'].iloc[0]) if not df.empty else None
+            pct = float(df.loc[df['metric'] == 'coverage_pct', 'value'].iloc[0]) if not df.empty else None
             c1, c2, c3 = st.columns(3)
-            if total is not None: c1.metric("Total Customers", f"{total:,}")
-            if with_ind is not None: c2.metric("With Industry", f"{with_ind:,}")
-            if pct is not None: c3.metric("Coverage %", f"{pct:.2f}%")
+            if total is not None:
+                c1.metric("Total Customers", f"{total:,}")
+            if with_ind is not None:
+                c2.metric("With Industry", f"{with_ind:,}")
+            if pct is not None:
+                c3.metric("Coverage %", f"{pct:.2f}%")
         except Exception:
             st.info("Coverage summary could not be parsed.")
     # Contracts
@@ -344,6 +347,17 @@ elif tab == "Validation":
         default_index = compute_default_validation_index(runs, st.session_state.get('preferred_validation'))
         sel = st.selectbox("Pick run", options=list(range(len(runs))), index=default_index, format_func=lambda i: labels[i])
         _, _, path = runs[sel]
+        comp_path = None
+        comp_sel = None
+        if len(runs) > 1:
+            comp_options = [None] + [i for i in range(len(runs)) if i != sel]
+            comp_sel = st.selectbox(
+                "Compare to (optional)",
+                options=comp_options,
+                format_func=lambda i: "None" if i is None else labels[i],
+            )
+            if comp_sel is not None:
+                _, _, comp_path = runs[comp_sel]
         thr = st.session_state.get('thresholds', load_thresholds())
         # Badges
         st.subheader("Quality Badges")
@@ -377,17 +391,54 @@ elif tab == "Validation":
             with st.expander("Alerts"):
                 for a in alerts:
                     st.warning(f"{a.get('type')}: value={a.get('value')} threshold={a.get('threshold')}")
-        col1, col2 = st.columns(2)
         # Metrics
         metrics_path = path / 'metrics.json'
-        if metrics_path.exists():
+        metrics = _read_json(metrics_path) if metrics_path.exists() else {}
+        if metrics:
             st.subheader("Metrics")
-            st.code(metrics_path.read_text(encoding='utf-8'))
+            st.code(json.dumps(metrics, indent=2))
+        else:
+            st.info("Metrics file not found for selected run.")
+        if comp_path:
+            comp_metrics_path = comp_path / 'metrics.json'
+            comp_metrics = _read_json(comp_metrics_path) if comp_metrics_path.exists() else {}
+            if metrics and comp_metrics:
+                st.subheader("Metrics Comparison")
+                keys = sorted(set(metrics) | set(comp_metrics))
+                rows: list[dict] = []
+                for k in keys:
+                    v1 = metrics.get(k)
+                    v2 = comp_metrics.get(k)
+                    diff = v2 - v1 if isinstance(v1, (int, float)) and isinstance(v2, (int, float)) else None
+                    rows.append({"metric": k, labels[sel]: v1, labels[comp_sel]: v2, "diff": diff})
+                st.dataframe(pd.DataFrame(rows), use_container_width=True)
+            else:
+                if not comp_metrics:
+                    st.info("Metrics file not found for comparison run.")
         # Drift
         drift_path = path / 'drift.json'
-        if drift_path.exists():
+        drift = _read_json(drift_path) if drift_path.exists() else {}
+        if drift:
             st.subheader("Drift")
-            st.code(drift_path.read_text(encoding='utf-8'))
+            st.code(json.dumps(drift, indent=2))
+        else:
+            st.info("Drift file not found for selected run.")
+        if comp_path:
+            comp_drift_path = comp_path / 'drift.json'
+            comp_drift = _read_json(comp_drift_path) if comp_drift_path.exists() else {}
+            if drift and comp_drift:
+                st.subheader("Drift Comparison")
+                keys = sorted(set(drift) | set(comp_drift))
+                rows: list[dict] = []
+                for k in keys:
+                    v1 = drift.get(k)
+                    v2 = comp_drift.get(k)
+                    diff = v2 - v1 if isinstance(v1, (int, float)) and isinstance(v2, (int, float)) else None
+                    rows.append({"metric": k, labels[sel]: v1, labels[comp_sel]: v2, "diff": diff})
+                st.dataframe(pd.DataFrame(rows), use_container_width=True)
+            else:
+                if not comp_drift:
+                    st.info("Drift file not found for comparison run.")
         # Calibration (holdout)
         cal_path = path / 'calibration.csv'
         if cal_path.exists():
