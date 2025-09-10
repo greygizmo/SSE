@@ -629,6 +629,21 @@ def generate_scoring_outputs(
             except Exception as e:
                 logger.warning(f"Shadow mode failed: {e}")
 
+            # Challenger overlap (champion vs score_challenger) at top-10%
+            try:
+                if 'score_challenger' in ranked.columns and len(ranked) > 0:
+                    topn = max(1, int(len(ranked) * 0.10))
+                    champ_top = set(ranked.nlargest(topn, ["score","p_icp","customer_id"])['customer_id'].astype(int).tolist()) if 'score' in ranked.columns else set()
+                    chall_top = set(ranked.nlargest(topn, ["score_challenger","p_icp","customer_id"])['customer_id'].astype(int).tolist())
+                    inter = len(champ_top & chall_top)
+                    union = len(champ_top | chall_top)
+                    jacc = float(inter) / max(1, union)
+                    overlap = {"top_percent": 10, "intersection": int(inter), "union": int(union), "jaccard": jacc}
+                    ov_name = f"whitespace_challenger_overlap_{cutoff_tag}.json" if cutoff_tag else "whitespace_challenger_overlap.json"
+                    (OUTPUTS_DIR / ov_name).write_text(pd.Series(overlap).to_json(indent=2), encoding='utf-8')
+            except Exception as e:
+                logger.warning(f"Failed challenger overlap export: {e}")
+
             # Additional Phase-4 artifacts: explanations, thresholds, metrics
             try:
                 # Explanations export

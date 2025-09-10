@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+from datetime import datetime, timezone
 from dataclasses import dataclass
 
 import click
@@ -628,11 +629,45 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
     with open(out_dir / "feature_list.json", "w", encoding="utf-8") as f:
         json.dump(feature_names, f)
     artifacts["feature_list.json"] = str(out_dir / "feature_list.json")
+    # Prepare minimal metadata for scoring; finalize after metrics computed
+    try:
+        pos = int(np.sum(y_final))
+        neg = int(max(0, len(y_final) - pos))
+        spw = float((neg / pos)) if pos > 0 else None
+        cal_label = 'isotonic' if str(final_cal_method).lower() == 'isotonic' else 'sigmoid'
+        best_model_label = 'Logistic Regression' if str(winner).lower() == 'logreg' else 'LightGBM'
+        _metadata = {
+            "division": division,
+            "cutoff_date": last_cut,
+            "prediction_window_months": int(window_months),
+            "feature_names": feature_names,
+            "trained_at": datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
+            "best_model": best_model_label,
+            "best_auc": None,
+            "calibration_method": cal_label,
+            "calibration_mae": None,
+            "brier_score": None,
+            "class_balance": {
+                "positives": pos,
+                "negatives": neg,
+                "scale_pos_weight": spw,
+            },
+        }
+    except Exception:
+        _metadata = None
     # Final predictions and guardrails
     try:
         p_final = model.predict_proba(X_final)[:,1]
         if float(np.std(p_final)) < 0.01:
             logger.warning("Degenerate classifier (std(p) < 0.01). Aborting artifact write.")
+            # Ensure minimal metadata exists even on degenerate runs
+            try:
+                if _metadata is not None:
+                    with open(out_dir / "metadata.json", "w", encoding="utf-8") as mf:
+                        json.dump(_metadata, mf, indent=2)
+                    artifacts["metadata.json"] = str(out_dir / "metadata.json")
+            except Exception:
+                pass
             return
     except Exception:
         p_final = None
@@ -774,6 +809,18 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
                 cfg.modeling.seed,
             )
         )
+
+        # Write/update metadata.json with final metrics
+        try:
+            if _metadata is not None:
+                _metadata["best_auc"] = float(auc_val) if auc_val is not None else None
+                _metadata["calibration_mae"] = float(cal_mae) if 'cal_mae' in locals() and cal_mae is not None else None
+                _metadata["brier_score"] = float(brier) if brier is not None else None
+                with open(out_dir / "metadata.json", "w", encoding="utf-8") as mf:
+                    json.dump(_metadata, mf, indent=2)
+                artifacts["metadata.json"] = str(out_dir / "metadata.json")
+        except Exception as _e:
+            logger.warning(f"Failed to write metadata.json: {_e}")
 
         # Model card / metrics
         # Model card / metrics

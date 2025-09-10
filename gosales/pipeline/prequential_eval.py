@@ -68,6 +68,18 @@ def _align_features(X: pd.DataFrame, division: str) -> pd.DataFrame:
         return X
 
 
+def _sanitize_features_pd(X: pd.DataFrame) -> pd.DataFrame:
+    """Coerce all columns to numeric floats, replace infs/NaNs with 0.0.
+
+    Mirrors scoring pipeline's sanitization to prevent dtype errors at predict time.
+    """
+    Xc = X.copy()
+    for c in Xc.columns:
+        Xc[c] = pd.to_numeric(Xc[c], errors='coerce')
+    Xc.replace([np.inf, -np.inf], np.nan, inplace=True)
+    return Xc.fillna(0.0)
+
+
 def _month_ends(start: str, end: str) -> list[str]:
     # Accept YYYY-MM or YYYY-MM-DD; normalize to YYYY-MM for period_range
     def to_period(s: str) -> str:
@@ -142,6 +154,7 @@ def run_prequential(division: str, train_cutoff: str, start: str, end: str, wind
         X = df.drop(columns=['customer_id','bought_in_division'])
         try:
             X_aligned = _align_features(X, division)
+            X_aligned = _sanitize_features_pd(X_aligned)
             p = model.predict_proba(X_aligned)[:,1]
         except Exception:
             # Try unwrap calibrated estimator
@@ -150,6 +163,7 @@ def run_prequential(division: str, train_cutoff: str, start: str, end: str, wind
                 base = model.estimator
             m = base if base is not None else model
             X_aligned = _align_features(X, division)
+            X_aligned = _sanitize_features_pd(X_aligned)
             p = m.predict_proba(X_aligned)[:,1]
         auc = float(roc_auc_score(y, p)) if np.any(y) and not np.all(y == 1) else None
         lift10 = float(compute_lift_at_k(y, p, k_percent)) if len(y) > 0 else None

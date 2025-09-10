@@ -114,12 +114,12 @@ whitespace:
   cooldown_days: 30
   cooldown_factor: 0.75
   # Optional challenger meta-learner over [p_icp_pct, lift_norm, als_norm, EV_norm]
-  challenger_enabled: false
+  challenger_enabled: true
   challenger_model: lr
   # Emit legacy heuristic whitespace alongside Phase-4 outputs for comparison
   shadow_mode: false
   # Optional segment-wise weighting (e.g., industry, size_bin). Fallback to global when group < min_rows
-  segment_columns: []
+  segment_columns: ["industry", "size_bin"]
   segment_min_rows: 250
 
 validation:
