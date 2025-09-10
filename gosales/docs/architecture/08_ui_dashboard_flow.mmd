@@ -1,0 +1,292 @@
+---
+title: GoSales Engine - UI/Dashboard Flow
+---
+
+```mermaid
+graph TB
+    %% Start
+    Start([Dashboard Start]) --> InitializeStreamlit
+
+    %% Streamlit Initialization
+    subgraph "Streamlit Setup"
+        InitializeStreamlit[Initialize Streamlit App<br/>app.py]
+        LoadStreamlitConfig[Load Streamlit Configuration<br/>streamlit.config]
+        SetupPageLayout[Setup Page Layout<br/>Wide Layout, Navigation]
+        InitializeSessionState[Initialize Session State<br/>User Session Management]
+        LoadApplicationAssets[Load Application Assets<br/>CSS, Images, Icons]
+        ValidateUserPermissions[Validate User Permissions<br/>Access Control]
+    end
+
+    %% Navigation & Routing
+    subgraph "Navigation & Routing"
+        RenderSidebarNavigation[Render Sidebar Navigation<br/>Menu Structure]
+        HandlePageRouting[Handle Page Routing<br/>URL-based Navigation]
+        ManageTabSelection[Manage Tab Selection<br/>Active Tab State]
+        SetupPageRefresh[Setup Page Refresh<br/>Auto-refresh Intervals]
+        HandleUserInteractions[Handle User Interactions<br/>Click Events, Form Submissions]
+        MaintainNavigationHistory[Maintain Navigation History<br/>Breadcrumb Trail]
+    end
+
+    %% Overview Dashboard
+    subgraph "Overview Dashboard"
+        LoadOverviewData[Load Overview Data<br/>Pipeline Summary]
+        GenerateETLMetrics[Generate ETL Metrics<br/>Data Loading Stats]
+        DisplayFeatureStats[Display Feature Statistics<br/>Feature Engineering Summary]
+        ShowModelPerformance[Show Model Performance<br/>Model Health Overview]
+        PresentKeyKPIs[Present Key KPIs<br/>Business Metrics]
+        CreateOverviewVisualizations[Create Overview Visualizations<br/>Summary Charts]
+    end
+
+    %% Metrics Dashboard
+    subgraph "Metrics Dashboard"
+        LoadModelMetrics[Load Model Metrics<br/>Performance Data]
+        GeneratePerformanceCharts[Generate Performance Charts<br/>ROC Curves, Confusion Matrix]
+        ShowCalibrationPlot[Show Calibration Plot<br/>reliability curve]
+        DisplayFeatureImportance[Display Feature Importance<br/>SHAP Values, Feature Rankings]
+        ShowBusinessYield[Show Business Yield (Top‑K)<br/>table + coverage]
+        ShowModelComparison[Show Model Comparison<br/>Cross-model Analysis]
+        CreateMetricsVisualizations[Create Metrics Visualizations<br/>Interactive Plots]
+        ExportMetricsReports[Export Metrics Reports<br/>Downloadable Reports]
+    end
+
+    %% Explainability Dashboard
+    subgraph "Explainability Dashboard"
+        LoadSHAPData[Load SHAP Data<br/>Explanation Values]
+        GenerateSHAPPlots[Generate SHAP Plots<br/>Waterfall, Summary Plots]
+        CreateFeatureAttribution[Create Feature Attribution<br/>Individual Predictions]
+        ShowGlobalExplanations[Show Global Explanations<br/>Feature Impact Analysis]
+        DisplayModelInsights[Display Model Insights<br/>Business Interpretations]
+        ExportExplanationReports[Export Explanation Reports<br/>SHAP Reports]
+    end
+
+    %% Whitespace Dashboard
+    subgraph "Whitespace Dashboard"
+        LoadWhitespaceData[Load Whitespace Data<br/>Opportunity Analysis]
+        GenerateOpportunityHeatmap[Generate Opportunity Heatmap<br/>Customer-Division Matrix]
+        DisplayMarketPotential[Display Market Potential<br/>Revenue Opportunities]
+        ShowPrioritizedRecommendations[Show Prioritized Recommendations<br/>Actionable Insights]
+        CreateWhitespaceVisualizations[Create Whitespace Visualizations<br/>Opportunity Charts]
+        ExportWhitespaceReports[Export Whitespace Reports<br/>Opportunity Analysis]
+    end
+
+    %% Validation Dashboard
+    subgraph "Validation Dashboard"
+        LoadValidationResults[Load Validation Results<br/>Test Results Data]
+        DisplayHoldoutMetrics[Display Holdout Metrics<br/>Unseen Data Performance]
+        ShowDecileAnalysis[Show Decile Analysis<br/>Performance Distribution]
+        PresentDataQualityMetrics[Present Data Quality Metrics<br/>Quality Scores]
+        GenerateValidationVisualizations[Generate Validation Visualizations<br/>Validation Charts]
+        ExportValidationReports[Export Validation Reports<br/>Validation Summary]
+    end
+
+    %% Runs Dashboard
+    subgraph "Runs Dashboard"
+        LoadPipelineRuns[Load Pipeline Runs<br/>Execution History]
+        DisplayRunTimeline[Display Run Timeline<br/>Execution Timeline]
+        ShowRunDetails[Show Run Details<br/>Individual Run Analysis]
+        GeneratePerformanceTrends[Generate Performance Trends<br/>Historical Performance]
+        CreateRunVisualizations[Create Run Visualizations<br/>Execution Charts]
+        ExportRunReports[Export Run Reports<br/>Execution History]
+    end
+
+    %% Quality Assurance Dashboard
+    subgraph "Quality Assurance Dashboard"
+        LoadLeakageData[Load Leakage Test Data<br/>run_leakage_gauntlet.py]
+        ExecuteLeakageGauntlet[Execute Leakage Gauntlet<br/>Static Scan, Feature Audit]
+        RunAblationTests[Run Ablation Tests<br/>Assets-Off, Adjacency Triad]
+        ShowAdjacencyAbl[Show Adjacency Ablation Results<br/>triad table + ΔAUC]
+        ShowPreqPanel[Show Prequential Panel<br/>curves + table]
+        GenerateDriftSnapshots[Generate Drift Snapshots<br/>drift_snapshots.py]
+        DisplayQAMetrics[Display QA Metrics<br/>Test Results, Performance]
+        CreateLeakageVisualizations[Create Leakage Visualizations<br/>Quality Charts]
+        ExportQAReports[Export QA Reports<br/>Comprehensive Reports]
+    end
+
+    %% Monitoring Dashboard
+    subgraph "Monitoring Dashboard"
+        LoadMonitoringData[Load Monitoring Data<br/>data_collector.py]
+        DisplayPipelineHealth[Display Pipeline Health<br/>Real-time Status]
+        ShowDataQualityMonitoring[Show Data Quality Monitoring<br/>Type Consistency, Completeness]
+        PresentPerformanceMetrics[Present Performance Metrics<br/>Throughput, Latency]
+        GenerateAlertDashboard[Generate Alert Dashboard<br/>Active Alerts & History]
+        CreateDataLineageView[Create Data Lineage View<br/>Data Flow Visualization]
+        ExportMonitoringReports[Export Monitoring Reports<br/>System Health Reports]
+    end
+
+    %% Data Management
+    subgraph "Data Management"
+        HandleDataCaching[Handle Data Caching<br/>Performance Optimization]
+        ManageSessionState[Manage Session State<br/>User-specific Data]
+        OptimizeDataLoading[Optimize Data Loading<br/>Lazy Loading, Pagination]
+        ImplementDataFiltering[Implement Data Filtering<br/>Search & Filter Capabilities]
+        ManageDataExports[Manage Data Exports<br/>Multiple Format Support]
+        HandleDataUpdates[Handle Data Updates<br/>Real-time Refresh]
+    end
+
+    %% User Experience
+    subgraph "User Experience"
+        ImplementLoadingStates[Implement Loading States<br/>Progress Indicators]
+        HandleErrorStates[Handle Error States<br/>Error Messages & Recovery]
+        ProvideInteractiveFeatures[Provide Interactive Features<br/>Drill-down, Tooltips]
+        EnsureResponsiveDesign[Ensure Responsive Design<br/>Mobile Compatibility]
+        SetupUserPreferences[Setup User Preferences<br/>Personalization Options]
+        ProvideHelpDocumentation[Provide Help Documentation<br/>Tooltips & Guides]
+    end
+
+    %% Integration Layer
+    subgraph "Integration Layer"
+        ConnectToDatabase[Connect to Database<br/>db.py Integration]
+        InterfaceWithModels[Interface With Models<br/>Model Loading]
+        AccessFileSystem[Access File System<br/>paths.py Integration]
+        HandleAPIRequests[Handle API Requests<br/>External Service Calls]
+        ManageConfiguration[Manage Configuration<br/>config.py Integration]
+        CoordinateWithMonitoring[Coordinate With Monitoring<br/>pipeline_monitor.py]
+    end
+
+    %% End
+    ProvideHelpDocumentation --> Success([Dashboard Active])
+    ExportMonitoringReports --> Failure([Dashboard Issues])
+
+    %% Main Flow Connections
+    Start --> InitializeStreamlit
+    InitializeStreamlit --> LoadStreamlitConfig
+    LoadStreamlitConfig --> SetupPageLayout
+    SetupPageLayout --> InitializeSessionState
+    InitializeSessionState --> LoadApplicationAssets
+    LoadApplicationAssets --> ValidateUserPermissions
+    ValidateUserPermissions --> RenderSidebarNavigation
+
+    RenderSidebarNavigation --> HandlePageRouting
+    HandlePageRouting --> ManageTabSelection
+    ManageTabSelection --> SetupPageRefresh
+    SetupPageRefresh --> HandleUserInteractions
+    HandleUserInteractions --> MaintainNavigationHistory
+
+    MaintainNavigationHistory --> LoadOverviewData
+    LoadOverviewData --> GenerateETLMetrics
+    GenerateETLMetrics --> DisplayFeatureStats
+    DisplayFeatureStats --> ShowModelPerformance
+    ShowModelPerformance --> PresentKeyKPIs
+    PresentKeyKPIs --> CreateOverviewVisualizations
+
+    CreateOverviewVisualizations --> LoadModelMetrics
+    LoadModelMetrics --> GeneratePerformanceCharts
+    GeneratePerformanceCharts --> ShowCalibrationPlot
+    ShowCalibrationPlot --> DisplayFeatureImportance
+    DisplayFeatureImportance --> ShowBusinessYield
+    ShowBusinessYield --> ShowModelComparison
+    ShowModelComparison --> CreateMetricsVisualizations
+    CreateMetricsVisualizations --> ExportMetricsReports
+
+    ExportMetricsReports --> LoadSHAPData
+    LoadSHAPData --> GenerateSHAPPlots
+    GenerateSHAPPlots --> CreateFeatureAttribution
+    CreateFeatureAttribution --> ShowGlobalExplanations
+    ShowGlobalExplanations --> DisplayModelInsights
+    DisplayModelInsights --> ExportExplanationReports
+
+    ExportExplanationReports --> LoadWhitespaceData
+    LoadWhitespaceData --> GenerateOpportunityHeatmap
+    GenerateOpportunityHeatmap --> DisplayMarketPotential
+    DisplayMarketPotential --> ShowPrioritizedRecommendations
+    ShowPrioritizedRecommendations --> CreateWhitespaceVisualizations
+    CreateWhitespaceVisualizations --> ExportWhitespaceReports
+
+    ExportWhitespaceReports --> LoadValidationResults
+    LoadValidationResults --> DisplayHoldoutMetrics
+    DisplayHoldoutMetrics --> ShowDecileAnalysis
+    ShowDecileAnalysis --> PresentDataQualityMetrics
+    PresentDataQualityMetrics --> GenerateValidationVisualizations
+    GenerateValidationVisualizations --> ExportValidationReports
+
+    ExportValidationReports --> LoadPipelineRuns
+    LoadPipelineRuns --> DisplayRunTimeline
+    DisplayRunTimeline --> ShowRunDetails
+    ShowRunDetails --> GeneratePerformanceTrends
+    GeneratePerformanceTrends --> CreateRunVisualizations
+    CreateRunVisualizations --> ExportRunReports
+
+    ExportRunReports --> LoadLeakageData
+    LoadLeakageData --> ExecuteLeakageGauntlet
+    ExecuteLeakageGauntlet --> RunAblationTests
+    RunAblationTests --> ShowAdjacencyAbl
+    ShowAdjacencyAbl --> GenerateDriftSnapshots
+    ExecuteLeakageGauntlet --> ShowPreqPanel
+    GenerateDriftSnapshots --> DisplayQAMetrics
+    DisplayQAMetrics --> CreateLeakageVisualizations
+    CreateLeakageVisualizations --> ExportQAReports
+
+    ExportQAReports --> LoadMonitoringData
+    LoadMonitoringData --> DisplayPipelineHealth
+    DisplayPipelineHealth --> ShowDataQualityMonitoring
+    ShowDataQualityMonitoring --> PresentPerformanceMetrics
+    PresentPerformanceMetrics --> GenerateAlertDashboard
+    GenerateAlertDashboard --> CreateDataLineageView
+    CreateDataLineageView --> ExportMonitoringReports
+
+    ExportMonitoringReports --> HandleDataCaching
+    HandleDataCaching --> ManageSessionState
+    ManageSessionState --> OptimizeDataLoading
+    OptimizeDataLoading --> ImplementDataFiltering
+    ImplementDataFiltering --> ManageDataExports
+    ManageDataExports --> HandleDataUpdates
+
+    HandleDataUpdates --> ImplementLoadingStates
+    ImplementLoadingStates --> HandleErrorStates
+    HandleErrorStates --> ProvideInteractiveFeatures
+    ProvideInteractiveFeatures --> EnsureResponsiveDesign
+    EnsureResponsiveDesign --> SetupUserPreferences
+    SetupUserPreferences --> ProvideHelpDocumentation
+
+    ProvideHelpDocumentation --> ConnectToDatabase
+    ConnectToDatabase --> InterfaceWithModels
+    InterfaceWithModels --> AccessFileSystem
+    AccessFileSystem --> HandleAPIRequests
+    HandleAPIRequests --> ManageConfiguration
+    ManageConfiguration --> CoordinateWithMonitoring
+
+    %% Parallel Processing
+    InitializeStreamlit --> HandleDataCaching
+    RenderSidebarNavigation --> HandleDataCaching
+    LoadOverviewData --> HandleDataCaching
+    LoadModelMetrics --> HandleDataCaching
+
+    %% Error Handling
+    InitializeStreamlit -->|Setup Failed| Failure
+    ValidateUserPermissions -->|Access Denied| Failure
+    LoadOverviewData -->|Data Load Failed| Failure
+    LoadMonitoringData -->|Monitoring Failed| Failure
+
+    %% Styling
+    classDef setup fill:#e3f2fd,stroke:#1565c0,stroke-width:2px
+    classDef navigation fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px
+    classDef overview fill:#e8f5e8,stroke:#2e7d32,stroke-width:2px
+    classDef metrics fill:#fff3e0,stroke:#f57c00,stroke-width:2px
+    classDef explainability fill:#fce4ec,stroke:#c2185b,stroke-width:2px
+    classDef whitespace fill:#f5f5f5,stroke:#424242,stroke-width:2px
+    classDef validation fill:#e1f5fe,stroke:#01579b,stroke-width:2px
+    classDef runs fill:#f9fbe7,stroke:#689f38,stroke-width:2px
+    classDef qa fill:#e1f5fe,stroke:#0277bd,stroke-width:2px
+    classDef monitoring fill:#ffebee,stroke:#d32f2f,stroke-width:2px
+    classDef data fill:#e0f2f1,stroke:#00695c,stroke-width:2px
+    classDef ux fill:#f8f9fa,stroke:#6c757d,stroke-width:2px
+    classDef integration fill:#e9ecef,stroke:#495057,stroke-width:2px
+    classDef success fill:#c8e6c9,stroke:#2e7d32,stroke-width:3px
+    classDef failure fill:#ffcdd2,stroke:#c62828,stroke-width:3px
+
+    class Start,InitializeStreamlit,LoadStreamlitConfig,SetupPageLayout,InitializeSessionState,LoadApplicationAssets,ValidateUserPermissions setup
+    class RenderSidebarNavigation,HandlePageRouting,ManageTabSelection,SetupPageRefresh,HandleUserInteractions,MaintainNavigationHistory navigation
+    class LoadOverviewData,GenerateETLMetrics,DisplayFeatureStats,ShowModelPerformance,PresentKeyKPIs,CreateOverviewVisualizations overview
+    class LoadModelMetrics,GeneratePerformanceCharts,DisplayFeatureImportance,ShowModelComparison,CreateMetricsVisualizations,ExportMetricsReports metrics
+    class LoadSHAPData,GenerateSHAPPlots,CreateFeatureAttribution,ShowGlobalExplanations,DisplayModelInsights,ExportExplanationReports explainability
+    class LoadWhitespaceData,GenerateOpportunityHeatmap,DisplayMarketPotential,ShowPrioritizedRecommendations,CreateWhitespaceVisualizations,ExportWhitespaceReports whitespace
+    class LoadValidationResults,DisplayHoldoutMetrics,ShowDecileAnalysis,PresentDataQualityMetrics,GenerateValidationVisualizations,ExportValidationReports validation
+    class LoadPipelineRuns,DisplayRunTimeline,ShowRunDetails,GeneratePerformanceTrends,CreateRunVisualizations,ExportRunReports runs
+    class LoadLeakageData,ExecuteLeakageGauntlet,RunAblationTests,GenerateDriftSnapshots,DisplayQAMetrics,CreateLeakageVisualizations,ExportQAReports qa
+    class LoadMonitoringData,DisplayPipelineHealth,ShowDataQualityMonitoring,PresentPerformanceMetrics,GenerateAlertDashboard,CreateDataLineageView,ExportMonitoringReports monitoring
+    class HandleDataCaching,ManageSessionState,OptimizeDataLoading,ImplementDataFiltering,ManageDataExports,HandleDataUpdates data
+    class ImplementLoadingStates,HandleErrorStates,ProvideInteractiveFeatures,EnsureResponsiveDesign,SetupUserPreferences,ProvideHelpDocumentation ux
+    class ConnectToDatabase,InterfaceWithModels,AccessFileSystem,HandleAPIRequests,ManageConfiguration,CoordinateWithMonitoring integration
+    class Success success
+    class Failure failure
+```

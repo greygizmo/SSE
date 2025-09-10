@@ -9,10 +9,8 @@ import mlflow.sklearn
 import json
 from pathlib import Path
 import joblib
-import mlflow
-import mlflow.sklearn
 
-from gosales.utils.db import get_db_connection
+from gosales.utils.db import get_db_connection, get_curated_connection, validate_connection
 from gosales.utils.logger import get_logger
 from gosales.utils.paths import MODELS_DIR, OUTPUTS_DIR
 from gosales.utils.normalize import normalize_division
@@ -30,6 +28,28 @@ logger = get_logger(__name__)
 class MissingModelMetadataError(Exception):
     pass
 
+_DIM_CUSTOMER_CACHE: pd.DataFrame | None = None
+
+
+def _get_dim_customer(engine) -> pd.DataFrame:
+    """Read dim_customer once per run and cache in-process.
+
+    Returns a DataFrame with at least [customer_id, customer_name] and
+    customer_id coerced to string for safe joins.
+    """
+    global _DIM_CUSTOMER_CACHE
+    if _DIM_CUSTOMER_CACHE is not None and isinstance(_DIM_CUSTOMER_CACHE, pd.DataFrame):
+        return _DIM_CUSTOMER_CACHE
+    try:
+        df = pd.read_sql("select customer_id, customer_name from dim_customer", engine)
+    except Exception:
+        # Minimal fallback if dim_customer missing
+        df = pd.DataFrame({"customer_id": pd.Series(dtype=str), "customer_name": pd.Series(dtype=str)})
+    if "customer_id" in df.columns:
+        df["customer_id"] = df["customer_id"].astype(str)
+    df = df.drop_duplicates(subset="customer_id")
+    _DIM_CUSTOMER_CACHE = df
+    return df
 
 def discover_available_models(models_dir: Path | None = None) -> dict[str, Path]:
     """Discover available models under models_dir and key by exact metadata division.
@@ -63,20 +83,17 @@ def _sanitize_features(X: pd.DataFrame) -> pd.DataFrame:
 
 
 def _score_p_icp(model, X: pd.DataFrame) -> np.ndarray:
-    """Predict calibrated probability after sanitizing features.
-
-    Falls back to decision_function (logistic transform) or predict() if needed.
-    """
+    """Predict calibrated probability after sanitizing features."""
     Xc = _sanitize_features(X)
-    import numpy as _np
+    # Prefer predict_proba; fallback to decision_function if unavailable
     if hasattr(model, "predict_proba"):
         return model.predict_proba(Xc)[:, 1]
     if hasattr(model, "decision_function"):
         margins = model.decision_function(Xc)
-        return 1 / (1 + _np.exp(-margins))
-    preds = model.predict(Xc)
-    return _np.asarray(preds, dtype=float)
-
+        return 1.0 / (1.0 + np.exp(-margins))
+    # Final fallback: predict() then cast to float
+    preds = getattr(model, "predict", lambda Z: np.zeros(len(Z)))(Xc)
+    return np.asarray(preds, dtype=float)
 
 def score_customers_for_division(
     engine,
@@ -211,29 +228,41 @@ def score_customers_for_division(
     X = feature_matrix.drop(["customer_id", "bought_in_division"]).to_pandas()
     # Align columns to training feature order using saved metadata or feature_list.json
     try:
-        train_cols = []
+        train_cols: list[str] = []
         meta_path = model_path / "metadata.json"
         feat_list_path = model_path / "feature_list.json"
-        if meta_path.exists():
-            with open(meta_path, "r", encoding="utf-8") as f:
-                meta = json.load(f)
-                train_cols = meta.get("feature_names", [])
-        if not train_cols and feat_list_path.exists():
+        # Prefer explicit feature_list.json (canonical order); fallback to metadata
+        if feat_list_path.exists():
             with open(feat_list_path, "r", encoding="utf-8") as f:
                 try:
                     import json as _json
-                    train_cols = _json.load(f)
+                    train_cols = list(_json.load(f) or [])
                 except Exception:
                     train_cols = []
+        if (not train_cols) and meta_path.exists():
+            with open(meta_path, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+                train_cols = list(meta.get("feature_names", []) or [])
         if train_cols:
-            for col in train_cols:
-                if col not in X.columns:
-                    X[col] = 0
-            # Drop extras and reorder
-            X = X[[c for c in train_cols if c in X.columns]]
-    except Exception:
-        # If metadata missing, proceed with current X
-        pass
+            # Hard reindex guarantees exact shape/order and zero‑fills missing
+            missing = [c for c in train_cols if c not in X.columns]
+            extra = [c for c in X.columns if c not in train_cols]
+            if missing or extra:
+                logger.info(
+                    "Feature alignment: %d missing, %d extra columns (will reindex)",
+                    len(missing), len(extra)
+                )
+                try:
+                    if missing:
+                        logger.debug("Missing top20: %s", missing[:20])
+                    if extra:
+                        logger.debug("Extra top20: %s", extra[:20])
+                except Exception:
+                    pass
+            X = X.reindex(columns=train_cols, fill_value=0.0)
+    except Exception as e:
+        # If metadata missing, proceed with current X but log
+        logger.warning(f"Feature alignment skipped due to error: {e}")
     
     try:
         probabilities = _score_p_icp(model, X)
@@ -244,12 +273,44 @@ def score_customers_for_division(
         scores_df['division_name'] = division_name
         scores_df['icp_score'] = probabilities
         # Optional EV and affinity signals
-        for aux_col in [
-            'rfm__all__gp_sum__12m',  # EV proxy
-            'affinity__div__lift_topk__12m',  # affinity (if present)
-        ]:
+        aux_cols = [
+            'rfm__all__gp_sum__12m',        # EV proxy
+            'affinity__div__lift_topk__12m',# affinity aggregate (if present)
+            'mb_lift_max',                  # primary basket-lift signal used by ranker
+            'mb_lift_mean',                 # secondary (not required but useful)
+            'total_gp_all_time',            # size proxy for segment weighting
+            'total_transactions_all_time',  # size proxy for segment weighting
+        ]
+        for aux_col in aux_cols:
             if aux_col in feature_matrix_pd.columns and aux_col not in scores_df.columns:
                 scores_df[aux_col] = pd.to_numeric(feature_matrix_pd[aux_col], errors='coerce').fillna(0.0)
+
+        # Pass through ALS embedding columns so ranker can compute als_norm
+        als_cols = [c for c in feature_matrix_pd.columns if str(c).startswith('als_f')]
+        if als_cols:
+            for c in als_cols:
+                scores_df[c] = pd.to_numeric(feature_matrix_pd[c], errors='coerce').fillna(0.0)
+        # Optional item2vec embeddings (fallback if ALS coverage low)
+        i2v_cols = [c for c in feature_matrix_pd.columns if str(c).startswith('i2v_f')]
+        if i2v_cols:
+            for c in i2v_cols:
+                scores_df[c] = pd.to_numeric(feature_matrix_pd[c], errors='coerce').fillna(0.0)
+
+        # Segment columns (strings): copy as-is if present
+        for seg_str in ['industry', 'industry_sub']:
+            if seg_str in feature_matrix_pd.columns and seg_str not in scores_df.columns:
+                try:
+                    scores_df[seg_str] = feature_matrix_pd[seg_str].astype(str).fillna("")
+                except Exception:
+                    pass
+
+        # Ownership flag for ALS centroid (last 12m div transactions)
+        try:
+            tx_div_col = 'rfm__div__tx_n__12m'
+            if tx_div_col in feature_matrix_pd.columns:
+                scores_df['owned_division_pre_cutoff'] = (pd.to_numeric(feature_matrix_pd[tx_div_col], errors='coerce').fillna(0.0) > 0).astype(int)
+        except Exception:
+            pass
         # Propagate scoring metadata for auditing
         scores_df['cutoff_date'] = cutoff
         scores_df['prediction_window_months'] = int(window_months)
@@ -263,10 +324,9 @@ def score_customers_for_division(
         except Exception:
             pass
         
-        customer_names = (
-            pd.read_sql("select customer_id, customer_name from dim_customer", engine)
-            .drop_duplicates(subset="customer_id")
-        )
+        customer_names = _get_dim_customer(engine)
+        scores_df["customer_id"] = scores_df["customer_id"].astype(str)
+        customer_names["customer_id"] = customer_names["customer_id"].astype(str)
         scores_df = scores_df.merge(customer_names, on="customer_id", how="left")
         
         logger.info(f"Successfully scored {len(scores_df)} customers for {division_name}")
@@ -286,27 +346,29 @@ def generate_whitespace_opportunities(engine):
     """
     logger.info("Generating whitespace opportunities...")
     try:
-        transactions = pl.from_pandas(
-            pd.read_sql("SELECT * FROM fact_transactions", engine, parse_dates=["order_date"])
-        )
-        customers = pl.from_pandas(pd.read_sql("SELECT * FROM dim_customer", engine))
+        # Read transactions with graceful handling when order_date is missing
+        tx_pd = pd.read_sql("SELECT * FROM fact_transactions", engine)
+        if "order_date" in tx_pd.columns:
+            tx_pd["order_date"] = pd.to_datetime(tx_pd["order_date"], errors="coerce")
+        else:
+            # Provide a neutral recency anchor if date not available
+            tx_pd["order_date"] = pd.Timestamp("1970-01-01")
+        transactions = pl.from_pandas(tx_pd)
+        customers = pl.from_pandas(_get_dim_customer(engine))
         if "customer_id" in transactions.columns:
-            transactions = transactions.with_columns(pl.col("customer_id").cast(pl.Int64, strict=False))
+            transactions = transactions.with_columns(pl.col("customer_id").cast(pl.Utf8))
         if "customer_id" in customers.columns:
-            customers = customers.with_columns(pl.col("customer_id").cast(pl.Int64, strict=False))
+            customers = customers.with_columns(pl.col("customer_id").cast(pl.Utf8))
 
-        has_dates = "order_date" in transactions.columns
-        agg_exprs = [
-            pl.col("product_division").unique().alias("divisions_bought"),
-            pl.len().alias("purchase_count"),
-            pl.sum("gross_profit").alias("total_gp"),
-        ]
-        if has_dates:
-            agg_exprs.append(pl.max("order_date").alias("last_purchase"))
         customer_summary = (
             transactions
             .group_by("customer_id")
-            .agg(agg_exprs)
+            .agg([
+                pl.col("product_division").unique().alias("divisions_bought"),
+                pl.len().alias("purchase_count"),
+                pl.max("order_date").alias("last_purchase"),
+                pl.sum("gross_profit").alias("total_gp"),
+            ])
         )
 
         if customer_summary.is_empty():
@@ -314,31 +376,22 @@ def generate_whitespace_opportunities(engine):
 
         freq_max = max(customer_summary["purchase_count"].max(), 1)
         gp_max = max(customer_summary["total_gp"].max(), 1.0)
-        if has_dates:
-            ref_date = transactions["order_date"].max()
-            min_date = transactions["order_date"].min()
-            max_days = max((ref_date - min_date).days, 1)
-            customer_summary = customer_summary.with_columns([
-                (pl.col("purchase_count") / freq_max).alias("freq_norm"),
-                (1 - ((pl.lit(ref_date) - pl.col("last_purchase")).dt.total_days() / max_days)).clip(0.0, 1.0).alias("recency_norm"),
-                (pl.col("total_gp") / gp_max).alias("gp_norm"),
-            ])
-        else:
-            customer_summary = customer_summary.with_columns([
-                (pl.col("purchase_count") / freq_max).alias("freq_norm"),
-                pl.lit(1.0).alias("recency_norm"),
-                (pl.col("total_gp") / gp_max).alias("gp_norm"),
-            ])
+        ref_date = transactions["order_date"].max()
+        min_date = transactions["order_date"].min()
+        max_days = max((ref_date - min_date).days, 1)
+        customer_summary = customer_summary.with_columns([
+            (pl.col("purchase_count") / freq_max).alias("freq_norm"),
+            (1 - ((pl.lit(ref_date) - pl.col("last_purchase")).dt.total_days() / max_days)).clip(0.0, 1.0).alias("recency_norm"),
+            (pl.col("total_gp") / gp_max).alias("gp_norm"),
+        ])
 
+        # Only valid, non-empty divisions
         all_divisions = (
             transactions
-            .filter(
-                pl.col("product_division").is_not_null()
-                & (pl.col("product_division").str.strip_chars() != "")
-            )
-            .select("product_division")
-            .unique()["product_division"].to_list()
+            .filter(pl.col("product_division").is_not_null() & (pl.col("product_division").cast(pl.Utf8).str.strip_chars() != ""))
+            .select("product_division").unique()["product_division"].to_list()
         )
+
         opportunities = []
         for row in customer_summary.iter_rows(named=True):
             not_bought = [div for div in all_divisions if div not in row["divisions_bought"]]
@@ -384,8 +437,18 @@ def generate_scoring_outputs(
     
     # Discover available models by folder convention *_model
     available_models = discover_available_models()
+    # Filter to supported targets only (divisions minus excluded + logical models)
+    try:
+        from gosales.etl.sku_map import get_supported_models, division_set as _division_set
+        exclude = {"Hardware", "Maintenance"}
+        targets = sorted({d for d in _division_set() if d not in exclude} | set(get_supported_models()))
+        available_models = {k: v for k, v in available_models.items() if k in targets}
+        if not available_models:
+            logger.warning("No supported models found for scoring after pruning legacy models.")
+    except Exception as e:
+        logger.warning(f"Could not prune legacy models: {e}")
     
-    all_scores = []
+    all_scores: list[pl.DataFrame] = []
     for division_name, model_path in available_models.items():
         if not model_path.exists():
             logger.warning(f"Model not found for {division_name}: {model_path}")
@@ -407,8 +470,71 @@ def generate_scoring_outputs(
                 run_manifest.setdefault("divisions_scored", []).append(division_name)
             all_scores.append(scores)
             
+    def _align_score_frames(frames: list[pl.DataFrame]) -> pl.DataFrame:
+        if not frames:
+            return pl.DataFrame()
+        # Union of columns across frames
+        cols: list[str] = []
+        seen = set()
+        for df in frames:
+            for c in df.columns:
+                if c not in seen:
+                    seen.add(c)
+                    cols.append(c)
+        # Normalize key columns' dtypes where present
+        normed: list[pl.DataFrame] = []
+        for df in frames:
+            d = df
+            if "customer_id" in d.columns:
+                try:
+                    d = d.with_columns(pl.col("customer_id").cast(pl.Utf8))
+                except Exception:
+                    pass
+            if "division_name" in d.columns:
+                try:
+                    d = d.with_columns(pl.col("division_name").cast(pl.Utf8))
+                except Exception:
+                    pass
+            if "icp_score" in d.columns:
+                try:
+                    d = d.with_columns(pl.col("icp_score").cast(pl.Float64))
+                except Exception:
+                    pass
+            # Add any missing columns as Nulls
+            missing = [c for c in cols if c not in d.columns]
+            if missing:
+                d = d.with_columns([pl.lit(None).alias(c) for c in missing])
+            # Reorder to common column order
+            d = d.select(cols)
+            normed.append(d)
+        return pl.concat(normed, how="vertical_relaxed")
+
     if all_scores:
-        combined_scores = pl.concat(all_scores, how="vertical")
+        combined_scores = _align_score_frames(all_scores)
+        # Whitespace-only wiring for divisions without models (e.g., Post_Processing)
+        try:
+            from gosales.etl.sku_map import division_set as _division_set
+            need_pp = ("Post_Processing" in _division_set()) and ("Post_Processing" not in available_models)
+            if need_pp:
+                ws_df = generate_whitespace_opportunities(engine)
+                if not ws_df.is_empty():
+                    ws_pp = ws_df.filter(pl.col("whitespace_division") == "Post_Processing")
+                    if not ws_pp.is_empty():
+                        cols = [c for c in ["customer_id","whitespace_division","whitespace_score","customer_name"] if c in ws_pp.columns]
+                        ws_min = ws_pp.select(cols)
+                        # Rename to match ICP schema: division_name, icp_score
+                        rename_map = {}
+                        if "whitespace_division" in ws_min.columns:
+                            ws_min = ws_min.rename({"whitespace_division": "division_name"})
+                        if "whitespace_score" in ws_min.columns:
+                            ws_min = ws_min.rename({"whitespace_score": "icp_score"})
+                        # Cast types
+                        if "customer_id" in ws_min.columns:
+                            ws_min = ws_min.with_columns(pl.col("customer_id").cast(pl.Int64, strict=False))
+                        combined_scores = pl.concat([combined_scores, ws_min], how="vertical")
+                        logger.info("Added heuristic Post_Processing p_icp for whitespace (no model present)")
+        except Exception as _e:
+            logger.warning(f"Post_Processing whitespace backfill failed: {_e}")
         # Append run_id if available for provenance
         try:
             if run_manifest is not None and isinstance(run_manifest.get("run_id"), str):
@@ -417,7 +543,21 @@ def generate_scoring_outputs(
         except Exception:
             pass
         icp_scores_path = OUTPUTS_DIR / "icp_scores.csv"
-        combined_scores.write_csv(str(icp_scores_path))
+        # Robust write: attempt primary path; on Windows lock, write a run_id-suffixed file
+        try:
+            combined_scores.write_csv(str(icp_scores_path))
+        except OSError as e:
+            try:
+                # Fallback: write to a unique file (non-destructive) and log
+                import datetime as _dt
+                ts = _dt.datetime.utcnow().strftime('%Y%m%d%H%M%S')
+                fallback = OUTPUTS_DIR / f"icp_scores_{ts}.csv"
+                combined_scores.write_csv(str(fallback))
+                logger.warning(f"icp_scores.csv locked or unavailable ({e}); wrote fallback file: {fallback}")
+                icp_scores_path = fallback
+            except Exception as ee:
+                logger.error(f"Failed to write ICP scores due to file lock and fallback failed: {ee}")
+                raise
         # Lightweight schema validation
         try:
             report = validate_icp_scores_schema(icp_scores_path)
@@ -489,6 +629,21 @@ def generate_scoring_outputs(
             except Exception as e:
                 logger.warning(f"Shadow mode failed: {e}")
 
+            # Challenger overlap (champion vs score_challenger) at top-10%
+            try:
+                if 'score_challenger' in ranked.columns and len(ranked) > 0:
+                    topn = max(1, int(len(ranked) * 0.10))
+                    champ_top = set(ranked.nlargest(topn, ["score","p_icp","customer_id"])['customer_id'].astype(int).tolist()) if 'score' in ranked.columns else set()
+                    chall_top = set(ranked.nlargest(topn, ["score_challenger","p_icp","customer_id"])['customer_id'].astype(int).tolist())
+                    inter = len(champ_top & chall_top)
+                    union = len(champ_top | chall_top)
+                    jacc = float(inter) / max(1, union)
+                    overlap = {"top_percent": 10, "intersection": int(inter), "union": int(union), "jaccard": jacc}
+                    ov_name = f"whitespace_challenger_overlap_{cutoff_tag}.json" if cutoff_tag else "whitespace_challenger_overlap.json"
+                    (OUTPUTS_DIR / ov_name).write_text(pd.Series(overlap).to_json(indent=2), encoding='utf-8')
+            except Exception as e:
+                logger.warning(f"Failed challenger overlap export: {e}")
+
             # Additional Phase-4 artifacts: explanations, thresholds, metrics
             try:
                 # Explanations export
@@ -507,10 +662,11 @@ def generate_scoring_outputs(
                         sort_cols = [c for c in ['score', 'p_icp', 'EV_norm', 'customer_id'] if c in ranked.columns]
                         for i, k in enumerate([5, 10, 20]):
                             kk = max(1, int(scores_num.size * (k / 100.0)))
-                            topk = ranked.nlargest(kk, sort_cols) if sort_cols else ranked.head(0)
-                            thr = float(topk['score'].min()) if len(topk) else float('nan')
+                            pos = scores_num.size - kk
+                            thr = float(np.partition(scores_num, pos)[pos])
+                            count = int((pd.to_numeric(ranked['score'], errors='coerce') >= thr).sum())
                             thresholds[i]["threshold"] = thr
-                            thresholds[i]["count"] = int(len(topk))
+                            thresholds[i]["count"] = int(count)
                 thr_name = f"thresholds_whitespace_{cutoff_tag}.csv" if cutoff_tag else "thresholds_whitespace.csv"
                 pd.DataFrame(thresholds).to_csv(OUTPUTS_DIR / thr_name, index=False)
 
@@ -545,16 +701,56 @@ def generate_scoring_outputs(
                     if mode == 'top_percent':
                         if len(ranked) > 0:
                             ksel = max(1, int(len(ranked) * (cfg.modeling.capacity_percent / 100.0)))
-                            selected = ranked.nlargest(ksel, sort_cols).copy() if sort_cols else ranked.head(0)
+                            initial = ranked.nlargest(ksel, sort_cols).copy() if sort_cols else ranked.head(0)
+                            # Capacity-aware rebalancing to enforce division max share when applicable
+                            try:
+                                max_share = float(getattr(getattr(cfg, 'whitespace', object()), 'bias_division_max_share_topN', 0.0))
+                            except Exception:
+                                max_share = 0.0
+                            def _rebalance(df_all: pd.DataFrame, sel_n: int, max_div_share: float) -> pd.DataFrame:
+                                if sel_n <= 0 or df_all.empty or max_div_share <= 0.0:
+                                    return df_all.head(sel_n)
+                                allowed = {d: int(sel_n * max_div_share) for d in df_all['division_name'].dropna().unique()}
+                                taken = {d: 0 for d in allowed}
+                                out_rows = []
+                                for _, row in df_all.sort_values(sort_cols, ascending=False).iterrows():
+                                    d = row.get('division_name')
+                                    if len(out_rows) >= sel_n:
+                                        break
+                                    if d not in allowed:
+                                        out_rows.append(row)
+                                        continue
+                                    if taken[d] < max(1, allowed[d]):
+                                        out_rows.append(row)
+                                        taken[d] += 1
+                                # If we could not fill capacity due to strict caps, top up with next best regardless of cap
+                                if len(out_rows) < sel_n:
+                                    rem = sel_n - len(out_rows)
+                                    pool = df_all.drop(pd.DataFrame(out_rows).index, errors='ignore') if out_rows else df_all
+                                    top_up = pool.sort_values(sort_cols, ascending=False).head(rem)
+                                    out_rows.extend(list(top_up.to_dict(orient='records')))
+                                return pd.DataFrame(out_rows, columns=df_all.columns)
+                            selected = _rebalance(initial if not initial.empty else ranked, ksel, max_share) if max_share > 0 else initial
                         else:
                             selected = ranked.head(0)
-                    elif mode in ('per_rep','hybrid'):
+                    elif mode in ('per_rep', 'hybrid'):
                         # Fallback to top_percent until rep attribution/interleave available
                         ksel = max(1, int(len(ranked) * (cfg.modeling.capacity_percent / 100.0)))
                         selected = ranked.nlargest(ksel, sort_cols).copy() if len(ranked) and sort_cols else ranked.head(0)
 
                     sel_name = f"whitespace_selected_{cutoff_tag}.csv" if cutoff_tag else "whitespace_selected.csv"
                     selected.to_csv(OUTPUTS_DIR / sel_name, index=False)
+
+                    # Capacity summary export (counts and shares per division)
+                    try:
+                        if len(selected) > 0 and 'division_name' in selected.columns:
+                            cap = selected.groupby('division_name')['customer_id'].size().sort_values(ascending=False)
+                            cap_df = cap.rename('selected_count').reset_index()
+                            cap_df['selected_share'] = cap_df['selected_count'] / float(len(selected))
+                            cap_name = f"capacity_summary_{cutoff_tag}.csv" if cutoff_tag else "capacity_summary.csv"
+                            cap_df.to_csv(OUTPUTS_DIR / cap_name, index=False)
+                    except Exception:
+                        pass
 
                     share_series = selected.groupby('division_name')['customer_id'].size().sort_values(ascending=False) if len(selected) > 0 and 'division_name' in selected.columns else pd.Series(dtype=int)
                     total_sel = max(1, int(len(selected)))
@@ -605,7 +801,21 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    db_engine = get_db_connection()
+    # Prefer curated connection where fact tables exist; fallback to primary DB
+    try:
+        db_engine = get_curated_connection()
+    except Exception:
+        db_engine = get_db_connection()
+    try:
+        cfg = load_config()
+        strict = bool(getattr(getattr(cfg, 'database', object()), 'strict_db', False))
+    except Exception:
+        strict = False
+    if not validate_connection(db_engine):
+        msg = "Primary database connection is unhealthy."
+        if strict:
+            raise RuntimeError(msg)
+        logger.warning(msg)
     generate_scoring_outputs(
         db_engine,
         cutoff_date=args.cutoff_date,

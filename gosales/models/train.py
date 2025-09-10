@@ -1,7 +1,8 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 from pathlib import Path
+from datetime import datetime, timezone
 from dataclasses import dataclass
 
 import click
@@ -23,7 +24,7 @@ except Exception:
     _HAS_SHAP = False
 
 from gosales.utils.config import load_config
-from gosales.utils.db import get_db_connection
+from gosales.utils.db import get_db_connection, get_curated_connection, validate_connection
 from gosales.features.engine import create_feature_matrix
 from gosales.utils.paths import OUTPUTS_DIR, MODELS_DIR
 from gosales.utils.logger import get_logger
@@ -54,7 +55,7 @@ def _train_test_split_time_aware(X: pd.DataFrame, y: pd.Series, seed: int) -> tu
     if recency_col in X.columns:
         df = X.copy()
         df['_y'] = y
-        # Smaller recency_days = more recent → assign those to validation
+        # Smaller recency_days = more recent â†’ assign those to validation
         df = df.sort_values(recency_col, ascending=True)
         n = len(df)
         n_valid = max(1, int(0.2 * n))
@@ -209,13 +210,39 @@ def _calibrate(clf, X_train: pd.DataFrame, y_train: pd.Series, X_valid: pd.DataF
 @click.option("--calibration", default="platt,isotonic")
 @click.option("--shap-sample", default=0, type=int, help="Rows to sample for SHAP; 0 disables")
 @click.option("--config", default=str((Path(__file__).parents[1] / "config.yaml").resolve()))
+@click.option("--group-cv/--no-group-cv", default=False, help="Use GroupKFold by customer_id for train/valid split (leakage guard)")
+@click.option("--purge-days", default=0, type=int, help="Embargo/purge days between train and validation (time-aware splits)")
+@click.option("--label-buffer-days", default=0, type=int, help="Start labels at cutoff+buffer_days (horizon buffer)")
+@click.option("--safe-mode/--no-safe-mode", default=False, help="Apply SAFE feature policy (drop/lag high-risk adjacency feature families)")
 @click.option("--dry-run/--no-dry-run", default=False, help="Skip training; only verify inputs and emit planned artifacts to manifest")
-def main(division: str, cutoffs: str, window_months: int, models: str, calibration: str, shap_sample: int, config: str, dry_run: bool) -> None:
+def main(division: str, cutoffs: str, window_months: int, models: str, calibration: str, shap_sample: int, config: str, group_cv: bool, purge_days: int, label_buffer_days: int, safe_mode: bool, dry_run: bool) -> None:
     cfg = load_config(config)
+    # Determine SAFE policy: CLI flag or per-division config override
+    auto_safe = bool(safe_mode)
+    try:
+        divs = [str(d).lower() for d in getattr(cfg, 'modeling', object()).safe_divisions]  # type: ignore[attr-defined]
+        if str(division).lower() in divs:
+            auto_safe = True
+    except Exception:
+        pass
     cut_list = [c.strip() for c in cutoffs.split(",") if c.strip()]
     OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
-    engine = get_db_connection()
+    # Prefer curated connection where fact tables exist; fallback to primary DB
+    try:
+        engine = get_curated_connection()
+    except Exception:
+        engine = get_db_connection()
+    # Connection health check
+    try:
+        strict = bool(getattr(getattr(cfg, 'database', object()), 'strict_db', False))
+    except Exception:
+        strict = False
+    if not validate_connection(engine):
+        msg = "Database connection is unhealthy."
+        if strict:
+            raise RuntimeError(msg)
+        logger.warning(msg)
 
     # Accumulate metrics across cutoffs per model
     model_names = [m.strip() for m in models.split(",") if m.strip()]
@@ -244,8 +271,23 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
             return
         all_dropped_low_var: list[str] = []
         all_dropped_corr: list[tuple[str, str]] = []
+        # In SAFE (audit) mode, apply gauntlet tail-mask to windowed features
+        gauntlet_mask_tail = 0
+        try:
+            if auto_safe:
+                gauntlet_mask_tail = int(getattr(getattr(cfg, 'validation', object()), 'gauntlet_mask_tail_days', 0) or 0)
+        except Exception:
+            gauntlet_mask_tail = 0
+
         for cutoff in cut_list:
-            fm = create_feature_matrix(engine, division, cutoff, window_months)
+            fm = create_feature_matrix(
+                engine,
+                division,
+                cutoff,
+                window_months,
+                mask_tail_days=gauntlet_mask_tail if auto_safe else None,
+                label_buffer_days=label_buffer_days,
+            )
             # Persist features parquet for validation phase (Phase 5) compatibility
             try:
                 from gosales.utils.paths import OUTPUTS_DIR as _OUT
@@ -260,6 +302,35 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
             y = df['bought_in_division'].astype(int).values
             X = df.drop(columns=['customer_id','bought_in_division'])
             X = _sanitize_features(X)
+            # SAFE policy: drop high-risk adjacency families
+            if auto_safe:
+                try:
+                    cols = []
+                    for c in X.columns:
+                        s = str(c).lower()
+                        if s.startswith('assets_expiring_'):
+                            continue
+                        if s.startswith('assets_subs_share_') or s.startswith('assets_on_subs_share_') or s.startswith('assets_off_subs_share_'):
+                            continue
+                        if 'days_since_last' in s or 'recency' in s:
+                            continue
+                        if '__3m' in s or s.endswith('_last_3m') or '__6m' in s or s.endswith('_last_6m') or '__12m' in s or s.endswith('_last_12m'):
+                            continue
+                        if s.startswith('als_f'):
+                            continue
+                        if s.startswith('gp_12m_') or s.startswith('tx_12m_'):
+                            continue
+                        if s in ('gp_2024', 'gp_2023'):
+                            continue
+                        # Division share momentum and SKU short-term families
+                        if s.startswith('xdiv__div__gp_share__'):
+                            continue
+                        if s.startswith('sku_gp_12m_') or s.startswith('sku_qty_12m_') or s.startswith('sku_gp_per_unit_12m_'):
+                            continue
+                        cols.append(c)
+                    X = X[cols]
+                except Exception:
+                    pass
             # Feature pruning for stability
             dropped_low_var: list[str] = []
             dropped_corr: list[tuple[str, str]] = []
@@ -270,7 +341,44 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
                 all_dropped_corr.extend(dropped_corr)
             except Exception:
                 pass
-            X_train, X_valid, y_train, y_valid = _train_test_split_time_aware(X, y, cfg.modeling.seed)
+            overlap_csv = None
+            if group_cv:
+                try:
+                    rec_col = 'rfm__all__recency_days__life'
+                    groups = df['customer_id'].astype(str).values
+                    if int(purge_days) > 0 and rec_col in df.columns:
+                        from gosales.models.cv import BlockedPurgedGroupCV
+                        rec = pd.to_numeric(df[rec_col], errors='coerce').fillna(1e9).astype(float).values
+                        cv = BlockedPurgedGroupCV(n_splits=cfg.modeling.folds, purge_days=int(purge_days), seed=cfg.modeling.seed)
+                        splits = list(cv.split(X, y, groups, anchor_days_from_cutoff=rec))
+                        tr, va = splits[-1]
+                    else:
+                        from sklearn.model_selection import GroupKFold
+                        gkf = GroupKFold(n_splits=cfg.modeling.folds)
+                        splits = list(gkf.split(X, y, groups=groups))
+                        tr, va = splits[-1]
+                    X_train, X_valid, y_train, y_valid = X.iloc[tr], X.iloc[va], y[tr], y[va]
+                except Exception:
+                    X_train, X_valid, y_train, y_valid = _train_test_split_time_aware(X, y, cfg.modeling.seed)
+            else:
+                X_train, X_valid, y_train, y_valid = _train_test_split_time_aware(X, y, cfg.modeling.seed)
+
+            # Emit fold overlap audit and optionally fail if any overlap
+            try:
+                train_ids = set(df.iloc[X_train.index]['customer_id'].astype(str))
+                valid_ids = set(df.iloc[X_valid.index]['customer_id'].astype(str))
+                overlap = sorted(train_ids.intersection(valid_ids))
+                from gosales.utils.paths import OUTPUTS_DIR as _OUT
+                overlap_path = _OUT / f"fold_customer_overlap_{division.lower()}_{cutoff}.csv"
+                import pandas as _pd
+                _pd.DataFrame({"customer_id": overlap}).to_csv(overlap_path, index=False)
+                overlap_csv = str(overlap_path)
+                if group_cv and len(overlap) > 0:
+                    raise RuntimeError(f"GroupKFold overlap detected ({len(overlap)} customers). See {overlap_path}")
+            except Exception as _e:
+                if group_cv:
+                    raise
+                # Non-fatal for non-group splits; proceed
 
         # Baseline LR (elastic-net via saga)
         if 'logreg' in model_names:
@@ -281,17 +389,20 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
             # Expanded grid and higher iteration budget
             grid_l1 = lr_params.get('l1_ratio', [0.0, 0.2, 0.5, 0.8])
             grid_C = lr_params.get('C', [0.1, 0.5, 1.0])
+            # Class-weight control
+            cw_cfg = str(cfg.modeling.class_weight).lower() if getattr(cfg, 'modeling', None) else 'balanced'
+            class_weight = None if cw_cfg in ('none', 'null', '') else 'balanced'
             for l1_ratio in grid_l1:
                 for C in grid_C:
                     if float(l1_ratio) == 0.0:
                         lr = LogisticRegression(
                             penalty='l2', solver='lbfgs', C=C, max_iter=10000, tol=1e-3,
-                            class_weight='balanced', random_state=cfg.modeling.seed
+                            class_weight=class_weight, random_state=cfg.modeling.seed
                         )
                     else:
                         lr = LogisticRegression(
                             penalty='elasticnet', solver='saga', l1_ratio=l1_ratio, C=C,
-                            max_iter=10000, tol=1e-3, class_weight='balanced', random_state=cfg.modeling.seed
+                            max_iter=10000, tol=1e-3, class_weight=class_weight, random_state=cfg.modeling.seed
                         )
                     pipe = Pipeline([
                         ('scaler', StandardScaler(with_mean=False)),
@@ -340,6 +451,8 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
             pos = int(np.sum(y_train))
             neg = int(len(y_train) - pos)
             spw = (neg / max(1, pos))
+            use_spw = bool(getattr(cfg.modeling, 'use_scale_pos_weight', True))
+            spw_cap = float(getattr(cfg.modeling, 'scale_pos_weight_cap', 10.0))
             grid = cfg.modeling.lgbm_grid
             best_lgbm = None
             best_auc = -1
@@ -348,7 +461,7 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
                     for learning_rate in grid.get('learning_rate', [0.05]):
                         for feature_fraction in grid.get('feature_fraction', [0.9]):
                             for bagging_fraction in grid.get('bagging_fraction', [0.9]):
-                                lgbm = LGBMClassifier(
+                                params = dict(
                                     random_state=cfg.modeling.seed,
                                     deterministic=True,
                                     n_jobs=1,
@@ -358,8 +471,10 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
                                     min_data_in_leaf=min_data_in_leaf,
                                     feature_fraction=feature_fraction,
                                     bagging_fraction=bagging_fraction,
-                                    scale_pos_weight=min(spw, 10.0),
                                 )
+                                if use_spw:
+                                    params['scale_pos_weight'] = min(spw, spw_cap)
+                                lgbm = LGBMClassifier(**params)
                                 lgbm.fit(X_train, y_train, eval_set=[(X_valid, y_valid)], eval_metric='auc')
                                 p = lgbm.predict_proba(X_valid)[:,1]
                                 auc_lgbm = roc_auc_score(y_valid, p)
@@ -371,7 +486,7 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
                                 except Exception:
                                     gap = 0.0
                                 if gap > 0.05:
-                                    reg_clf = LGBMClassifier(
+                                    reg_params = dict(
                                         random_state=cfg.modeling.seed,
                                         deterministic=True,
                                         n_jobs=1,
@@ -381,8 +496,10 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
                                         min_data_in_leaf=int(min_data_in_leaf * 2),
                                         feature_fraction=max(0.5, feature_fraction * 0.9),
                                         bagging_fraction=max(0.5, bagging_fraction * 0.9),
-                                        scale_pos_weight=min(spw, 10.0),
                                     )
+                                    if use_spw:
+                                        reg_params['scale_pos_weight'] = min(spw, spw_cap)
+                                    reg_clf = LGBMClassifier(**reg_params)
                                     reg_clf.fit(X_train, y_train, eval_set=[(X_valid, y_valid)], eval_metric='auc')
                                     p_reg = reg_clf.predict_proba(X_valid)[:,1]
                                     auc_reg = roc_auc_score(y_valid, p_reg)
@@ -421,25 +538,68 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
 
     # Train final on last cutoff for simplicity here
     last_cut = cut_list[-1]
-    fm_final = create_feature_matrix(engine, division, last_cut, window_months)
+    fm_final = create_feature_matrix(
+        engine,
+        division,
+        last_cut,
+        window_months,
+        mask_tail_days=gauntlet_mask_tail if auto_safe else None,
+        label_buffer_days=label_buffer_days,
+    )
     df_final = fm_final.to_pandas()
     y_final = df_final['bought_in_division'].astype(int).values
     X_final = df_final.drop(columns=['customer_id','bought_in_division'])
     X_final = _sanitize_features(X_final)
+    if auto_safe:
+        try:
+            cols = []
+            for c in X_final.columns:
+                s = str(c).lower()
+                if s.startswith('assets_expiring_'):
+                    continue
+                if s.startswith('assets_subs_share_') or s.startswith('assets_on_subs_share_') or s.startswith('assets_off_subs_share_'):
+                    continue
+                if 'days_since_last' in s or 'recency' in s:
+                    continue
+                if '__3m' in s or s.endswith('_last_3m') or '__6m' in s or s.endswith('_last_6m') or '__12m' in s or s.endswith('_last_12m'):
+                    continue
+                if s.startswith('als_f'):
+                    continue
+                if s.startswith('gp_12m_') or s.startswith('tx_12m_'):
+                    continue
+                if s in ('gp_2024', 'gp_2023'):
+                    continue
+                if s.startswith('xdiv__div__gp_share__'):
+                    continue
+                if s.startswith('sku_gp_12m_') or s.startswith('sku_qty_12m_') or s.startswith('sku_gp_per_unit_12m_'):
+                    continue
+                cols.append(c)
+            X_final = X_final[cols]
+        except Exception:
+            pass
     # Minimal: refit winner without hyper search for brevity (could repeat best params)
-    # Choose calibration method that minimized Brier during validation search
+    # Choose calibration method per-division based on volume (stability heuristic)
+    # If positives >= sparse_isotonic_threshold_pos -> prefer isotonic; else Platt (sigmoid)
     final_cal_method = None
     try:
-        # Prefer the best method from the per-model grid we already computed
-        # Fallback to isotonic if available in config
+        pos_final = int(np.sum(y_final))
+        thr = int(getattr(getattr(cfg, 'modeling', object()), 'sparse_isotonic_threshold_pos', 1000) or 1000)
         avail = set([m for m in cal_methods])
-        prefer = 'isotonic' if 'isotonic' in avail else ('sigmoid' if 'platt' in avail else 'sigmoid')
-        final_cal_method = prefer
+        if pos_final >= thr and 'isotonic' in avail:
+            final_cal_method = 'isotonic'
+        elif 'platt' in avail or 'sigmoid' in avail:
+            final_cal_method = 'sigmoid'
+        elif 'isotonic' in avail:
+            final_cal_method = 'isotonic'
+        else:
+            final_cal_method = 'sigmoid'
     except Exception:
         final_cal_method = 'sigmoid'
 
     if winner == 'logreg':
-        lr = LogisticRegression(penalty='elasticnet', solver='saga', l1_ratio=0.2, C=1.0, max_iter=10000, tol=1e-3, class_weight='balanced', random_state=cfg.modeling.seed)
+        cw_cfg = str(cfg.modeling.class_weight).lower() if getattr(cfg, 'modeling', None) else 'balanced'
+        class_weight = None if cw_cfg in ('none', 'null', '') else 'balanced'
+        lr = LogisticRegression(penalty='elasticnet', solver='saga', l1_ratio=0.2, C=1.0, max_iter=10000, tol=1e-3, class_weight=class_weight, random_state=cfg.modeling.seed)
         pipe = Pipeline([
             ('scaler', StandardScaler(with_mean=False)),
             ('model', lr),
@@ -469,11 +629,45 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
     with open(out_dir / "feature_list.json", "w", encoding="utf-8") as f:
         json.dump(feature_names, f)
     artifacts["feature_list.json"] = str(out_dir / "feature_list.json")
+    # Prepare minimal metadata for scoring; finalize after metrics computed
+    try:
+        pos = int(np.sum(y_final))
+        neg = int(max(0, len(y_final) - pos))
+        spw = float((neg / pos)) if pos > 0 else None
+        cal_label = 'isotonic' if str(final_cal_method).lower() == 'isotonic' else 'sigmoid'
+        best_model_label = 'Logistic Regression' if str(winner).lower() == 'logreg' else 'LightGBM'
+        _metadata = {
+            "division": division,
+            "cutoff_date": last_cut,
+            "prediction_window_months": int(window_months),
+            "feature_names": feature_names,
+            "trained_at": datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
+            "best_model": best_model_label,
+            "best_auc": None,
+            "calibration_method": cal_label,
+            "calibration_mae": None,
+            "brier_score": None,
+            "class_balance": {
+                "positives": pos,
+                "negatives": neg,
+                "scale_pos_weight": spw,
+            },
+        }
+    except Exception:
+        _metadata = None
     # Final predictions and guardrails
     try:
         p_final = model.predict_proba(X_final)[:,1]
         if float(np.std(p_final)) < 0.01:
             logger.warning("Degenerate classifier (std(p) < 0.01). Aborting artifact write.")
+            # Ensure minimal metadata exists even on degenerate runs
+            try:
+                if _metadata is not None:
+                    with open(out_dir / "metadata.json", "w", encoding="utf-8") as mf:
+                        json.dump(_metadata, mf, indent=2)
+                    artifacts["metadata.json"] = str(out_dir / "metadata.json")
+            except Exception:
+                pass
             return
     except Exception:
         p_final = None
@@ -529,24 +723,57 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
         gains.to_csv(gains_path, index=False)
         artifacts[gains_path.name] = str(gains_path)
 
-        # Calibration bins & MAE
+        # Calibration bins & MAE (and plot)
         try:
             calib = calibration_bins(y_final, p_final, n_bins=10)
             calib_path = OUTPUTS_DIR / f"calibration_{division.lower()}.csv"
             calib.to_csv(calib_path, index=False)
             artifacts[calib_path.name] = str(calib_path)
             cal_mae = calibration_mae(calib, weighted=True)
+            # Also emit a PNG plot for quick viewing
+            try:
+                import matplotlib.pyplot as plt
+                fig, ax = plt.subplots(figsize=(6, 4))
+                x = calib['mean_predicted'].values
+                y = calib['fraction_positives'].values
+                ax.plot([0,1], [0,1], linestyle='--', color='#2ca02c', label='Perfect')
+                ax.plot(x, y, marker='o', color='#1f77b4', label='Observed')
+                ax.set_xlabel('Predicted probability')
+                ax.set_ylabel('Observed rate')
+                ax.set_title(f'Calibration Curve - {division} (@ {last_cut})')
+                ax.legend(loc='best')
+                fig.tight_layout()
+                png_path = OUTPUTS_DIR / f"calibration_plot_{division.lower()}.png"
+                fig.savefig(png_path)
+                plt.close(fig)
+                artifacts[png_path.name] = str(png_path)
+            except Exception:
+                pass
         except Exception:
             cal_mae = None
 
         # Thresholds for top-K percents
         thr_rows = []
+        topk_rows = []
         for k in cfg.modeling.top_k_percents:
             if p_final is None or len(p_final) == 0:
                 continue
             thr = compute_topk_threshold(p_final, k)
             cutoff_idx = max(1, int(len(p_final) * (k/100.0)))
             thr_rows.append({"k_percent": k, "threshold": float(thr), "count": cutoff_idx})
+            # Top-K yield and capture
+            order = np.argsort(-p_final)
+            top_idx = order[:cutoff_idx]
+            pos_rate = float(np.mean(y_final[top_idx])) if cutoff_idx > 0 else None
+            total_pos = float(np.sum(y_final)) if len(y_final) else 0.0
+            capture = float(np.sum(y_final[top_idx]) / total_pos) if total_pos > 0 else None
+            topk_rows.append({
+                "k_percent": int(k),
+                "count": int(cutoff_idx),
+                "pos_rate": pos_rate,
+                "capture": capture,
+                "threshold": float(thr),
+            })
         thr_path = OUTPUTS_DIR / f"thresholds_{division.lower()}.csv"
         pd.DataFrame(thr_rows).to_csv(thr_path, index=False)
         artifacts[thr_path.name] = str(thr_path)
@@ -583,6 +810,18 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
             )
         )
 
+        # Write/update metadata.json with final metrics
+        try:
+            if _metadata is not None:
+                _metadata["best_auc"] = float(auc_val) if auc_val is not None else None
+                _metadata["calibration_mae"] = float(cal_mae) if 'cal_mae' in locals() and cal_mae is not None else None
+                _metadata["brier_score"] = float(brier) if brier is not None else None
+                with open(out_dir / "metadata.json", "w", encoding="utf-8") as mf:
+                    json.dump(_metadata, mf, indent=2)
+                artifacts["metadata.json"] = str(out_dir / "metadata.json")
+        except Exception as _e:
+            logger.warning(f"Failed to write metadata.json: {_e}")
+
         # Model card / metrics
         # Model card / metrics
         metrics = {
@@ -607,6 +846,12 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
         artifacts[metrics_path.name] = str(metrics_path)
 
         # Model card JSON
+        # Derive a human-friendly calibration method label
+        try:
+            cal_method_label = 'isotonic' if final_cal_method == 'isotonic' else 'platt'
+        except Exception:
+            cal_method_label = None
+
         card = {
             "division": division,
             "cutoffs": cut_list,
@@ -621,7 +866,8 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
                 "n_customers": int(len(y_final)),
                 "prevalence": float(np.mean(y_final)) if len(y_final) > 0 else None,
             },
-            "calibration": {"mae_weighted": float(cal_mae) if cal_mae is not None else None},
+            "calibration": {"method": cal_method_label, "mae_weighted": float(cal_mae) if cal_mae is not None else None},
+            "topk": topk_rows,
             "artifacts": {
                 "model_pickle": str(out_dir / "model.pkl"),
                 "feature_list": str(out_dir / "feature_list.json"),
@@ -665,5 +911,7 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
 
 if __name__ == "__main__":
     main()
+
+
 
 

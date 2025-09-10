@@ -23,6 +23,14 @@ class Paths:
 class Database:
     engine: str = "sqlite"  # sqlite | duckdb | azure
     sqlite_path: Path = ROOT_DIR.parent / "gosales.db"
+    curated_target: str = "db"  # 'db' | 'sqlite'
+    curated_sqlite_path: Path = ROOT_DIR.parent / "gosales_curated.db"
+    # Enforce external DB presence; if True and AZSQL_* env vars missing/unhealthy, fail instead of falling back
+    strict_db: bool = False
+    # Optional mapping of logical table names -> concrete source (e.g., "dbo.saleslog" or "csv")
+    source_tables: Dict[str, str] = field(default_factory=dict)
+    # Optional explicit allow-list of schema-qualified DB objects permitted in dynamic SQL
+    allowed_identifiers: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -38,6 +46,12 @@ class ETL:
     currency: str = "USD"
     fail_on_contract_breach: bool = True
     allow_unknown_columns: bool = False
+    # Industry enrichment fuzzy-match controls
+    enable_industry_fuzzy: bool = True
+    fuzzy_min_unmatched: int = 50
+    fuzzy_skip_if_coverage_ge: float = 0.95
+    # Source column mapping: use exact DB headers
+    source_columns: Dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -68,6 +82,26 @@ class Features:
     als_lookback_months: int = 12
     use_item2vec: bool = False
     use_text_tags: bool = False
+    # Toggle Moneyball-based asset features at cutoff (rollups, expiring windows, subs shares)
+    use_assets: bool = True
+    # Guard days for look-ahead expiration windows; exclude [cutoff, cutoff+guard]
+    expiring_guard_days: int = 14
+    # Floor for recency features to avoid near-cutoff signals (e.g., 14 days)
+    recency_floor_days: int = 0
+    # Half-lives (days) for hazard/decay recency transforms (e.g., [30, 90, 180])
+    recency_decay_half_lives_days: list[int] = field(default_factory=lambda: [30, 90, 180])
+    # Offset windows (end at cutoff - offset_days) to decorrelate from boundary
+    enable_offset_windows: bool = True
+    offset_days: list[int] = field(default_factory=lambda: [60])
+    # Window delta features (e.g., 12m vs previous 12m from 24m)
+    enable_window_deltas: bool = True
+    # Affinity (market-basket) embargo days before cutoff for exposure
+    affinity_lag_days: int = 60
+    # Pooled/hierarchical encoders for sparse categories (industry/industry_sub)
+    pooled_encoders_enable: bool = True
+    pooled_encoders_lookback_months: int = 24
+    pooled_alpha_industry: float = 50.0
+    pooled_alpha_sub: float = 50.0
 
 
 @dataclass
@@ -84,6 +118,12 @@ class ModelingConfig:
     sparse_isotonic_threshold_pos: int = 1000
     # Max rows allowed for SHAP computation; skip if exceeded
     shap_max_rows: int = 50000
+    # Class imbalance controls
+    class_weight: str = "balanced"  # 'balanced' or 'none'
+    use_scale_pos_weight: bool = True
+    scale_pos_weight_cap: float = 10.0
+    # Divisions to train in SAFE feature policy (drop adjacency-heavy/short-window families)
+    safe_divisions: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -123,6 +163,18 @@ class ValidationConfig:
     ks_threshold: float = 0.15
     psi_threshold: float = 0.25
     cal_mae_threshold: float = 0.03
+    # Leakage Gauntlet thresholds for shift-14 check
+    shift14_epsilon_auc: float = 0.01
+    shift14_epsilon_lift10: float = 0.25
+    # Leakage Gauntlet thresholds for Top-K ablation
+    ablation_epsilon_auc: float = 0.01
+    ablation_epsilon_lift10: float = 0.25
+    # Gauntlet-only masking: exclude last N days inside windowed aggregations
+    gauntlet_mask_tail_days: int = 14
+    # Gauntlet-only: purge/embargo days between train and validation
+    gauntlet_purge_days: int = 30
+    # Gauntlet-only: start labels at cutoff+buffer_days (horizon buffer)
+    gauntlet_label_buffer_days: int = 0
 
 
 @dataclass
@@ -205,10 +257,28 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
 
     env_db_engine = os.getenv("GOSALES_DB_ENGINE")
     env_sqlite_path = os.getenv("GOSALES_SQLITE_PATH")
+    env_use_assets = os.getenv("GOSALES_FEATURES_USE_ASSETS")
+    env_exp_guard = os.getenv("GOSALES_FEATURES_EXPIRING_GUARD_DAYS")
+    env_rec_floor = os.getenv("GOSALES_FEATURES_RECENCY_FLOOR_DAYS")
     if env_db_engine:
         cfg_dict.setdefault("database", {})["engine"] = env_db_engine
     if env_sqlite_path:
         cfg_dict.setdefault("database", {})["sqlite_path"] = env_sqlite_path
+    if env_use_assets is not None:
+        # Accept truthy strings: '1', 'true', 'yes'
+        truthy = {"1", "true", "yes", "on"}
+        val = str(env_use_assets).strip().lower() in truthy
+        cfg_dict.setdefault("features", {})["use_assets"] = val
+    if env_exp_guard is not None:
+        try:
+            cfg_dict.setdefault("features", {})["expiring_guard_days"] = int(env_exp_guard)
+        except Exception:
+            pass
+    if env_rec_floor is not None:
+        try:
+            cfg_dict.setdefault("features", {})["recency_floor_days"] = int(env_rec_floor)
+        except Exception:
+            pass
 
     cfg_dict = _merge_overrides(cfg_dict, cli_overrides)
 
@@ -251,6 +321,11 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
         database=Database(
             engine=str(database.get("engine", "sqlite")),
             sqlite_path=Path(database.get("sqlite_path", ROOT_DIR.parent / "gosales.db")).resolve(),
+            curated_target=str(database.get("curated_target", "db")),
+            curated_sqlite_path=Path(database.get("curated_sqlite_path", ROOT_DIR.parent / "gosales_curated.db")).resolve(),
+            strict_db=bool(database.get("strict_db", False)),
+            source_tables=dict(database.get("source_tables", {})),
+            allowed_identifiers=list(database.get("allowed_identifiers", [])),
         ),
         run=Run(
             cutoff_date=str(run_cfg.get("cutoff_date", "2024-12-31")),
@@ -262,6 +337,10 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
             currency=str(etl_cfg.get("currency", "USD")),
             fail_on_contract_breach=bool(etl_cfg.get("fail_on_contract_breach", True)),
             allow_unknown_columns=bool(etl_cfg.get("allow_unknown_columns", False)),
+            enable_industry_fuzzy=bool(etl_cfg.get("enable_industry_fuzzy", True)),
+            fuzzy_min_unmatched=int(etl_cfg.get("fuzzy_min_unmatched", 50)),
+            fuzzy_skip_if_coverage_ge=float(etl_cfg.get("fuzzy_skip_if_coverage_ge", 0.95)),
+            source_columns=dict(etl_cfg.get("source_columns", {})),
         ),
         logging=Logging(
             level=str(log_cfg.get("level", "INFO")),
@@ -284,6 +363,18 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
             als_lookback_months=int(feat_cfg.get("als_lookback_months", 12)),
             use_item2vec=bool(feat_cfg.get("use_item2vec", False)),
             use_text_tags=bool(feat_cfg.get("use_text_tags", False)),
+            use_assets=bool(feat_cfg.get("use_assets", True)),
+            expiring_guard_days=int(feat_cfg.get("expiring_guard_days", 14)),
+            recency_floor_days=int(feat_cfg.get("recency_floor_days", 0)),
+            recency_decay_half_lives_days=list(feat_cfg.get("recency_decay_half_lives_days", [30, 90, 180])),
+            enable_offset_windows=bool(feat_cfg.get("enable_offset_windows", True)),
+            offset_days=list(feat_cfg.get("offset_days", [60])),
+            enable_window_deltas=bool(feat_cfg.get("enable_window_deltas", True)),
+            affinity_lag_days=int(feat_cfg.get("affinity_lag_days", 60)),
+            pooled_encoders_enable=bool(feat_cfg.get("pooled_encoders_enable", True)),
+            pooled_encoders_lookback_months=int(feat_cfg.get("pooled_encoders_lookback_months", 24)),
+            pooled_alpha_industry=float(feat_cfg.get("pooled_alpha_industry", 50.0)),
+            pooled_alpha_sub=float(feat_cfg.get("pooled_alpha_sub", 50.0)),
         ),
         modeling=ModelingConfig(
             seed=int(mdl_cfg.get("seed", 42)),
@@ -295,6 +386,10 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
             top_k_percents=list(mdl_cfg.get("top_k_percents", [5, 10, 20])),
             capacity_percent=int(mdl_cfg.get("capacity_percent", 10)),
             sparse_isotonic_threshold_pos=int(mdl_cfg.get("sparse_isotonic_threshold_pos", 1000)),
+            class_weight=str(mdl_cfg.get("class_weight", "balanced")),
+            use_scale_pos_weight=bool(mdl_cfg.get("use_scale_pos_weight", True)),
+            scale_pos_weight_cap=float(mdl_cfg.get("scale_pos_weight_cap", 10.0)),
+            safe_divisions=list(mdl_cfg.get("safe_divisions", [])),
         ),
         whitespace=WhitespaceConfig(
             weights=ws_weights,
@@ -325,6 +420,13 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
             ks_threshold=float(val_cfg.get("ks_threshold", 0.15)),
             psi_threshold=float(val_cfg.get("psi_threshold", 0.25)),
             cal_mae_threshold=float(val_cfg.get("cal_mae_threshold", 0.03)),
+            shift14_epsilon_auc=float(val_cfg.get("shift14_epsilon_auc", 0.01)),
+            shift14_epsilon_lift10=float(val_cfg.get("shift14_epsilon_lift10", 0.25)),
+            ablation_epsilon_auc=float(val_cfg.get("ablation_epsilon_auc", 0.01)),
+            ablation_epsilon_lift10=float(val_cfg.get("ablation_epsilon_lift10", 0.25)),
+            gauntlet_mask_tail_days=int(val_cfg.get("gauntlet_mask_tail_days", 14)),
+            gauntlet_purge_days=int(val_cfg.get("gauntlet_purge_days", 30)),
+            gauntlet_label_buffer_days=int(val_cfg.get("gauntlet_label_buffer_days", 0)),
         ),
     )
 

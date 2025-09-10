@@ -93,6 +93,23 @@ $env:PYTHONPATH = "$PWD"; streamlit run gosales/ui/app.py
 
 ---
 
+### Post-rebase updates (August 2025)
+
+- Scoring pipeline now supports sanitized probability fallback when models lack `predict_proba` or expose only `decision_function`. See `gosales/pipeline/score_customers.py`.
+- Ranker restored and hardened: eligibility checks, ALS normalization, deterministic `nlargest` selection, and schema validations.
+- Whitespace lift builder uses boolean baskets to silence mlxtend deprecation warnings.
+- ALS components pass CSR matrices to `implicit` and cap BLAS threads to avoid performance warnings. BLAS thread limit is applied centrally in `gosales/__init__.py`.
+- CLI for scoring accepts `--cutoff-date` and `--window-months` fallbacks when model `metadata.json` is missing these fields.
+
+#### Warnings during tests
+
+You may still see warnings from dependencies in CI:
+- `implicit` suggests setting `OPENBLAS_NUM_THREADS=1`. We enforce this behavior at runtime using `threadpoolctl` to limit BLAS to 1 thread.
+- `mlxtend` deprecation on non-boolean baskets has been addressed by emitting boolean dummies.
+- Pandas groupby and sklearn “feature names” notices are benign in tests; we prefer code clarity over suppressing these globally.
+
+---
+
 ### Modeling & validation notes
 
 - Class imbalance is handled via class weights (LR) and `scale_pos_weight` (LightGBM).
@@ -128,7 +145,8 @@ graph TD
     subgraph "Training Pipeline"
         A[Raw CSVs <br/> (e.g., 2023-2024)] --> B{ETL}
         B --> C[fact_transactions]
-        C --> D{Feature Engine <br/> cutoff_date='2024-12-31'}
+        C --> CE[Eventization <br/> fact_events]
+        CE --> D{Feature Engine <br/> cutoff_date='2024-12-31'}
         D --> E[Feature Matrix]
     end
 
@@ -153,18 +171,27 @@ graph TD
     end
 ```
 
-1.  **ETL**: Raw CSVs are loaded and transformed into a clean `fact_transactions` table.
+1.  **ETL**: Raw CSVs are loaded and transformed into a clean `fact_transactions` table (includes `invoice_id` when available).
+1a. **Eventization**: `fact_events` aggregates line items by invoice and stamps per-model labels (Printers, SWX_Seats, etc.).
 2.  **Feature Engineering**: A `cutoff_date` is used to build features *only* from historical data.
 3.  **Target Labeling**: The model is trained to predict purchases that happen in a *future* window.
 4.  **Validation**: A separate holdout dataset (e.g., 2025 data) is used to measure the model's true performance.
 
 ---
 
-### Multi‑division support
+### Multi-division support
 
-Known divisions are sourced from `etl/sku_map.division_set()`; cross‑division features adapt automatically.
-Training and scoring auto‑discover divisions: the `score_all` pipeline now trains and audits labels for every known division, then generates scores/whitespace for any division with an available model.
+Known divisions are sourced from `etl/sku_map.division_set()`; cross-division features adapt automatically.
+Training and scoring auto-discover divisions: the `score_all` pipeline now trains and audits labels for every known division, then generates scores/whitespace for any division with an available model.
 To add a division: extend `etl/sku_map.py` (or overrides CSV), rebuild the star and features, then either run `score_all` or train explicitly with `gosales/models/train.py`.
+
+#### Targets vs Divisions
+- Divisions (reporting): Solidworks, PDM, Simulation, Services, Training, Success Plan, Hardware, CPE, Scanning, CAMWorks, Maintenance.
+- Logical models (SKU-based targets): Printers, SWX_Seats, PDM_Seats, SW_Electrical, SW_Inspection, plus divisions that are targets (Services, Training, Simulation, Success_Plan, Scanning, CAMWorks).
+- Mapping metadata: each SKU maps to a `division`, with modeling fields `family` and `sale_type` to distinguish targets (e.g., `sale_type=Printer`) from predictors (e.g., `sale_type=Consumable`, `sale_type=Maintenance`).
+- AM_Support is routed by the source DB `Division` into Hardware or Scanning during ETL to avoid misclassification.
+
+The orchestrator `pipeline/score_all.py` collects training targets as (divisions minus `{Hardware, Maintenance}`) union the supported logical models from `etl/sku_map.get_supported_models()`. You can also train a specific model directly (e.g., `--division Printers`).
 
 #### Troubleshooting and notes
 - If training fails in the simple trainer (`gosales/models/train_division_model.py`) due to infinities or extreme values, prefer the robust trainer `gosales/models/train.py`, which sanitizes features (NaN/inf handling, low‑variance and high‑correlation pruning) and performs hyper‑search across cutoffs.
@@ -188,3 +215,26 @@ gosales/
 ├─ utils/                    # DB helper, logger, etc.
 └─ outputs/                  # All run artifacts (git-ignored)
 ```
+
+---
+
+## Recent Additions (2025‑09‑05)
+
+- Asset integrations
+  - `gosales/etl/assets.py` builds `fact_assets` from Moneyball × items rollup and implements effective purchase date imputation for legacy years. Feature engine merges asset features strictly at cutoff (active counts, expiring 30/60/90d, tenure, bad‑date share).
+  - Utilities: `scripts/peek_assets_views.py`, `scripts/build_assets_features.py`.
+
+- Scoring/Ranking improvements
+  - Scorer reindexes to `feature_list.json` and zero‑fills to avoid LightGBM shape mismatches.
+  - Signals propagated to ranker: `mb_lift_max`, `mb_lift_mean`, `als_f*`, and EV proxy. Capacity summary now exported as `capacity_summary_<cutoff>.csv`.
+  - Output writer is resilient to Windows file locks on `icp_scores.csv`; a timestamped fallback is written and a warning logged.
+
+- Leakage Gauntlet
+  - `gosales/pipeline/run_leakage_gauntlet.py --division <Div> --cutoff YYYY-MM-DD` runs:
+    - GroupKFold‑by‑customer overlap audit → `fold_customer_overlap_*` CSV
+    - Feature‑date audit for transactions/assets → `feature_date_audit_*` CSV
+    - Static source scan for banned time calls → `static_scan_*` JSON
+    - Consolidated `leakage_report_*` with PASS/FAIL, non‑zero exit on failure
+
+- Metrics roll‑up
+  - `scripts/metrics_summary.py` creates `gosales/outputs/metrics_summary.csv` from `metrics_*.json` across divisions.

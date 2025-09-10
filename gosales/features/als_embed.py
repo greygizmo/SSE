@@ -5,10 +5,12 @@ import pandas as pd
 import polars as pl
 
 from scipy.sparse import coo_matrix, csr_matrix
+from threadpoolctl import threadpool_limits
 
 
 def _build_user_item(df: pd.DataFrame, user_col: str, item_col: str, weight_col: str) -> Tuple[coo_matrix, pd.Index, pd.Index]:
-    users = pd.Categorical(pd.to_numeric(df[user_col], errors='coerce').astype('Int64').astype('int64'))
+    # Preserve GUIDs by treating user IDs as strings; categorical codes map rows to indices
+    users = pd.Categorical(df[user_col].astype('string'))
     items = pd.Categorical(df[item_col].astype('string'))
     mat = coo_matrix(
         (pd.to_numeric(df[weight_col], errors='coerce').astype('float64'), (users.codes, items.codes)),
@@ -24,7 +26,10 @@ def _als_with_implicit(mat: coo_matrix, factors: int, reg: float, alpha: float) 
         model = implicit.als.AlternatingLeastSquares(
             factors=factors, regularization=reg, random_state=42
         )
-        model.fit((mat * alpha).astype('double'))
+        # Convert to CSR to avoid implicit's COO→CSR conversion warning and cap BLAS threads
+        mat_scaled_csr = csr_matrix((mat * alpha).astype('double'))
+        with threadpool_limits(1, "blas"):
+            model.fit(mat_scaled_csr)
         return pd.DataFrame(model.user_factors)
     except Exception:
         return None
@@ -74,6 +79,8 @@ def customer_als_embeddings(
         return pl.DataFrame()
     # Weights: total quantity (fallback to 1 if missing)
     tx['quantity'] = pd.to_numeric(tx['quantity'], errors='coerce').fillna(1.0)
+    tx['customer_id'] = tx['customer_id'].astype('string')
+    tx['product_sku'] = tx['product_sku'].astype('string')
     grp = tx.groupby(['customer_id','product_sku'])['quantity'].sum().rename('weight').reset_index()
     if grp.empty:
         return pl.DataFrame()
@@ -86,7 +93,8 @@ def customer_als_embeddings(
     if U is None or U.empty:
         return pl.DataFrame()
     U.columns = [f'als_f{d}' for d in range(U.shape[1])]
-    U['customer_id'] = user_index.astype('int64').values
+    # user_index categories align to original string IDs
+    U['customer_id'] = user_index.astype('string').values
     return pl.from_pandas(U)
 
 

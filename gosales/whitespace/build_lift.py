@@ -15,26 +15,43 @@ def build_lift(engine, output_path):
     """
     logger.info("Building lift...")
 
-    # Read the fact_orders table from the database
-    fact_orders = pl.read_database("select * from fact_orders", engine)
+    # Read transactions; prefer fact_transactions(product_sku), fallback to legacy fact_orders(product_name)
+    try:
+        fact_transactions = pl.read_database(
+            "SELECT customer_id, product_sku FROM fact_transactions",
+            engine,
+        )
+        item_col = "product_sku"
+        src = fact_transactions
+    except Exception:
+        fact_orders = pl.read_database("SELECT customer_id, product_name FROM fact_orders", engine)
+        fact_orders = fact_orders.rename({"product_name": "product_sku"})
+        item_col = "product_sku"
+        src = fact_orders
 
     # Create a basket for each customer
     basket = (
-        fact_orders.lazy()
-        .group_by(["customer_id", "product_name"])
-        .agg(pl.count().alias("count"))
+        src.lazy()
+        .group_by(["customer_id", item_col])
+        .agg(pl.len().alias("count"))
         .collect()
     )
 
-    # Create a one-hot encoded matrix
+    # Create a one-hot encoded boolean matrix per customer (avoid mlxtend deprecation on non-bool)
     basket_plus = (
-        basket.to_dummies(columns=["product_name"])
+        basket.to_dummies(columns=[item_col])
         .group_by("customer_id")
-        .agg(pl.all().exclude(["customer_id", "count"]).sum())
+        .agg(pl.all().exclude(["customer_id"]).sum())
+        .drop("count")
+        .with_columns((pl.all().exclude("customer_id") > 0).cast(pl.Boolean))
     )
 
     # Perform market basket analysis
-    frequent_itemsets = apriori(basket_plus.drop("customer_id").to_pandas(), min_support=0.001, use_colnames=True)
+    frequent_itemsets = apriori(
+        basket_plus.drop("customer_id").to_pandas().astype(bool),
+        min_support=0.001,
+        use_colnames=True,
+    )
     rules = association_rules(frequent_itemsets, metric="lift", min_threshold=1)
 
     # Save the rules to a CSV file

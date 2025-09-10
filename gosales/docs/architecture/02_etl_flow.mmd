@@ -1,0 +1,43 @@
+---
+title: GoSales Engine - ETL Phase Flow
+---
+
+```mermaid
+graph TB
+    Start --> Config
+    Config --> Connect
+    Connect --> Ingest
+    Ingest --> Clean
+    Clean --> Transform
+    Transform --> Load
+    Load --> Success
+
+    subgraph "Configuration"
+        Config[Configuration<br/>Setup]
+    end
+
+    subgraph "Data Ingestion"
+        Connect[Connect to<br/>Azure SQL]
+        Ingest[Ingest Data<br/>Polars DF]
+    end
+
+    subgraph "Data Cleaning"
+        Clean[Clean &<br/>Standardize]
+    end
+
+    subgraph "Data Transformation"
+        Transform[Create Star<br/>Schema]
+    end
+
+    subgraph "Data Loading"
+        Load[Load to<br/>SQLite]
+    end
+
+    subgraph "Results"
+        Success[ETL Success]
+    end
+
+    %% Styling
+    classDef default fill:#e3f2fd,stroke:#1565c0,stroke-width:2px
+    classDef success fill:#c8e6c9,stroke:#2e7d32,stroke-width:3px
+```

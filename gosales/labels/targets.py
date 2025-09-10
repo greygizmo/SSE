@@ -12,6 +12,7 @@ import polars as pl
 from gosales.utils.paths import OUTPUTS_DIR
 from gosales.utils import config as cfg
 from gosales.utils.normalize import normalize_division
+from gosales.etl.sku_map import get_model_targets
 
 
 Mode = Literal["expansion", "all"]
@@ -46,8 +47,8 @@ def build_labels_for_division(
 
     # Coerce
     facts['order_date'] = pd.to_datetime(facts['order_date'], errors='coerce')
-    facts['customer_id'] = pd.to_numeric(facts['customer_id'], errors='coerce').astype('Int64')
-    customers['customer_id'] = pd.to_numeric(customers['customer_id'], errors='coerce').astype('Int64')
+    facts['customer_id'] = facts['customer_id'].astype(str)
+    customers['customer_id'] = customers['customer_id'].astype(str)
 
     # Feature-period activity
     feature_df = facts[facts['order_date'] <= cutoff_dt].copy()
@@ -62,7 +63,12 @@ def build_labels_for_division(
     window_df = facts[(facts['order_date'] > cutoff_dt) & (facts['order_date'] <= win_end)].copy()
     # Normalize division string comparisons to avoid whitespace/case issues
     window_df['product_division'] = window_df['product_division'].astype(str).str.strip()
-    window_target = window_df[window_df['product_division'] == normalize_division(params.division)].copy()
+    # Determine if caller passed a custom model (e.g., 'Printers'); if so, match by SKU set
+    sku_targets = tuple(get_model_targets(normalize_division(params.division)))
+    if sku_targets:
+        window_target = window_df[window_df['product_sku'].astype(str).isin(sku_targets)].copy()
+    else:
+        window_target = window_df[window_df['product_division'] == normalize_division(params.division)].copy()
     # Optional denylist SKUs exclusion (e.g., trials/POC)
     try:
         cfg_obj = cfg.load_config()
@@ -120,12 +126,20 @@ def build_labels_for_division(
         .assign(had_any=1)
     )
 
-    had_div_df = (
-        feature_df[feature_df['product_division'] == normalize_division(params.division)][['customer_id']]
-        .dropna()
-        .drop_duplicates()
-        .assign(had_div=1)
-    )
+    if sku_targets:
+        had_div_df = (
+            feature_df[feature_df['product_sku'].astype(str).isin(sku_targets)][['customer_id']]
+            .dropna()
+            .drop_duplicates()
+            .assign(had_div=1)
+        )
+    else:
+        had_div_df = (
+            feature_df[feature_df['product_division'] == normalize_division(params.division)][['customer_id']]
+            .dropna()
+            .drop_duplicates()
+            .assign(had_div=1)
+        )
 
     labels = (
         labels.merge(had_any_df, on='customer_id', how='left')

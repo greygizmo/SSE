@@ -1,0 +1,99 @@
+---
+title: GoSales Engine - Feature Families (Cycle-aware, Offsets, Encoders, Affinity)
+---
+
+```mermaid
+graph TB
+    %% Start
+    Start([Feature Families Overview]) --> Temporal
+
+    %% Temporal & Cycle-aware
+    subgraph "Temporal & Cycle-aware"
+        Temporal[Create Time Windows<br/>3/6/12/24m]
+        LogRecency[Log-Recency<br/>log(1+days)]
+        Hazard[Hazard/Decay Recency<br/>exp(-days/hl{30|90|180})]
+        Offsets[Offset Windows<br/>end at cutoff−offset_days]
+        Deltas[Window Deltas<br/>12m vs previous 12m]
+        Tenure[Tenure Buckets<br/><3m,3–6m,6–12m,1–2y,≥2y]
+    end
+
+    %% External Encoders & Diversity
+    subgraph "External & Encoders"
+        IndMap[Industry/Sub Mapping<br/>dim_customer]
+        PooledEnc[Hierarchical/Pooled Encoders<br/>industry/sub (pre-cutoff)]
+        Diversity[Uniqueness/Diversity<br/>SKU & Division counts]
+        Dynamics[Monthly Dynamics 12m<br/>slope, std of GP/TX]
+    end
+
+    %% Affinity & ALS
+    subgraph "Affinity & Embeddings"
+        AffinityLag[Lagged Market-Basket
+        (embargo ≥ affinity_lag_days)
+        mb_lift_max/mean, affinity_sum]
+        ALS[ALS Embeddings (optional)
+        als_f* factors]
+        Assets[Assets Rollups at Cutoff
+        expiring_30/60/90d, subs_share_*]
+    end
+
+    %% Outputs
+    subgraph "Outputs"
+        FeatureMatrix[Feature Matrix<br/>X with target y]
+        Catalog[Feature Catalog<br/>coverage, descriptions]
+    end
+
+    %% Flow
+    Start --> Temporal
+    Temporal --> LogRecency
+    LogRecency --> Hazard
+    Hazard --> Offsets
+    Offsets --> Deltas
+    Temporal --> Tenure
+
+    Start --> IndMap
+    IndMap --> PooledEnc
+    PooledEnc --> Diversity
+    Diversity --> Dynamics
+
+    Start --> AffinityLag
+    AffinityLag --> ALS
+    ALS --> Assets
+
+    %% Consolidation
+    Tenure --> FeatureMatrix
+    Deltas --> FeatureMatrix
+    Dynamics --> FeatureMatrix
+    PooledEnc --> FeatureMatrix
+    AffinityLag --> FeatureMatrix
+    ALS --> FeatureMatrix
+    Assets --> FeatureMatrix
+    FeatureMatrix --> Catalog
+
+    %% Notes / Config
+    classDef note fill:#f5f5f5,stroke:#424242,stroke-width:1px
+    Config1[features.recency_decay_half_lives_days]:::note
+    Config2[features.offset_days, enable_offset_windows]:::note
+    Config3[features.enable_window_deltas]:::note
+    Config4[features.pooled_encoders_*]:::note
+    Config5[features.affinity_lag_days]:::note
+    Config6[features.use_als_embeddings, use_assets]:::note
+
+    Hazard --- Config1
+    Offsets --- Config2
+    Deltas --- Config3
+    PooledEnc --- Config4
+    AffinityLag --- Config5
+    ALS --- Config6
+
+    %% Styling
+    classDef temporal fill:#fff3e0,stroke:#f57c00,stroke-width:2px
+    classDef external fill:#e0f2f1,stroke:#00695c,stroke-width:2px
+    classDef affinity fill:#fce4ec,stroke:#c2185b,stroke-width:2px
+    classDef output fill:#e3f2fd,stroke:#1565c0,stroke-width:2px
+
+    class Temporal,LogRecency,Hazard,Offsets,Deltas,Tenure temporal
+    class IndMap,PooledEnc,Diversity,Dynamics external
+    class AffinityLag,ALS,Assets affinity
+    class FeatureMatrix,Catalog output
+```
+

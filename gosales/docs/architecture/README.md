@@ -1,0 +1,283 @@
+﻿# GoSales Engine Architecture Documentation
+
+This directory contains comprehensive Mermaid diagrams documenting every phase of the GoSales Engine repository architecture. These diagrams provide detailed insights into the system's components, data flows, and interactions.
+
+## ðŸ“‹ Diagram Overview
+
+### 1. Overall Architecture (`01_overall_architecture.mmd`)
+**Purpose:** High-level overview of the entire GoSales Engine system
+**Components Shown:**
+- External Data Sources (Azure SQL, Model Registry)
+- Core Pipeline (ETL, Feature Engineering, Model Training)
+- Validation & Testing Framework
+- Monitoring System
+- User Interface (Streamlit Dashboard)
+- Data Storage Layer
+
+**Key Flows:**
+- Data ingestion from Azure SQL to SQLite
+- Feature engineering pipeline
+- Model training and validation
+- Real-time monitoring and alerting
+- Dashboard visualization and reporting
+
+### 2. ETL Flow (`02_etl_flow.mmd`)
+**Purpose:** Detailed ETL (Extract, Transform, Load) process flow
+**Phases Covered:**
+- Configuration & Setup
+- Data Ingestion (Azure SQL queries)
+- Data Cleaning & Standardization
+- Star Schema Transformation
+- Data Loading & Storage
+- Monitoring & Logging
+
+**Key Components:**
+- `ingest.py` - Data extraction
+- `cleaners.py` - Data cleaning
+- `build_star.py` - Star schema creation
+- `load_csv.py` - Data loading
+- `check_connection.py` - Connection validation
+
+### 3. Feature Engineering Flow (`03_feature_engineering_flow.mmd`)
+**Purpose:** Comprehensive feature engineering pipeline
+**Feature Types:**
+- Customer-level features (recency, monetary, frequency)
+- Product-level features (popularity, margins)
+- Temporal features (rolling metrics, seasonality)
+- ALS collaborative filtering embeddings
+- External feature integration (industry data)
+- Branch/Rep performance features
+
+**Key Components:**
+- `engine.py` - Main feature engineering orchestrator
+- `als_embed.py` - ALS embedding generation
+- `cache.py` - Feature caching system
+- `fact_sales_log_raw` - Raw data preservation
+
+### 4. Model Training Flow (`04_model_training_flow.mmd`)
+**Purpose:** End-to-end model training pipeline
+**Training Phases:**
+- Training initialization and configuration
+- Data preparation and preprocessing
+- Model architecture selection
+- Hyperparameter optimization
+- Model evaluation and validation
+- Model packaging and deployment
+
+**Key Components:**
+- `train_division_model.py` - Division-specific training
+- LightGBM model architecture
+- MLflow integration for tracking
+- SHAP value generation for explainability
+
+### 5. Pipeline Orchestration Flow (`05_pipeline_orchestration_flow.mmd`)
+**Purpose:** Complete pipeline execution flow
+**Orchestration Components:**
+- Pipeline initialization and configuration
+- Sequential phase execution (ETL â†’ Features â†’ Training â†’ Validation)
+- Customer-specific scoring
+- Whitespace analysis
+- Results processing and storage
+
+**Key Components:**
+- `score_all.py` - Full pipeline execution
+- `score_customers.py` - Individual customer scoring
+- `label_audit.py` - Label quality validation
+
+### 6. Validation & Testing Flow (`06_validation_testing_flow.mmd`)
+**Purpose:** Comprehensive validation framework
+**Validation Types:**
+- Data quality validation
+- Model performance validation
+- Holdout testing on unseen data
+- Decile analysis for ranking quality
+- Business logic validation
+- Statistical validation
+- Integration testing
+
+**Key Components:**
+- `data_validator.py` - Data quality validation
+- `validate_holdout.py` - Holdout testing
+- `deciles.py` - Decile analysis
+- `ci_gate.py` - CI/CD integration
+
+### 7. Monitoring System Flow (`07_monitoring_system_flow.mmd`)
+**Purpose:** Enterprise monitoring and observability
+**Monitoring Capabilities:**
+- Real-time system metrics collection
+- Pipeline health monitoring
+- Alert generation and management
+- Data lineage tracking
+- Performance analytics
+- Quality assurance monitoring
+
+**Key Components:**
+- `pipeline_monitor.py` - Pipeline monitoring
+- `data_collector.py` - Metrics collection
+- Real-time dashboard integration
+
+### 8. UI/Dashboard Flow (`08_ui_dashboard_flow.mmd`)
+**Purpose:** User interface and dashboard architecture
+**Dashboard Sections:**
+- Overview with key metrics
+- Model performance and explainability
+- Whitespace opportunity analysis
+- Validation results
+- Pipeline execution history
+- Real-time monitoring dashboard
+
+**Key Components:**
+- `app.py` - Main Streamlit application
+- `utils.py` - Dashboard utilities
+- Interactive visualizations and exports
+
+### 9. Sequence Diagrams (`09_sequence_diagrams.mmd`)
+**Purpose:** Detailed interaction flows between components
+**Diagrams Included:**
+- Complete pipeline execution sequence
+- Monitoring dashboard data flow
+- Customer recommendation workflow
+- Automated scheduling and alerting
+
+## ðŸŽ¯ How to Use These Diagrams
+
+### Viewing Diagrams
+1. **GitHub:** Diagrams render automatically when viewing `.mmd` files
+2. **Local:** Use a Mermaid-compatible viewer or VS Code with Mermaid extension
+3. **Web:** Copy diagram code to online Mermaid editors
+
+### Understanding the Flow
+1. **Start:** Look for green "Start" nodes
+2. **Flow:** Follow the arrows to understand process sequence
+3. **Components:** Each box represents a specific module or process
+4. **Decisions:** Diamond shapes show conditional logic
+5. **End States:** Green boxes show success, red show failure
+
+### Color Coding
+- ðŸ”µ **Setup/Initialization:** Light blue
+- ðŸŸ£ **Data Processing:** Purple
+- ðŸŸ¢ **Success States:** Green
+- ðŸ”´ **Error States:** Red
+- ðŸŸ  **Processing Steps:** Orange
+- ðŸ©· **UI/Dashboard:** Pink
+- ðŸ©¶ **Storage/Output:** Gray
+
+## ðŸ”§ Key Architecture Principles
+
+### 1. Modular Design
+- Each phase is independently executable
+- Clear separation of concerns
+- Reusable components across phases
+
+### 2. Data Quality Focus
+- Type consistency enforcement
+- Comprehensive validation at each stage
+- Data lineage preservation
+
+### 3. Monitoring & Observability
+- Real-time health monitoring
+- Comprehensive alerting system
+- Detailed performance tracking
+
+### 4. Scalability & Performance
+- Caching mechanisms for feature matrices
+- Parallel processing for model training
+- Efficient data storage patterns
+
+### 5. Enterprise-Grade Reliability
+- Error handling and recovery
+- Comprehensive logging
+- CI/CD integration with quality gates
+
+## ðŸš€ Pipeline Execution Flow
+
+```
+Raw Data (Azure SQL)
+    â†“
+ETL Process (ingest.py, cleaners.py, build_star.py)
+    â†“
+Feature Engineering (engine.py, als_embed.py)
+    â†“
+Model Training (train_division_model.py)
+    â†“
+Validation (data_validator.py, validate_holdout.py)
+    â†“
+Scoring & Analysis (score_all.py, score_customers.py)
+    â†“
+Dashboard & Monitoring (app.py, pipeline_monitor.py)
+```
+
+## ðŸ“Š Monitoring Dashboard Features
+
+- **Pipeline Health:** Real-time status and metrics
+- **Data Quality:** Type consistency and completeness scores
+- **Performance:** Throughput, latency, and resource usage
+- **Alerts:** Active warnings and historical alerts
+- **Data Lineage:** Complete audit trail of data transformations
+- **Configuration:** System settings and version tracking
+
+## ðŸ” Key Integration Points
+
+- **Database:** Azure SQL (source) â†’ SQLite (curated)
+- **Models:** LightGBM with MLflow tracking
+- **Monitoring:** psutil for system metrics (with fallback)
+- **UI:** Streamlit with real-time data updates
+- **CI/CD:** GitHub Actions with quality gates
+- **Storage:** Local file system with structured outputs
+
+## ðŸ“ Contributing
+
+When making architecture changes:
+1. Update relevant diagrams
+2. Maintain consistent styling
+3. Add new components to overall architecture diagram
+4. Document new integration points
+5. Update this README with changes
+
+## ðŸ—ï¸ Architecture Evolution
+
+This documentation reflects the current state of the GoSales Engine architecture. As the system evolves:
+- New diagrams will be added for new features
+- Existing diagrams will be updated to reflect changes
+- Version history will be maintained in the repository
+- Breaking changes will be clearly documented
+
+---
+
+*These diagrams were generated to provide complete transparency into the GoSales Engine architecture, supporting development, debugging, and knowledge sharing across the team.*
+
+## Recent Enhancements (2025-09)
+
+- Feature Engineering
+  - Cycle-aware recency transforms (log, hazard decays)
+  - Offset windows (e.g., 12m ending cutoff−60d) and 12m vs previous 12m deltas
+  - Hierarchical/pooled encoders for industry and sub-industry (non-leaky; pre-cutoff)
+  - Lagged market‑basket affinity features with ≥60d embargo
+
+- Training & Evaluation
+  - Per-division SAFE policy in training; selection by lift@K + Brier
+  - Model cards include top‑K yield summaries and calibration method/MAE
+  - Prequential forward‑month evaluation (AUC, Lift@10, Brier) with label observability clamp
+
+- Validation & CI Gates
+  - Permutation test (train‑only shuffle within time buckets) with p‑value
+  - Shift‑grid {7,14,28,56} non‑improving check
+  - Adjacency Ablation Gate (Full ≥ SAFE or adopt SAFE) integrated into ci_gate
+  - Auto‑SAFE helper updates modeling.safe_divisions from ablation artifacts
+
+- UI
+  - Feature Guide tab (feature families + configuration + tuning tips)
+  - Business Yield (Top‑K) table and coverage curve in Metrics
+  - Prequential and Adjacency Ablation result viewers in QA
+
+
+
+### 11. Prequential Evaluation (11_prequential_evaluation.mmd)
+- Training frozen at a cutoff, monthly forward evaluation with label observability clamp; outputs JSON/CSV/PNG; UI panel renders curves and table.
+
+### 12. Adjacency Ablation & SAFE (12_adjacency_ablation_and_safe.mmd)
+- Triad: Full vs No‑Recency/Short vs SAFE; select model by holdout AUC, compute ΔAUC, gate; Auto‑SAFE updates config.
+
+### 3b. Feature Families (03b_feature_families.mmd)
+- Dedicated view of new families: cycle‑aware recency, offset windows, deltas, pooled encoders, lagged affinity, assets, ALS, and config toggles.
+

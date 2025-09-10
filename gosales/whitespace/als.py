@@ -1,6 +1,7 @@
 import polars as pl
 import implicit
-from scipy.sparse import coo_matrix
+from scipy.sparse import coo_matrix, csr_matrix
+from threadpoolctl import threadpool_limits
 from gosales.utils.db import get_db_connection
 from gosales.utils.logger import get_logger
 from gosales.utils.paths import OUTPUTS_DIR
@@ -18,55 +19,50 @@ def build_als(engine, output_path, top_n: int = 10):
     """
     logger.info("Building ALS model...")
 
-    # Read the fact_orders table from the database
-    fact_orders = pl.read_database("select * from fact_orders", engine)
+    # Read transactions: prefer fact_transactions (product_sku), fallback to legacy fact_orders (product_name)
+    try:
+        tx = pl.read_database("SELECT customer_id, product_sku AS item FROM fact_transactions", engine)
+    except Exception:
+        tx = pl.read_database("SELECT customer_id, product_name AS item FROM fact_orders", engine)
 
-    # Create a user-item matrix
+    # Create a user-item interaction table (counts)
     user_item = (
-        fact_orders.lazy()
-        .group_by(["customer_id", "product_name"])
+        tx.lazy()
+        .group_by(["customer_id", "item"])
         .agg(pl.len().alias("count"))
         .collect()
     )
 
-    # Build mappings between ids and indices (deterministic order via unique())
-    user_ids = user_item["customer_id"].unique().to_list()
-    product_names = user_item["product_name"].unique().to_list()
+    # Build explicit, deterministic mappings for readable outputs
+    user_ids = sorted(set(user_item["customer_id"].to_list()))
+    item_names = sorted(set(user_item["item"].to_list()))
     user_id_to_idx = {uid: idx for idx, uid in enumerate(user_ids)}
-    item_name_to_idx = {pname: idx for idx, pname in enumerate(product_names)}
-    idx_to_user_id = {idx: uid for uid, idx in user_id_to_idx.items()}
-    idx_to_product_name = {idx: pname for pname, idx in item_name_to_idx.items()}
+    item_name_to_idx = {name: idx for idx, name in enumerate(item_names)}
 
-    user_item = user_item.with_columns(
-        pl.col("customer_id").map_elements(user_id_to_idx.get).alias("user_idx"),
-        pl.col("product_name").map_elements(item_name_to_idx.get).alias("item_idx"),
+    user_codes = [user_id_to_idx[int(uid)] for uid in user_item["customer_id"].to_list()]
+    item_codes = [item_name_to_idx[str(name)] for name in user_item["item"].to_list()]
+    counts = user_item["count"].to_list()
+
+    # Create a sparse matrix (users x items) in CSR to satisfy implicit's expectations
+    sparse_matrix = csr_matrix(
+        coo_matrix((counts, (user_codes, item_codes)), shape=(len(user_ids), len(item_names)))
     )
-
-    # Create a sparse matrix (users x items)
-    sparse_matrix = coo_matrix(
-        (
-            user_item["count"].to_list(),
-            (user_item["user_idx"].to_list(), user_item["item_idx"].to_list()),
-        ),
-        shape=(len(user_ids), len(product_names)),
-    ).tocsr()
 
     # Train the ALS model (deterministic)
     model = implicit.als.AlternatingLeastSquares(factors=50, random_state=42)
-    model.fit(sparse_matrix)
+    with threadpool_limits(1, "blas"):
+        model.fit(sparse_matrix)
 
-    # Generate top-N recommendations per user
+    # Generate top-N recommendations per user (map indices back to readable ids/names)
     records = []
     for user_idx, user_id in enumerate(user_ids):
         item_indices, scores = model.recommend(user_idx, sparse_matrix[user_idx], N=top_n)
         for item_idx, score in zip(item_indices, scores):
-            records.append(
-                {
-                    "customer_id": idx_to_user_id.get(user_idx, user_id),
-                    "product_name": idx_to_product_name.get(item_idx, product_names[item_idx]),
-                    "score": float(score),
-                }
-            )
+            records.append({
+                "customer_id": int(user_id),
+                "product_name": item_names[int(item_idx)],
+                "score": float(score),
+            })
 
     # Save the recommendations to a CSV file
     pl.DataFrame(records).write_csv(output_path)
