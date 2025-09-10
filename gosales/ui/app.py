@@ -1,4 +1,5 @@
 import json
+import time
 from pathlib import Path
 from datetime import datetime
 
@@ -24,6 +25,15 @@ except ImportError:
 from gosales.utils.paths import OUTPUTS_DIR, MODELS_DIR
 from gosales.ui.utils import discover_validation_runs, compute_validation_badges, load_thresholds, load_alerts, compute_default_validation_index, read_runs_registry
 from gosales.monitoring.data_collector import MonitoringDataCollector
+
+
+def _fmt_mtime(path: Path) -> str:
+    try:
+        ts = path.stat().st_mtime
+        dt = datetime.fromtimestamp(ts)
+        return dt.strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return "n/a"
 
 
 # Enhanced page configuration with custom styling
@@ -384,7 +394,7 @@ with st.sidebar:
     # Use radio buttons for navigation
     tab = st.radio(
         "Select Page",
-        ["Overview", "Metrics", "Explainability", "Whitespace", "Validation", "Runs", "Monitoring", "Architecture", "Quality Assurance", "Configuration & Launch", "Feature Guide"],
+        ["Overview", "Metrics", "Explainability", "Whitespace", "Validation", "Runs", "Monitoring", "Architecture", "Quality Assurance", "Configuration & Launch", "Feature Guide", "About"],
         index=0,
         label_visibility="collapsed",
         help="Choose the dashboard section to view"
@@ -977,6 +987,43 @@ elif tab == "Whitespace":
             # Filters
             df = _read_csv(ws)
             if not df.empty:
+                # Enhanced filtering and display controls
+                st.caption(f"Whitespace file: {ws.name} • Updated: {_fmt_mtime(ws)}")
+                fcol1, fcol2, fcol3 = st.columns([2, 2, 2])
+                with fcol1:
+                    q = st.text_input("Search customer", "", help="Filter rows where customer_name contains text")
+                with fcol2:
+                    div_opts = sorted(df['division_name'].dropna().unique().tolist()) if 'division_name' in df.columns else []
+                    sel_divs = st.multiselect("Division", div_opts, default=div_opts, help="Restrict to specific divisions") if div_opts else []
+                with fcol3:
+                    cand = [c for c in ['score','p_icp','p_icp_pct','EV_norm','als_norm','lift_norm'] if c in df.columns]
+                    score_col = cand[0] if cand else None
+                    if score_col is not None:
+                        vmin = float(pd.to_numeric(df[score_col], errors='coerce').min())
+                        vmax = float(pd.to_numeric(df[score_col], errors='coerce').max())
+                        rng = st.slider(f"{score_col} range", min_value=vmin, max_value=vmax, value=(vmin, vmax))
+                    else:
+                        rng = None
+                # Apply filters in place to df so legacy view uses it
+                filt = pd.Series(True, index=df.index)
+                if q and 'customer_name' in df.columns:
+                    filt &= df['customer_name'].astype(str).str.contains(q, case=False, na=False)
+                if sel_divs:
+                    filt &= df['division_name'].isin(sel_divs) if 'division_name' in df.columns else True
+                if rng is not None and score_col is not None:
+                    vals = pd.to_numeric(df[score_col], errors='coerce')
+                    filt &= (vals >= rng[0]) & (vals <= rng[1])
+                df = df.loc[filt]
+                # Sort + TopK controls
+                scol1, scol2 = st.columns([3, 1])
+                with scol1:
+                    sort_opts = [c for c in ['score','p_icp','p_icp_pct','EV_norm','als_norm','lift_norm'] if c in df.columns]
+                    sort_by = st.selectbox('Sort by', sort_opts or df.columns.tolist(), index=0)
+                with scol2:
+                    top_k = st.number_input('Top K', min_value=10, max_value=10000, value=500, step=50)
+                if sort_by:
+                    df = df.sort_values(sort_by, ascending=False, na_position='last')
+                df = df.head(int(top_k))
                 with st.expander('"What these columns mean"', expanded=True):
                     st.markdown('"- customer_id/customer_name: who the recommendation is for."')
                     st.markdown('"- division_name: the product/target (e.g., Printers, SWX_Seats)."')
@@ -997,17 +1044,20 @@ elif tab == "Whitespace":
         if ex.exists():
             st.subheader("Explanations")
             st.caption("Short reasons combining key drivers (probability, affinity, EV).")
+            st.caption(f"Updated: {_fmt_mtime(ex)}")
             st.dataframe(_read_csv(ex).head(200), use_container_width=True)
         # Metrics
         wm = OUTPUTS_DIR / f"whitespace_metrics_{sel_cut}.json"
         if wm.exists():
             st.subheader("Whitespace Metrics")
             st.caption("Capture@K, division shares, stability vs prior run, coverage, and weights.")
+            st.caption(f"Updated: {_fmt_mtime(wm)}")
             st.code(_read_text(wm))
         # Thresholds
         wthr = OUTPUTS_DIR / f"thresholds_whitespace_{sel_cut}.csv"
         if wthr.exists():
             st.subheader("Capacity Thresholds")
+            st.caption(f"Updated: {_fmt_mtime(wthr)}")
             st.caption("Top‑percent / per‑rep / hybrid thresholds for list sizing & diversification.")
             st.dataframe(_read_csv(wthr), use_container_width=True)
         # Logs preview
@@ -1015,6 +1065,7 @@ elif tab == "Whitespace":
         if wlog.exists():
             st.subheader("Log Preview")
             st.caption("First 50 structured log rows; use for quick audit and guardrails.")
+            st.caption(f"Updated: {_fmt_mtime(wlog)}")
             lines = _read_jsonl(wlog)
             st.code(json.dumps(lines[:50], indent=2))
         # Market-basket rules (division-specific; match this cutoff)
@@ -1023,6 +1074,7 @@ elif tab == "Whitespace":
             st.subheader("Market-Basket Rules")
             st.caption("SKU-level co‑occurrence rules; Lift > 1 indicates positive association with the target division.")
             sel_mb = st.selectbox("Select rules file", mb_files, format_func=lambda p: p.name)
+            st.caption(f"Updated: {_fmt_mtime(sel_mb)}")
             mb = _read_csv(sel_mb)
             st.dataframe(mb.head(300), use_container_width=True)
             st.download_button("Download rules CSV", data=mb.to_csv(index=False), file_name=sel_mb.name)
@@ -1065,6 +1117,83 @@ elif tab == "Validation":
             st.markdown("- PSI(EV vs GP): value-weighted distribution drift between expected value proxy and realized GP over deciles (lower is better).")
             st.markdown("- KS(train vs holdout): max CDF gap between train and holdout score distributions (lower is better).")
 
+        # Optional: compare two validation runs
+        """
+        # Safe compare runs (re-implemented)
+        with st.expander("Compare runs", expanded=False):
+            if len(runs) >= 2:
+                c1, c2 = st.columns(2)
+                with c1:
+                    a_idx = st.selectbox("Run A", options=list(range(len(runs))), index=sel, format_func=lambda i: labels[i], key="val_cmp_a2")
+                with c2:
+                    b_idx = st.selectbox("Run B", options=list(range(len(runs))), index=(sel + 1) % len(runs), format_func=lambda i: labels[i], key="val_cmp_b2")
+                _, _, path_a = runs[a_idx]
+                _, _, path_b = runs[b_idx]
+                ba = compute_validation_badges(path_a, thresholds=thr)
+                bb = compute_validation_badges(path_b, thresholds=thr)
+                cols = st.columns(3)
+                keys = ["cal_mae", "psi_ev_vs_gp", "ks_phat_train_holdout"]
+                for i, k in enumerate(keys):
+                    va = ba.get(k, {}).get('value')
+                    vb = bb.get(k, {}).get('value')
+                    delta_msg = f"{(va - vb):+.3f}" if isinstance(va, (int, float)) and isinstance(vb, (int, float)) else None
+                    val_txt = f"{va:.3f}" if isinstance(va, (int, float)) else "n/a"
+                    with cols[i]:
+                        st.metric(k, val_txt, delta=delta_msg)
+                try:
+                    import plotly.graph_objects as go
+                    ga = path_a / 'gains.csv'; gb = path_b / 'gains.csv'
+                    if ga.exists() and gb.exists():
+                        da = _read_csv(ga); db = _read_csv(gb)
+                        fig = go.Figure()
+                        x_a = da['decile'] if 'decile' in da.columns else list(range(1, len(da) + 1))
+                        y_a = da['fraction_positives'] if 'fraction_positives' in da.columns else da.iloc[:, 1]
+                        x_b = db['decile'] if 'decile' in db.columns else list(range(1, len(db) + 1))
+                        y_b = db['fraction_positives'] if 'fraction_positives' in db.columns else db.iloc[:, 1]
+                        fig.add_bar(x=x_a, y=y_a, name=f"A: {labels[a_idx]}")
+                        fig.add_bar(x=x_b, y=y_b, name=f"B: {labels[b_idx]}")
+                        fig.update_layout(barmode='group', title='Gains comparison')
+                        st.plotly_chart(fig, use_container_width=True)
+                except Exception:
+                    pass
+        with st.expander("Compare runs", expanded=False):
+            if len(runs) >= 2:
+                c1, c2 = st.columns(2)
+                with c1:
+                    a_idx = st.selectbox("Run A", options=list(range(len(runs))), index=sel, format_func=lambda i: labels[i], key="val_cmp_a")
+                with c2:
+                    b_idx = st.selectbox("Run B", options=list(range(len(runs))), index=(sel+1) % len(runs), format_func=lambda i: labels[i], key="val_cmp_b")
+                _, _, path_a = runs[a_idx]
+                _, _, path_b = runs[b_idx]
+                ba = compute_validation_badges(path_a, thresholds=thr)
+                bb = compute_validation_badges(path_b, thresholds=thr)
+                st.markdown("**Badges**")
+                tcols = st.columns(3)
+                for i, key in enumerate(["cal_mae","psi_ev_vs_gp","ks_phat_train_holdout"]):
+                    with tcols[i]:
+                        va = ba[key].get('value'); vb = bb[key].get('value')
+                        st.metric(key, f"{va:.3f}" if isinstance(va,(int,float)) else "n/a", delta=(f"Δ {(va-vb):+.3f}" if isinstance(va,(int,float)) and isinstance(vb,(int,float)) else None))
+                # Overlay gains if available
+                try:
+                    import plotly.graph_objects as go
+                    ga = path_a / 'gains.csv'
+                    gb = path_b / 'gains.csv'
+                    if ga.exists() and gb.exists():
+                        da = _read_csv(ga)
+                        db = _read_csv(gb)
+                        fig = go.Figure()
+                        x_a = da['decile'] if 'decile' in da.columns else list(range(1, len(da)+1))
+                        y_a = da['fraction_positives'] if 'fraction_positives' in da.columns else da.iloc[:,1]
+                        x_b = db['decile'] if 'decile' in db.columns else list(range(1, len(db)+1))
+                        y_b = db['fraction_positives'] if 'fraction_positives' in db.columns else db.iloc[:,1]
+                        fig.add_bar(x=x_a, y=y_a, name=f"A: {labels[a_idx]}")
+                        fig.add_bar(x=x_b, y=y_b, name=f"B: {labels[b_idx]}")
+                        fig.update_layout(barmode='group', title='Gains comparison')
+                        st.plotly_chart(fig, use_container_width=True)
+                except Exception:
+                    pass
+        """
+
         # Alerts
         alerts = load_alerts(path)
         if alerts:
@@ -1076,11 +1205,13 @@ elif tab == "Validation":
         metrics_path = path / 'metrics.json'
         if metrics_path.exists():
             st.subheader("Metrics")
+            st.caption(f"Updated: {_fmt_mtime(metrics_path)}")
             st.code(metrics_path.read_text(encoding='utf-8'))
         # Drift
         drift_path = path / 'drift.json'
         if drift_path.exists():
             st.subheader("Drift")
+            st.caption(f"Updated: {_fmt_mtime(drift_path)}")
             st.code(drift_path.read_text(encoding='utf-8'))
         # Calibration (holdout)
         cal_path = path / 'calibration.csv'
