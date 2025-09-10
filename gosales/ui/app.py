@@ -2740,3 +2740,32 @@ elif tab == "Feature Guide":
         - Toggle `pooled_encoders_enable` and tune `pooled_alpha_*` to control shrinkage.
         - Set `modeling.safe_divisions` for divisions that benefit from SAFE policy.
         """)
+if tab == "About":
+    st.header("About & Configuration")
+    st.markdown("High-level info about this app and pointers to configuration and docs.")
+    repo_root = Path(__file__).resolve().parents[2]
+    readme = repo_root / "README.md"
+    proj_readme = repo_root / "gosales" / "README.md"
+    docs_dir = repo_root / "gosales" / "docs"
+    cfg_yaml = repo_root / "gosales" / "config.yaml"
+    st.subheader("Repository")
+    if readme.exists():
+        st.markdown(f"- README: {readme}")
+    if proj_readme.exists():
+        st.markdown(f"- Project README: {proj_readme}")
+    st.markdown(f"- Docs: {docs_dir}")
+    st.subheader("Configuration")
+    st.markdown(f"- Config file: {cfg_yaml} (updated { _fmt_mtime(cfg_yaml) if cfg_yaml.exists() else 'n/a' })")
+    try:
+        from gosales.utils.config import load_config
+        cfg = load_config()
+        with st.expander("Resolved config (summary)", expanded=False):
+            st.json(cfg.to_dict())
+    except Exception:
+        pass
+    st.subheader("Outputs")
+    st.markdown(f"Artifacts directory: {OUTPUTS_DIR}")
+    if OUTPUTS_DIR.exists():
+        files = sorted([p for p in OUTPUTS_DIR.glob('*') if p.is_file()], key=lambda p: p.stat().st_mtime, reverse=True)[:10]
+        for p in files:
+            st.caption(f"{p.name} • updated { _fmt_mtime(p) }")
