@@ -1,11 +1,20 @@
 import json
+import os
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 
 from gosales.utils.paths import OUTPUTS_DIR, MODELS_DIR
-from gosales.ui.utils import discover_validation_runs, compute_validation_badges, load_thresholds, load_alerts, compute_default_validation_index, read_runs_registry
+from gosales.utils.config import load_config
+from gosales.ui.utils import (
+    discover_validation_runs,
+    compute_validation_badges,
+    load_thresholds,
+    load_alerts,
+    compute_default_validation_index,
+)
 
 
 st.set_page_config(page_title="GoSales Engine", layout="wide")
@@ -74,7 +83,20 @@ with st.sidebar:
     colr1.write(":memo: Navigation")
     if colr2.button("Refresh", help="Clear cached artifacts and reload"):
         st.cache_data.clear()
-    tab = st.radio("Page", ["Overview", "Metrics", "Explainability", "Whitespace", "Validation", "Runs"], index=0)
+        st.session_state['last_refresh'] = datetime.utcnow().isoformat()
+    tab = st.radio(
+        "Page",
+        [
+            "Overview",
+            "Metrics",
+            "Explainability",
+            "Whitespace",
+            "Validation",
+            "Runs",
+            "About/Config",
+        ],
+        index=0,
+    )
     # Global divisions and default whitespace cutoff
     st.session_state.setdefault('divisions', _discover_divisions())
     # Preselect most recent whitespace cutoff
@@ -133,9 +155,12 @@ if tab == "Overview":
             with_ind = int(df.loc[df['metric']=='with_industry','value'].iloc[0]) if not df.empty else None
             pct = float(df.loc[df['metric']=='coverage_pct','value'].iloc[0]) if not df.empty else None
             c1, c2, c3 = st.columns(3)
-            if total is not None: c1.metric("Total Customers", f"{total:,}")
-            if with_ind is not None: c2.metric("With Industry", f"{with_ind:,}")
-            if pct is not None: c3.metric("Coverage %", f"{pct:.2f}%")
+            if total is not None:
+                c1.metric("Total Customers", f"{total:,}")
+            if with_ind is not None:
+                c2.metric("With Industry", f"{with_ind:,}")
+            if pct is not None:
+                c3.metric("Coverage %", f"{pct:.2f}%")
         except Exception:
             st.info("Coverage summary could not be parsed.")
     # Contracts
@@ -482,3 +507,43 @@ elif tab == "Runs":
                 if st.button("View this validation run"):
                     st.session_state['preferred_validation'] = {'division': division, 'cutoff': cutoff}
                     st.info("Open the Validation page to view this run.")
+
+elif tab == "About/Config":
+    st.header("About / Configuration")
+    cfg = load_config()
+    c1, c2 = st.columns(2)
+    with c1:
+        st.subheader("Run")
+        st.json(
+            {
+                "cutoff_date": cfg.run.cutoff_date,
+                "prediction_window_months": cfg.run.prediction_window_months,
+                "lookback_years": cfg.run.lookback_years,
+            }
+        )
+        st.subheader("Modeling")
+        st.json(
+            {
+                "top_k_percents": cfg.modeling.top_k_percents,
+                "capacity_percent": cfg.modeling.capacity_percent,
+            }
+        )
+    with c2:
+        st.subheader("Whitespace")
+        st.json(
+            {
+                "weights": cfg.whitespace.weights,
+                "capacity_mode": cfg.whitespace.capacity_mode,
+                "accounts_per_rep": cfg.whitespace.accounts_per_rep,
+            }
+        )
+    st.subheader("Documentation")
+    repo_root = Path(__file__).resolve().parents[2]
+    readme = repo_root / "README.md"
+    docs_dir = repo_root / "gosales" / "docs"
+    if readme.exists():
+        st.markdown(f"[Repository README]({readme})")
+    st.markdown(f"[Docs directory]({docs_dir})")
+    st.subheader("Environment")
+    st.caption(f"App version: {os.getenv('APP_VERSION', 'dev')}")
+    st.caption(f"Last refresh: {st.session_state.get('last_refresh', 'n/a')}")
