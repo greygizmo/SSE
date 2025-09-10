@@ -1,11 +1,12 @@
 import json
 from pathlib import Path
+from datetime import datetime
 
 import pandas as pd
 import streamlit as st
 
 from gosales.utils.paths import OUTPUTS_DIR, MODELS_DIR
-from gosales.ui.utils import discover_validation_runs, compute_validation_badges, load_thresholds, load_alerts, compute_default_validation_index, read_runs_registry
+from gosales.ui.utils import discover_validation_runs, compute_validation_badges, load_thresholds, load_alerts, compute_default_validation_index
 
 
 st.set_page_config(page_title="GoSales Engine", layout="wide")
@@ -39,6 +40,14 @@ def _read_csv(path: Path) -> pd.DataFrame:
         return pd.read_csv(path)
     except Exception:
         return pd.DataFrame()
+
+
+def _format_ts(path: Path) -> str:
+    """Return the last modified timestamp for a path."""
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return "unknown"
 
 def _discover_divisions() -> list[str]:
     divs: set[str] = set()
@@ -133,9 +142,13 @@ if tab == "Overview":
             with_ind = int(df.loc[df['metric']=='with_industry','value'].iloc[0]) if not df.empty else None
             pct = float(df.loc[df['metric']=='coverage_pct','value'].iloc[0]) if not df.empty else None
             c1, c2, c3 = st.columns(3)
-            if total is not None: c1.metric("Total Customers", f"{total:,}")
-            if with_ind is not None: c2.metric("With Industry", f"{with_ind:,}")
-            if pct is not None: c3.metric("Coverage %", f"{pct:.2f}%")
+            if total is not None:
+                c1.metric("Total Customers", f"{total:,}")
+            if with_ind is not None:
+                c2.metric("With Industry", f"{with_ind:,}")
+            if pct is not None:
+                c3.metric("Coverage %", f"{pct:.2f}%")
+            st.caption(f"Last updated: {_format_ts(cov)}")
         except Exception:
             st.info("Coverage summary could not be parsed.")
     # Contracts
@@ -143,13 +156,13 @@ if tab == "Overview":
     cc1, cc2 = st.columns(2)
     rc = OUTPUTS_DIR / 'contracts' / 'row_counts.csv'
     if rc.exists():
-        cc1.caption("Row counts")
+        cc1.caption(f"Row counts — {_format_ts(rc)}")
         cc1.dataframe(_read_csv(rc), use_container_width=True)
     else:
         cc1.info("Row counts not available")
     viol = OUTPUTS_DIR / 'contracts' / 'violations.csv'
     if viol.exists():
-        cc2.caption("Violations")
+        cc2.caption(f"Violations — {_format_ts(viol)}")
         cc2.dataframe(_read_csv(viol), use_container_width=True)
     else:
         cc2.info("Violations file not available or empty")
@@ -169,16 +182,19 @@ elif tab == "Metrics":
         mc_path = OUTPUTS_DIR / f"model_card_{div.lower()}.json"
         if mc_path.exists():
             st.subheader("Model Card")
+            st.caption(f"Last updated: {_format_ts(mc_path)}")
             st.code(_read_text(mc_path))
         # Metrics JSON
         mt_path = OUTPUTS_DIR / f"metrics_{div.lower()}.json"
         if mt_path.exists():
             st.subheader("Training Metrics (JSON)")
+            st.caption(f"Last updated: {_format_ts(mt_path)}")
             st.code(_read_text(mt_path))
         # Calibration
         cal_path = OUTPUTS_DIR / f"calibration_{div.lower()}.csv"
         if cal_path.exists():
             st.subheader("Calibration (train split)")
+            st.caption(f"Last updated: {_format_ts(cal_path)}")
             st.caption("Mean predicted vs fraction positives by bins; close tracking indicates good calibration.")
             cal = _read_csv(cal_path)
             try:
@@ -198,6 +214,7 @@ elif tab == "Metrics":
         g_path = OUTPUTS_DIR / f"gains_{div.lower()}.csv"
         if g_path.exists():
             st.subheader("Gains (train split)")
+            st.caption(f"Last updated: {_format_ts(g_path)}")
             st.caption("Average conversion by decile (1=top 10% by score).")
             gains = _read_csv(g_path)
             try:
@@ -215,6 +232,7 @@ elif tab == "Metrics":
         th_path = OUTPUTS_DIR / f"thresholds_{div.lower()}.csv"
         if th_path.exists():
             st.subheader("Top-K Thresholds")
+            st.caption(f"Last updated: {_format_ts(th_path)}")
             st.caption("Score thresholds to select top‑K% of customers; use with capacity planning.")
             thr = _read_csv(th_path)
             st.dataframe(thr, use_container_width=True)
@@ -237,16 +255,19 @@ elif tab == "Explainability":
             st.subheader("Feature Catalog")
             cat = _read_csv(cat_candidates[0])
             st.caption("Columns: name (feature id), dtype (pandas dtype), coverage (non-null share). Use to assess feature availability.")
+            st.caption(f"Last updated: {_format_ts(cat_candidates[0])}")
             st.dataframe(cat, use_container_width=True, height=320)
             st.download_button("Download feature catalog", data=cat.to_csv(index=False), file_name=cat_candidates[0].name)
         if stats_candidates:
             st.subheader("Feature Stats")
             st.caption("Includes per-column coverage; optional winsor caps for gp_sum features; checksum ensures determinism of the feature parquet.")
+            st.caption(f"Last updated: {_format_ts(stats_candidates[0])}")
             st.code(_read_text(stats_candidates[0]))
         if sg.exists():
             with st.expander("SHAP Global — what it means", expanded=True):
                 st.markdown("- Mean absolute SHAP reflects average feature influence magnitude across customers. Higher = more impact on predictions.")
                 st.markdown("- Use this to identify globally important features; pair with coefficients for direction (if LR).")
+            st.caption(f"Last updated: {_format_ts(sg)}")
             sg_df = _read_csv(sg)
             st.dataframe(sg_df, use_container_width=True, height=320)
             # Optional bar chart if aggregated column present
@@ -263,6 +284,7 @@ elif tab == "Explainability":
                 st.markdown("- Row = customer; columns = per-feature SHAP values.")
                 st.markdown("- Sign: positive raises probability; negative lowers. Compare features within the same customer.")
                 st.markdown("- Magnitude: larger absolute value = stronger effect for that customer.")
+            st.caption(f"Last updated: {_format_ts(ss)}")
             ss_df = _read_csv(ss).head(200)
             st.dataframe(ss_df, use_container_width=True, height=320)
             st.download_button("Download SHAP sample", data=ss_df.to_csv(index=False), file_name=ss.name)
@@ -270,6 +292,7 @@ elif tab == "Explainability":
             with st.expander("Logistic Regression Coefficients — interpretation", expanded=False):
                 st.markdown("- Positive coefficient increases log-odds; negative decreases. Magnitude depends on feature scaling.")
                 st.markdown("- Combine with SHAP for instance-level interpretation.")
+            st.caption(f"Last updated: {_format_ts(cf)}")
             cf_df = _read_csv(cf)
             st.dataframe(cf_df, use_container_width=True, height=320)
             st.download_button("Download coefficients", data=cf_df.to_csv(index=False), file_name=cf.name)
@@ -288,6 +311,7 @@ elif tab == "Whitespace":
         sel_cut = st.selectbox("Cutoff", cutoffs, index=default_idx, help="Choose ranking outputs by cutoff date (latest auto-selected)")
         ws = OUTPUTS_DIR / f"whitespace_{sel_cut}.csv"
         if ws.exists():
+            st.caption(f"Last updated: {_format_ts(ws)}")
             # Filters
             df = _read_csv(ws)
             if not df.empty:
@@ -302,24 +326,28 @@ elif tab == "Whitespace":
         ex = OUTPUTS_DIR / f"whitespace_explanations_{sel_cut}.csv"
         if ex.exists():
             st.subheader("Explanations")
+            st.caption(f"Last updated: {_format_ts(ex)}")
             st.caption("Short reasons combining key drivers (probability, affinity, EV).")
             st.dataframe(_read_csv(ex).head(200), use_container_width=True)
         # Metrics
         wm = OUTPUTS_DIR / f"whitespace_metrics_{sel_cut}.json"
         if wm.exists():
             st.subheader("Whitespace Metrics")
+            st.caption(f"Last updated: {_format_ts(wm)}")
             st.caption("Capture@K, division shares, stability vs prior run, coverage, and weights.")
             st.code(_read_text(wm))
         # Thresholds
         wthr = OUTPUTS_DIR / f"thresholds_whitespace_{sel_cut}.csv"
         if wthr.exists():
             st.subheader("Capacity Thresholds")
+            st.caption(f"Last updated: {_format_ts(wthr)}")
             st.caption("Top‑percent / per‑rep / hybrid thresholds for list sizing & diversification.")
             st.dataframe(_read_csv(wthr), use_container_width=True)
         # Logs preview
         wlog = OUTPUTS_DIR / f"whitespace_log_{sel_cut}.jsonl"
         if wlog.exists():
             st.subheader("Log Preview")
+            st.caption(f"Last updated: {_format_ts(wlog)}")
             st.caption("First 50 structured log rows; use for quick audit and guardrails.")
             lines = _read_jsonl(wlog)
             st.code(json.dumps(lines[:50], indent=2))
@@ -329,6 +357,7 @@ elif tab == "Whitespace":
             st.subheader("Market-Basket Rules")
             st.caption("SKU-level co‑occurrence rules; Lift > 1 indicates positive association with the target division.")
             sel_mb = st.selectbox("Select rules file", mb_files, format_func=lambda p: p.name)
+            st.caption(f"Last updated: {_format_ts(sel_mb)}")
             mb = _read_csv(sel_mb)
             st.dataframe(mb.head(300), use_container_width=True)
             st.download_button("Download rules CSV", data=mb.to_csv(index=False), file_name=sel_mb.name)
@@ -382,16 +411,19 @@ elif tab == "Validation":
         metrics_path = path / 'metrics.json'
         if metrics_path.exists():
             st.subheader("Metrics")
+            st.caption(f"Last updated: {_format_ts(metrics_path)}")
             st.code(metrics_path.read_text(encoding='utf-8'))
         # Drift
         drift_path = path / 'drift.json'
         if drift_path.exists():
             st.subheader("Drift")
+            st.caption(f"Last updated: {_format_ts(drift_path)}")
             st.code(drift_path.read_text(encoding='utf-8'))
         # Calibration (holdout)
         cal_path = path / 'calibration.csv'
         if cal_path.exists():
             st.subheader("Calibration (holdout)")
+            st.caption(f"Last updated: {_format_ts(cal_path)}")
             st.caption("Probability calibration on holdout; closer lines indicate better calibration.")
             cal = _read_csv(cal_path)
             try:
@@ -407,6 +439,7 @@ elif tab == "Validation":
         g2_path = path / 'gains.csv'
         if g2_path.exists():
             st.subheader("Gains (holdout)")
+            st.caption(f"Last updated: {_format_ts(g2_path)}")
             st.caption("Average conversion by decile in holdout data.")
             gains2 = _read_csv(g2_path)
             try:
@@ -423,11 +456,13 @@ elif tab == "Validation":
         scen_path = path / 'topk_scenarios_sorted.csv'
         if scen_path.exists():
             st.subheader("Scenarios (sorted)")
+            st.caption(f"Last updated: {_format_ts(scen_path)}")
             st.dataframe(pd.read_csv(scen_path))
         # Segment performance
         seg_path = path / 'segment_performance.csv'
         if seg_path.exists():
             st.subheader("Segment performance")
+            st.caption(f"Last updated: {_format_ts(seg_path)}")
             st.dataframe(pd.read_csv(seg_path))
         # Downloads
         st.subheader("Downloads")
@@ -449,6 +484,7 @@ elif tab == "Runs":
             df = pd.DataFrame(rows)
             df = df.sort_values('run_id', ascending=False)
             st.caption("Each entry is a pipeline run with start/finish, phase, status, and artifact path.")
+            st.caption(f"Last updated: {_format_ts(reg_path)}")
             # Flag dry-run entries
             if 'status' in df.columns:
                 df['note'] = df['status'].apply(lambda s: 'dry-run (no compute)' if str(s).lower()=='dry-run' else '')
@@ -463,6 +499,7 @@ elif tab == "Runs":
             with c1:
                 st.caption("Manifest (planned/emitted artifacts)")
                 if man.exists():
+                    st.caption(f"Last updated: {_format_ts(man)}")
                     st.code(_read_text(man))
                     st.download_button("Download manifest.json", data=man.read_bytes(), file_name='manifest.json')
                 else:
@@ -470,6 +507,7 @@ elif tab == "Runs":
             with c2:
                 st.caption("Resolved Config Snapshot")
                 if cfg.exists():
+                    st.caption(f"Last updated: {_format_ts(cfg)}")
                     st.code(_read_text(cfg))
                     st.download_button("Download config_resolved.yaml", data=cfg.read_bytes(), file_name='config_resolved.yaml')
                 else:
