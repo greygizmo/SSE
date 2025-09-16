@@ -9,7 +9,7 @@ graph TB
     Freeze[Freeze Training @ cutoff<br/>e.g., 2024-06-30] --> EnsureModel
     EnsureModel[Ensure Model @ cutoff<br/>train if missing] --> MonthList
     MonthList[Build Monthly Cutoffs<br/>start..end (YYYY-MM)] --> Clamp
-    Clamp[Clamp Months by Label Observability<br/>(cutoff + window) ≤ today] --> Iterate
+    Clamp[Clamp Months by Label Observability<br/>(cutoff + window) <= today] --> Iterate
 
     subgraph "Per-Month Evaluation"
         Iterate[For each month cutoff]

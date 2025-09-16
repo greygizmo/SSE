@@ -225,9 +225,9 @@ graph TB
     %% Horizon Evaluation & Adjacency Gates
     subgraph "Horizon Evaluation & Adjacency Gates"
         PrequentialEval[Prequential Evaluation<br/>AUC/Lift/Brier by month]
-        PermutationTest[Permutation Test<br/>p‑value]
-        ShiftGridTest[Shift Grid Test<br/>{7,14,28,56} days non‑improving]
-        AdjacencyGate[Adjacency Ablation Gate<br/>Full ≥ SAFE or SAFE policy]
+        PermutationTest[Permutation Test<br/>p-value]
+        ShiftGridTest[Shift Grid Test<br/>{7,14,28,56} days non-improving]
+        AdjacencyGate[Adjacency Ablation Gate<br/>Full >= SAFE or SAFE policy]
     end
     class TestETLIntegration,TestFeatureIntegration,TestModelIntegration,TestAPIIntegration,ValidateSystemIntegration,GenerateIntegrationReport integration
     class ExecutePerformanceTests,MeasureExecutionTime,MonitorResourceUsage,TestScalability,ValidateConcurrency,GeneratePerformanceReport performance

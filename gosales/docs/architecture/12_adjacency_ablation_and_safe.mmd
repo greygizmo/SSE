@@ -1,5 +1,5 @@
 ---
-title: GoSales Engine - Adjacency Ablation Triad and Auto‑SAFE
+title: GoSales Engine - Adjacency Ablation Triad and Auto-SAFE
 ---
 
 ```mermaid
@@ -22,20 +22,20 @@ graph TB
     Variants --> NoRec --> FitSel
     Variants --> SAFE --> FitSel
 
-    Compare --> Delta[Delta AUC<br/>Full − SAFE]
+    Compare --> Delta[Delta AUC<br/>Full - SAFE]
     Delta --> Artifacts[Write Artifacts
                          JSON, CSV]
 
     subgraph "Gating & Policy"
         Gate[Adjacency Gate
-             if SAFE ≥ Full by ≥ ε → recommend SAFE]
-        AutoSAFE[Auto‑SAFE Script
+             if SAFE >= Full by epsilon then recommend SAFE]
+        AutoSAFE[Auto-SAFE Script
                  updates config.modeling.safe_divisions]
     end
 
     Delta --> Gate --> AutoSAFE
     Artifacts --> UI[UI Adjacency Ablation Viewer
-                     table + ΔAUC]
+                     table + Delta AUC]
 
     %% Styling
     classDef node fill:#e3f2fd,stroke:#1565c0,stroke-width:2px

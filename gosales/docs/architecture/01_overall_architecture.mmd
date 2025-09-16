@@ -23,9 +23,9 @@ graph TB
         subgraph "Feature Engineering Phase"
             FeatureBuild[Feature Engineering<br/>engine.py]
             CycleAware[Cycle-aware Recency<br/>log + hazard decays]
-            OffsetsDeltas[Offset Windows + Deltas<br/>cutoff−60d, 12m vs prev12m]
+            OffsetsDeltas[Offset Windows + Deltas<br/>cutoff-60d, 12m vs prev12m]
             PooledEnc[Hierarchical/Pooled Encoders<br/>industry/sub (non-leaky)]
-            AffinityLag[Lagged Affinity (Market Basket)<br/>embargo ≥60d]
+            AffinityLag[Lagged Affinity (Market Basket)<br/>embargo >=60d]
             ALSEmbedding[ALS Embedding<br/>als_embed.py]
             LabelGen[Label Generation<br/>targets.py]
             CacheSystem[Feature Caching<br/>cache.py]
@@ -34,7 +34,7 @@ graph TB
         subgraph "Model Training Phase"
             TrainDivision[Division Training<br/>train.py (SAFE per-division)]
             Calibration[Calibration<br/>Platt/Isotonic]
-            ModelCard[Model Card<br/>top‑K yield, calibration]
+            ModelCard[Model Card<br/>top-K yield, calibration]
             ModelArtifacts[Model Artifacts<br/>model.pkl, feature_list]
             Metrics[Model Metrics<br/>metrics.json, gains, thresholds]
         end
@@ -46,7 +46,7 @@ graph TB
             Prequential[Prequential Evaluation<br/>prequential_eval.py]
             LeakageGauntlet[Leakage Gauntlet<br/>run_leakage_gauntlet.py]
             AdjacencyAbl[Adjacency Ablation Triad<br/>adjacency_ablation.py]
-            AutoSAFE[Auto‑SAFE From Ablation<br/>auto_safe_from_ablation.py]
+            AutoSAFE[Auto-SAFE From Ablation<br/>auto_safe_from_ablation.py]
         end
     end
 
@@ -57,9 +57,9 @@ graph TB
         HoldoutValidation[Holdout Testing<br/>validate_holdout.py]
         DecilesValidation[Deciles Analysis<br/>deciles.py]
         PreqReports[Prequential Reports<br/>AUC/Lift/Brier curves]
-        Permutation[Permutation Test<br/>p‑value]
-        ShiftGrid[Shift‑Grid {7,14,28,56}<br/>non‑improving]
-        AdjGate[Adjacency Ablation Gate<br/>Full ≥ SAFE or SAFE policy]
+        Permutation[Permutation Test<br/>p-value]
+        ShiftGrid[Shift-Grid {7,14,28,56}<br/>non-improving]
+        AdjGate[Adjacency Ablation Gate<br/>Full >= SAFE or SAFE policy]
         CIGate[CI Gate<br/>ci_gate.py]
     end
 
@@ -75,7 +75,7 @@ graph TB
     subgraph "User Interface"
         StreamlitApp[Streamlit Dashboard<br/>app.py]
         FeatureGuide[Feature Guide<br/>families + config]
-        BusinessYield[Business Yield (Top‑K)<br/>table + coverage]
+        BusinessYield[Business Yield (Top-K)<br/>table + coverage]
         PreqPanel[Prequential Viewer<br/>curves + table]
         AblationPanel[Adjacency Ablation Viewer]
     end
