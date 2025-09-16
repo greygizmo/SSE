@@ -10,7 +10,7 @@ graph TB
     %% Temporal & Cycle-aware
     subgraph "Temporal & Cycle-aware"
         Temporal[Create Time Windows<br/>3/6/12/24m]
-        LogRecency[Log-Recency<br/>log(1+days)]
+        LogRecency[Log Recency<br/>log(1+days)]
         Hazard[Hazard/Decay Recency<br/>exp(-days/hl{30|90|180})]
         Offsets[Offset Windows<br/>end at cutoff−offset_days]
         Deltas[Window Deltas<br/>12m vs previous 12m]

@@ -102,6 +102,8 @@ class Features:
     pooled_encoders_lookback_months: int = 24
     pooled_alpha_industry: float = 50.0
     pooled_alpha_sub: float = 50.0
+    # Silence pooled-encoder warnings (e.g., dtype/join chatter) in features engine
+    silence_pooled_encoder_warnings: bool = False
 
 
 @dataclass
@@ -375,6 +377,7 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
             pooled_encoders_lookback_months=int(feat_cfg.get("pooled_encoders_lookback_months", 24)),
             pooled_alpha_industry=float(feat_cfg.get("pooled_alpha_industry", 50.0)),
             pooled_alpha_sub=float(feat_cfg.get("pooled_alpha_sub", 50.0)),
+            silence_pooled_encoder_warnings=bool(feat_cfg.get("silence_pooled_encoder_warnings", False)),
         ),
         modeling=ModelingConfig(
             seed=int(mdl_cfg.get("seed", 42)),

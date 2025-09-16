@@ -275,8 +275,8 @@ def score_customers_for_division(
         # Optional EV and affinity signals
         aux_cols = [
             'rfm__all__gp_sum__12m',        # EV proxy
-            'affinity__div__lift_topk__12m',# affinity aggregate (if present)
-            'mb_lift_max',                  # primary basket-lift signal used by ranker
+            'affinity__div__lift_topk__12m',# affinity aggregate (if present; may have lag suffix)
+            'mb_lift_max',                  # primary basket-lift signal used by ranker (may have lag suffix)
             'mb_lift_mean',                 # secondary (not required but useful)
             'total_gp_all_time',            # size proxy for segment weighting
             'total_transactions_all_time',  # size proxy for segment weighting
@@ -284,6 +284,23 @@ def score_customers_for_division(
         for aux_col in aux_cols:
             if aux_col in feature_matrix_pd.columns and aux_col not in scores_df.columns:
                 scores_df[aux_col] = pd.to_numeric(feature_matrix_pd[aux_col], errors='coerce').fillna(0.0)
+        # Handle suffix variants produced by feature builder (e.g., _lag60d)
+        try:
+            # mb_lift_max / mb_lift_mean
+            for base in ['mb_lift_max','mb_lift_mean']:
+                if base not in scores_df.columns:
+                    candidates = [c for c in feature_matrix_pd.columns if str(c).startswith(base)]
+                    if candidates:
+                        c = candidates[0]
+                        scores_df[base] = pd.to_numeric(feature_matrix_pd[c], errors='coerce').fillna(0.0)
+            # affinity aggregate
+            aff_base = 'affinity__div__lift_topk__12m'
+            if aff_base not in scores_df.columns:
+                aff_cands = [c for c in feature_matrix_pd.columns if str(c).startswith(aff_base)]
+                if aff_cands:
+                    scores_df[aff_base] = pd.to_numeric(feature_matrix_pd[aff_cands[0]], errors='coerce').fillna(0.0)
+        except Exception:
+            pass
 
         # Pass through ALS embedding columns so ranker can compute als_norm
         als_cols = [c for c in feature_matrix_pd.columns if str(c).startswith('als_f')]
@@ -410,7 +427,7 @@ def generate_whitespace_opportunities(engine):
 
         whitespace_df = (
             pl.DataFrame(opportunities)
-            .with_columns(pl.col("customer_id").cast(pl.Int64, strict=False))
+            .with_columns(pl.col("customer_id").cast(pl.Utf8, strict=False))
             .join(customers, on="customer_id", how="left")
         )
         logger.info(f"Generated {len(whitespace_df)} whitespace opportunities")
@@ -543,6 +560,24 @@ def generate_scoring_outputs(
         except Exception:
             pass
         icp_scores_path = OUTPUTS_DIR / "icp_scores.csv"
+        # Add per-division percentile and letter grade to core artifact
+        try:
+            import polars as _pl
+            if {'division_name','icp_score'}.issubset(set(combined_scores.columns)):
+                combined_scores = combined_scores.with_columns([
+                    ((_pl.col('icp_score').rank('average').over('division_name') / _pl.len().over('division_name'))).alias('icp_percentile')
+                ])
+                combined_scores = combined_scores.with_columns([
+                    _pl.when(_pl.col('icp_percentile') >= 0.90).then(_pl.lit('A'))
+                       .when(_pl.col('icp_percentile') >= 0.70).then(_pl.lit('B'))
+                       .when(_pl.col('icp_percentile') >= 0.40).then(_pl.lit('C'))
+                       .when(_pl.col('icp_percentile') >= 0.20).then(_pl.lit('D'))
+                       .otherwise(_pl.lit('F'))
+                       .alias('icp_grade')
+                ])
+        except Exception as _e:
+            logger.warning(f"Failed to compute ICP percentile/grade in-core: {_e}")
+
         # Robust write: attempt primary path; on Windows lock, write a run_id-suffixed file
         try:
             combined_scores.write_csv(str(icp_scores_path))
@@ -582,11 +617,19 @@ def generate_scoring_outputs(
             # Load only necessary columns for ranking to reduce memory
             try:
                 use_cols = [
-                    'division_name','customer_id','icp_score',
+                    'division_name','customer_id','customer_name','icp_score',
                     'rfm__all__gp_sum__12m','affinity__div__lift_topk__12m',
                     'bought_in_division'
                 ]
-                icp_df = pd.read_csv(icp_path, usecols=lambda c: c in use_cols)
+                def _usecols(c: str) -> bool:
+                    return (
+                        (c in use_cols)
+                        or c.startswith('als_f')
+                        or c.startswith('mb_lift_')
+                        or c.startswith('affinity__div__lift_topk__12m')
+                        or c == 'owned_division_pre_cutoff'
+                    )
+                icp_df = pd.read_csv(icp_path, usecols=_usecols)
             except Exception:
                 icp_df = pd.read_csv(icp_path)
             ranked = rank_whitespace(RankInputs(scores=icp_df))
@@ -616,8 +659,11 @@ def generate_scoring_outputs(
                         # Overlap metrics: Jaccard of top-N between champion and legacy
                         try:
                             topn = max(1, int(len(ranked) * 0.10))
-                            champ_top = set(ranked.nlargest(topn, ["score","p_icp","customer_id"])['customer_id'].astype(int).tolist())
-                            leg_top = set(legacy_pd.nlargest(topn, "score")['customer_id'].astype(int).tolist())
+                            sort_champ = [c for c in ['score','p_icp'] if c in ranked.columns]
+                            champ_sel = ranked.sort_values(by=sort_champ, ascending=False, na_position='last').head(topn)
+                            leg_sel = legacy_pd.sort_values(by=['score'], ascending=False, na_position='last').head(topn)
+                            champ_top = set(champ_sel['customer_id'].astype(str).tolist())
+                            leg_top = set(leg_sel['customer_id'].astype(str).tolist())
                             inter = len(champ_top & leg_top)
                             union = len(champ_top | leg_top)
                             jacc = float(inter) / max(1, union)
@@ -633,8 +679,13 @@ def generate_scoring_outputs(
             try:
                 if 'score_challenger' in ranked.columns and len(ranked) > 0:
                     topn = max(1, int(len(ranked) * 0.10))
-                    champ_top = set(ranked.nlargest(topn, ["score","p_icp","customer_id"])['customer_id'].astype(int).tolist()) if 'score' in ranked.columns else set()
-                    chall_top = set(ranked.nlargest(topn, ["score_challenger","p_icp","customer_id"])['customer_id'].astype(int).tolist())
+                    # Build numeric sort keys only to avoid dtype issues
+                    sort_champ = [c for c in ['score','p_icp'] if c in ranked.columns]
+                    sort_chall = [c for c in ['score_challenger','p_icp'] if c in ranked.columns]
+                    champ_sel = ranked.sort_values(by=sort_champ, ascending=False, na_position='last').head(topn)
+                    chall_sel = ranked.sort_values(by=sort_chall, ascending=False, na_position='last').head(topn)
+                    champ_top = set(champ_sel['customer_id'].astype(str).tolist())
+                    chall_top = set(chall_sel['customer_id'].astype(str).tolist())
                     inter = len(champ_top & chall_top)
                     union = len(champ_top | chall_top)
                     jacc = float(inter) / max(1, union)
@@ -659,7 +710,7 @@ def generate_scoring_outputs(
                     for k in [5, 10, 20]:
                         thresholds.append({"mode": "top_percent", "k_percent": k, "threshold": None, "count": 0})
                     if scores_num.size > 0:
-                        sort_cols = [c for c in ['score', 'p_icp', 'EV_norm', 'customer_id'] if c in ranked.columns]
+                        sort_cols = [c for c in ['score', 'p_icp', 'EV_norm'] if c in ranked.columns]
                         for i, k in enumerate([5, 10, 20]):
                             kk = max(1, int(scores_num.size * (k / 100.0)))
                             pos = scores_num.size - kk
@@ -673,7 +724,7 @@ def generate_scoring_outputs(
                 # Metrics summary
                 checksum = int(pd.util.hash_pandas_object(ranked[['customer_id','division_name','score']]).sum()) if len(ranked) else 0
                 top10_n = max(1, int(len(ranked) * 0.10)) if len(ranked) > 0 else 0
-                top10 = ranked.nlargest(top10_n, ['score','p_icp','customer_id']) if top10_n > 0 else ranked.head(0)
+                top10 = ranked.sort_values(by=[c for c in ['score','p_icp'] if c in ranked.columns], ascending=False, na_position='last').head(top10_n) if top10_n > 0 else ranked.head(0)
                 shares = top10.groupby('division_name')['customer_id'].size().sort_values(ascending=False) if top10_n > 0 and 'division_name' in top10.columns else pd.Series(dtype=int)
                 share_map = {str(k): float(v) / max(1, int(len(top10))) for k, v in shares.items()} if top10_n > 0 else {}
                 metrics = {
@@ -697,11 +748,11 @@ def generate_scoring_outputs(
                     cfg = load_config()
                     mode = str(cfg.whitespace.capacity_mode)
                     selected = ranked
-                    sort_cols = [c for c in ['score', 'p_icp', 'EV_norm', 'customer_id'] if c in ranked.columns]
+                    sort_cols = [c for c in ['score', 'p_icp', 'EV_norm'] if c in ranked.columns]
                     if mode == 'top_percent':
                         if len(ranked) > 0:
                             ksel = max(1, int(len(ranked) * (cfg.modeling.capacity_percent / 100.0)))
-                            initial = ranked.nlargest(ksel, sort_cols).copy() if sort_cols else ranked.head(0)
+                            initial = ranked.sort_values(by=sort_cols, ascending=False, na_position='last').head(ksel).copy() if sort_cols else ranked.head(0)
                             # Capacity-aware rebalancing to enforce division max share when applicable
                             try:
                                 max_share = float(getattr(getattr(cfg, 'whitespace', object()), 'bias_division_max_share_topN', 0.0))
@@ -736,7 +787,7 @@ def generate_scoring_outputs(
                     elif mode in ('per_rep', 'hybrid'):
                         # Fallback to top_percent until rep attribution/interleave available
                         ksel = max(1, int(len(ranked) * (cfg.modeling.capacity_percent / 100.0)))
-                        selected = ranked.nlargest(ksel, sort_cols).copy() if len(ranked) and sort_cols else ranked.head(0)
+                        selected = ranked.sort_values(by=sort_cols, ascending=False, na_position='last').head(ksel).copy() if len(ranked) and sort_cols else ranked.head(0)
 
                     sel_name = f"whitespace_selected_{cutoff_tag}.csv" if cutoff_tag else "whitespace_selected.csv"
                     selected.to_csv(OUTPUTS_DIR / sel_name, index=False)

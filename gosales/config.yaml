@@ -4,13 +4,13 @@ paths:
   curated: gosales/data/curated
   outputs: gosales/outputs
 database:
-  engine: sqlite          # sqlite | duckdb | azure
+  engine: azure          # sqlite | duckdb | azure
   sqlite_path: gosales/gosales.db
   # If true, require external DB; fail if AZSQL_* missing/unhealthy (no SQLite fallback)
   strict_db: false
   # Optional mapping of logical sources -> actual tables/views. Use 'csv' to read from a file.
   source_tables:
-    sales_log: csv                     # Use local CSV for Sales Log when running locally
+    sales_log: dbo.saleslog            # Azure SQL view for Sales Log
     industry_enrichment: csv           # 'csv' means read from ETL CSV path below
     # Assets & item taxonomy (Azure SQL views)
     customer_assets_rollups: dbo.customer_asset_rollups
@@ -74,6 +74,7 @@ features:
   pooled_encoders_lookback_months: 24
   pooled_alpha_industry: 50.0
   pooled_alpha_sub: 50.0
+  silence_pooled_encoder_warnings: true
 modeling:
   seed: 42
   folds: 3

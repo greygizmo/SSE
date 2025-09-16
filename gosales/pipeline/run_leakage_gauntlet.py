@@ -360,84 +360,91 @@ def run_shift_check(ctx: LGContext, window_months: int, days: int, run_training:
     comp = {}
 
     if run_training:
-        # Best-effort: train base and shifted cutoff with identical SAFE+GroupCV+purge and compare
+        # Preflight: ensure sufficient data/positives to avoid degenerate folds
         try:
-            from gosales.utils.paths import OUTPUTS_DIR as _OUT
-            import shutil
-            division = ctx.division
-            div_key = division.lower()
-            met_path = _OUT / f"metrics_{div_key}.json"
-            backup_path = None
-            if met_path.exists():
-                backup_path = _OUT / f"metrics_{div_key}.json.bak"
-                shutil.copy2(met_path, backup_path)
-            # Enforce GroupKFold and purge days; use SAFE mode for Gauntlet training
-            from gosales.utils.config import load_config as _load
-            _cfg = _load()
-            purge = int(getattr(getattr(_cfg, 'validation', object()), 'gauntlet_purge_days', 30) or 30)
-            label_buf = int(getattr(getattr(_cfg, 'validation', object()), 'gauntlet_label_buffer_days', 0) or 0)
-            def _train_at(cut: str) -> dict:
-                cmd = [
-                    sys.executable, "-m", "gosales.models.train",
-                    "--division", division,
-                    "--cutoffs", cut,
-                    "--window-months", str(window_months),
-                    "--group-cv",
-                    "--purge-days", str(int(purge)),
-                    "--safe-mode",
-                    "--label-buffer-days", str(int(label_buf)),
-                ]
-                subprocess.run(cmd, check=True)
-                return json.loads(met_path.read_text(encoding="utf-8")) if met_path.exists() else {}
-
-            # Train base and shifted with same SAFE/GroupCV/purge to ensure apples-to-apples
-            base_metrics = _train_at(ctx.cutoff)
-            shift_metrics = _train_at(cut_shift)
-            # Restore original metrics if we backed up; otherwise clean up temp metrics file
-            if backup_path and backup_path.exists():
-                shutil.move(str(backup_path), str(met_path))
-            else:
-                try:
-                    if met_path.exists():
-                        met_path.unlink()
-                except Exception:
-                    pass
-            # Extract comparable metrics
-            def _final(m):
-                return m.get("final", {}) if isinstance(m, dict) else {}
-            bm = _final(base_metrics)
-            sm = _final(shift_metrics)
-            # Harmonize lift@10 field name across variants
-            def _lift10(d: dict) -> float | None:
-                if d is None:
-                    return None
-                v = d.get("lift@10") if isinstance(d, dict) else None
-                if v is None and isinstance(d, dict):
-                    v = d.get("lift10")
-                return v
-            comp = {
-                "auc_base": bm.get("auc"),
-                "auc_shift": sm.get("auc"),
-                "lift10_base": _lift10(bm),
-                "lift10_shift": _lift10(sm),
-                "brier_base": bm.get("brier"),
-                "brier_shift": sm.get("brier"),
-            }
-            # Determine status: improvement beyond epsilon is suspicious
+            ok_base = (fm_base is not None) and (not fm_base.is_empty()) and (int(fm_base.select('bought_in_division').to_pandas().sum().iloc[0]) >= 10)
+        except Exception:
+            ok_base = False
+        try:
+            ok_shift = (fm_shift is not None) and (not fm_shift.is_empty()) and (int(fm_shift.select('bought_in_division').to_pandas().sum().iloc[0]) >= 10)
+        except Exception:
+            ok_shift = False
+        if not (ok_base and ok_shift):
+            status = "SKIPPED"
+            comp = {"reason": "insufficient positives for stable GroupCV folds at base/shift cutoffs"}
+        else:
+            # Best-effort: train base and shifted cutoff with identical SAFE+GroupCV+purge and compare
             try:
-                auc_imp = (float(sm.get("auc", 0.0)) - float(bm.get("auc", 0.0))) if bm.get("auc") is not None and sm.get("auc") is not None else 0.0
-                # Compare lift@10 if available (supports both keys)
-                lb = _lift10(bm); ls = _lift10(sm)
-                lift_imp = (float(ls) - float(lb)) if lb is not None and ls is not None else 0.0
-                if auc_imp > float(epsilon_auc) or lift_imp > float(epsilon_lift10):
-                    status = "FAIL"
+                from gosales.utils.paths import OUTPUTS_DIR as _OUT
+                import shutil
+                division = ctx.division
+                div_key = division.lower()
+                met_path = _OUT / f"metrics_{div_key}.json"
+                backup_path = None
+                if met_path.exists():
+                    backup_path = _OUT / f"metrics_{div_key}.json.bak"
+                    shutil.copy2(met_path, backup_path)
+                # Enforce GroupKFold and purge days; use SAFE mode for Gauntlet training
+                from gosales.utils.config import load_config as _load
+                _cfg = _load()
+                purge = int(getattr(getattr(_cfg, 'validation', object()), 'gauntlet_purge_days', 30) or 30)
+                label_buf = int(getattr(getattr(_cfg, 'validation', object()), 'gauntlet_label_buffer_days', 0) or 0)
+                def _train_at(cut: str) -> dict:
+                    cmd = [
+                        sys.executable, "-m", "gosales.models.train",
+                        "--division", division,
+                        "--cutoffs", cut,
+                        "--window-months", str(window_months),
+                        "--group-cv",
+                        "--purge-days", str(int(purge)),
+                        "--safe-mode",
+                        "--label-buffer-days", str(int(label_buf)),
+                    ]
+                    subprocess.run(cmd, check=True)
+                    return json.loads(met_path.read_text(encoding="utf-8")) if met_path.exists() else {}
+                # Train base and shifted with same SAFE/GroupCV/purge to ensure apples-to-apples
+                base_metrics = _train_at(ctx.cutoff)
+                shift_metrics = _train_at(cut_shift)
+                # Restore original metrics if we backed up; otherwise clean up temp metrics file
+                if backup_path and backup_path.exists():
+                    shutil.move(str(backup_path), str(met_path))
                 else:
-                    status = "PASS"
-            except Exception:
-                status = "UNKNOWN"
-        except Exception as e:
-            status = "ERROR"
-            comp = {"error": str(e)}
+                    try:
+                        if met_path.exists():
+                            met_path.unlink()
+                    except Exception:
+                        pass
+                # Extract comparable metrics
+                def _final(m):
+                    return m.get("final", {}) if isinstance(m, dict) else {}
+                bm = _final(base_metrics)
+                sm = _final(shift_metrics)
+                # Harmonize lift@10 field name across variants
+                def _lift10(d: dict) -> float | None:
+                    if d is None:
+                        return None
+                    v = d.get("lift@10") if isinstance(d, dict) else None
+                    if v is None and isinstance(d, dict):
+                        v = d.get("lift10")
+                    return v
+                comp = {
+                    "auc_base": bm.get("auc"),
+                    "auc_shift": sm.get("auc"),
+                    "lift10_base": _lift10(bm),
+                    "lift10_shift": _lift10(sm),
+                    "brier_base": bm.get("brier"),
+                    "brier_shift": sm.get("brier"),
+                }
+                # Determine status: improvement beyond epsilon is suspicious
+                try:
+                    auc_imp = (float(sm.get("auc", 0.0)) - float(bm.get("auc", 0.0))) if bm.get("auc") is not None and sm.get("auc") is not None else 0.0
+                    # Compare lift@10 if available (supports both keys)
+                    lb = _lift10(bm); ls = _lift10(sm)
+                    lift_imp = (float(ls) - float(lb)) if lb is not None and ls is not None else 0.0
+                    status = "FAIL" if (auc_imp > float(epsilon_auc) or lift_imp > float(epsilon_lift10)) else "PASS"
+                except Exception as e:
+                    status = "ERROR"
+                    comp = {"error": str(e)}
 
         # Auxiliary LR comparison using masked features (gauntlet mask)
         try:
@@ -520,8 +527,8 @@ def run_shift_check(ctx: LGContext, window_months: int, days: int, run_training:
                     })
                 except Exception:
                     pass
-        except Exception:
-            pass
+            except Exception:
+                pass
 
     out = {
         "status": status,
@@ -700,11 +707,22 @@ def write_consolidated_report(ctx: LGContext, artifacts: dict[str, str]) -> Path
 @click.option("--topk-list", default="10,20", help="Comma-separated K list for ablation (e.g., 10,20,50)")
 @click.option("--ablation-eps-auc", type=float, default=None, help="Override epsilon AUC threshold for ablation (default from config)")
 @click.option("--ablation-eps-lift10", type=float, default=None, help="Override epsilon lift@10 threshold for ablation (default from config)")
+@click.option("--summary-divisions", default=None, help="Comma-separated divisions to aggregate a cross-division shift-grid summary for this cutoff")
 @click.option("--config", default=str((Path(__file__).parents[1] / "config.yaml").resolve()))
-def main(division: str, cutoff: str, window_months: int, static_only: bool, run_shift14_training: bool, run_shift_grid: bool, shift14_eps_auc: float | None, shift14_eps_lift10: float | None, shift_grid: str, run_repro_check: bool, repro_eps_auc: float, repro_eps_lift10: float, run_topk_ablation: bool, topk_list: str, ablation_eps_auc: float | None, ablation_eps_lift10: float | None, config: str) -> None:
+def main(division: str, cutoff: str, window_months: int, static_only: bool, run_shift14_training: bool, run_shift_grid: bool, shift14_eps_auc: float | None, shift14_eps_lift10: float | None, shift_grid: str, run_repro_check: bool, repro_eps_auc: float, repro_eps_lift10: float, run_topk_ablation: bool, topk_list: str, ablation_eps_auc: float | None, ablation_eps_lift10: float | None, summary_divisions: str | None, config: str) -> None:
     cfg = load_config(config)
     ctx = _ensure_outdir(division, cutoff)
     artifacts = {}
+    # If caller requests non-static mode but didn't pass explicit training flags,
+    # enable the original training path defaults (shift-14 and shift-grid).
+    try:
+        if not static_only:
+            if not run_shift14_training:
+                run_shift14_training = True
+            if not run_shift_grid:
+                run_shift_grid = True
+    except Exception:
+        pass
     try:
         logger.info("Running Leakage Gauntlet static checks for %s @ %s", division, cutoff)
         artifacts.update(run_static_checks(ctx))
@@ -791,6 +809,36 @@ def main(division: str, cutoff: str, window_months: int, static_only: bool, run_
     # Future: dynamic checks here when enabled
     report = write_consolidated_report(ctx, artifacts)
     logger.info("Wrote leakage report to %s", report)
+    # Optional cross-division summary for shift-grid
+    try:
+        if summary_divisions:
+            divs = [d.strip() for d in str(summary_divisions).split(',') if d.strip()]
+            entries = []
+            overall_cx = "PASS"
+            for d in divs:
+                # Prefer the just-created artifact when d==division
+                try:
+                    path = None
+                    if d == division and 'shift_grid' in artifacts:
+                        path = artifacts.get('shift_grid')
+                    if not path:
+                        path = str((OUTPUTS_DIR / 'leakage' / d / cutoff / f'shift_grid_{d}_{cutoff}.json').resolve())
+                    data = json.loads(Path(path).read_text(encoding='utf-8')) if Path(path).exists() else None
+                except Exception:
+                    data = None
+                if not data:
+                    entries.append({"division": d, "status": "MISSING"})
+                    overall_cx = "FAIL"
+                    continue
+                entries.append({"division": d, "overall": data.get("overall"), "shifts": data.get("shifts", [])})
+                if data.get("overall") == "FAIL":
+                    overall_cx = "FAIL"
+            cx = {"cutoff": cutoff, "overall": overall_cx, "divisions": entries}
+            cx_path = OUTPUTS_DIR / "leakage" / f"shift_grid_summary_{cutoff}.json"
+            cx_path.write_text(json.dumps(cx, indent=2), encoding='utf-8')
+            logger.info("Wrote cross-division shift-grid summary to %s", cx_path)
+    except Exception as e:
+        logger.warning("Cross-division summary failed: %s", e)
     try:
         # Exit non-zero on failure to allow CI gating
         data = json.loads(report.read_text(encoding="utf-8"))

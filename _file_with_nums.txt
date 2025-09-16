@@ -1,0 +1,813 @@
+    1: from __future__ import annotations
+    2: 
+    3: """
+    4: Leakage Gauntlet runner.
+    5: 
+    6: Implements static checks that do not require retraining, and lays the structure
+    7: for future dynamic checks (date shift, ablation, group-safe CV). Artifacts are
+    8: written under gosales/outputs/leakage/<division>/<cutoff>/.
+    9: """
+   10: 
+   11: from pathlib import Path
+   12: from dataclasses import dataclass
+   13: import json
+   14: import re
+   15: import sys
+   16: import click
+   17: import subprocess
+   18: from datetime import timedelta
+   19: 
+   20: from gosales.utils.config import load_config
+   21: from gosales.utils.paths import OUTPUTS_DIR, ROOT_DIR, MODELS_DIR
+   22: from gosales.utils.logger import get_logger
+   23: from gosales.utils.db import get_curated_connection, get_db_connection
+   24: from gosales.features.engine import create_feature_matrix
+   25: 
+   26: 
+   27: logger = get_logger(__name__)
+   28: 
+   29: 
+   30: # --- Static scan for time-now calls ---
+   31: _BANNED_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+   32:     ("datetime.now", re.compile(r"\bdatetime\s*\.\s*now\s*\(")),
+   33:     ("pd.Timestamp.now", re.compile(r"\b(pd\s*\.\s*)?Timestamp\s*\.\s*now\s*\(")),
+   34:     ("date.today", re.compile(r"\bdate\s*\.\s*today\s*\(")),
+   35: ]
+   36: 
+   37: 
+   38: def _static_scan(paths: list[Path]) -> dict:
+   39:     results: list[dict] = []
+   40:     for base in paths:
+   41:         for p in base.rglob("*.py"):
+   42:             try:
+   43:                 text = p.read_text(encoding="utf-8", errors="ignore")
+   44:             except Exception:
+   45:                 continue
+   46:             for i, line in enumerate(text.splitlines(), start=1):
+   47:                 s = line.strip()
+   48:                 # Skip comments
+   49:                 if not s or s.startswith("#"):
+   50:                     continue
+   51:                 for name, pat in _BANNED_PATTERNS:
+   52:                     if pat.search(line):
+   53:                         results.append({
+   54:                             "file": str(p.relative_to(ROOT_DIR)),
+   55:                             "line": i,
+   56:                             "pattern": name,
+   57:                             "code": line.strip(),
+   58:                         })
+   59:     status = "PASS" if not results else "FAIL"
+   60:     return {"status": status, "findings": results}
+   61: 
+   62: 
+   63: @dataclass
+   64: class LGContext:
+   65:     division: str
+   66:     cutoff: str
+   67:     out_dir: Path
+   68: 
+   69: 
+   70: def _ensure_outdir(division: str, cutoff: str) -> LGContext:
+   71:     d = division.strip()
+   72:     c = cutoff.strip()
+   73:     out = OUTPUTS_DIR / "leakage" / d / c
+   74:     out.mkdir(parents=True, exist_ok=True)
+   75:     return LGContext(d, c, out)
+   76: 
+   77: 
+   78: def run_static_checks(ctx: LGContext) -> dict[str, str]:
+   79:     checks: dict[str, str] = {}
+   80:     # Static scan across feature and ETL code paths
+   81:     scan = _static_scan([ROOT_DIR / "gosales" / "features", ROOT_DIR / "gosales" / "etl"])
+   82:     static_path = ctx.out_dir / f"static_scan_{ctx.division}_{ctx.cutoff}.json"
+   83:     static_path.write_text(json.dumps(scan, indent=2), encoding="utf-8")
+   84:     checks["static_scan"] = str(static_path)
+   85:     return checks
+   86: 
+   87: 
+   88: def run_feature_date_audit(ctx: LGContext, window_months: int) -> dict[str, str]:
+   89:     """Emit a per-feature latest-event audit and a JSON summary.
+   90: 
+   91:     Approach: compute max(order_date) from fact_transactions filtered at cutoff.
+   92:     Use the feature matrix to enumerate features, then assign the observed max
+   93:     event date to each feature and check against cutoff. This guards against any
+   94:     accidental use of post-cutoff data in feature computation.
+   95:     """
+   96:     # Prefer curated engine (where facts live); fallback to primary DB
+   97:     try:
+   98:         engine = get_curated_connection()
+   99:     except Exception:
+  100:         engine = get_db_connection()
+  101: 
+  102:     # Enumerate features by building the feature matrix (no training involved)
+  103:     # Use Gauntlet tail mask to reduce near-cutoff signal in windowed features
+  104:     cfg = load_config()
+  105:     mask_tail = int(getattr(getattr(cfg, 'validation', object()), 'gauntlet_mask_tail_days', 0) or 0)
+  106:     fm = create_feature_matrix(engine, ctx.division, ctx.cutoff, window_months, mask_tail_days=mask_tail)
+  107:     cols = [c for c in fm.columns if c not in ("customer_id", "bought_in_division")]
+  108:     # Compute the latest event date used for features
+  109:     import pandas as pd
+  110:     sql = "SELECT MAX(order_date) AS max_order_date FROM fact_transactions WHERE order_date <= :cutoff"
+  111:     df = pd.read_sql_query(sql, engine, params={"cutoff": ctx.cutoff})
+  112:     max_order_date = None
+  113:     try:
+  114:         max_order_date = pd.to_datetime(df["max_order_date"].iloc[0]) if not df.empty else None
+  115:     except Exception:
+  116:         max_order_date = None
+  117:     # Build per-feature audit frame
+  118:     cutoff_dt = pd.to_datetime(ctx.cutoff)
+  119:     rows = []
+  120:     for name in cols:
+  121:         latest = max_order_date
+  122:         status = "OK"
+  123:         if latest is not None and latest > cutoff_dt:
+  124:             status = "LEAK"
+  125:         rows.append({
+  126:             "feature": str(name),
+  127:             "latest_event_date": (latest.date().isoformat() if pd.notna(latest) else None),
+  128:             "cutoff": ctx.cutoff,
+  129:             "status": status,
+  130:         })
+  131:     audit_path = ctx.out_dir / f"feature_date_audit_{ctx.division}_{ctx.cutoff}.csv"
+  132:     pd.DataFrame(rows).to_csv(audit_path, index=False)
+  133:     # Summary JSON for consolidated report
+  134:     summary = {
+  135:         "status": ("FAIL" if any(r["status"] == "LEAK" for r in rows) else "PASS"),
+  136:         "max_event_date": (max_order_date.date().isoformat() if isinstance(max_order_date, pd.Timestamp) and pd.notna(max_order_date) else None),
+  137:         "cutoff": ctx.cutoff,
+  138:         "feature_count": len(rows),
+  139:     }
+  140:     summary_path = ctx.out_dir / f"feature_date_audit_{ctx.division}_{ctx.cutoff}.json"
+  141:     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+  142:     return {"feature_date_audit": str(summary_path), "feature_date_audit_csv": str(audit_path)}
+  143: 
+  144: 
+  145: def _unwrap_model_and_features(model) -> tuple[object, list[str] | None]:
+  146:     """Attempt to unwrap calibrated/pipeline models and return base estimator + feature names if present."""
+  147:     feats = None
+  148:     base = getattr(model, 'base_estimator', None)
+  149:     if base is None and hasattr(model, 'estimator'):
+  150:         base = model.estimator
+  151:     if base is None:
+  152:         base = model
+  153:     # Pipeline named_steps
+  154:     try:
+  155:         from sklearn.pipeline import Pipeline as _SkPipeline  # lazy import
+  156:         if isinstance(base, _SkPipeline):
+  157:             if 'model' in getattr(base, 'named_steps', {}):
+  158:                 base = base.named_steps['model']
+  159:     except Exception:
+  160:         pass
+  161:     # Try to get feature names if stored
+  162:     try:
+  163:         feats = getattr(model, 'feature_names_in_', None)
+  164:         if feats is not None:
+  165:             feats = [str(x) for x in feats]
+  166:     except Exception:
+  167:         feats = None
+  168:     return base, feats
+  169: 
+  170: 
+  171: def run_topk_ablation_check(ctx: LGContext, window_months: int, k_list: list[int], run_training: bool = False, epsilon_auc: float = 0.01, epsilon_lift10: float = 0.25) -> dict[str, str]:
+  172:     """Top-K ablation scaffold: ranks features by model importance and (optionally) retrains without top-K.
+  173: 
+  174:     Emits `ablation_topk_<div>_<cutoff>.csv` with ranked features and per-K sets.
+  175:     When `run_training=True`, trains a simple LR on the last-cutoff feature matrix and compares AUC/lift@10 to baseline.
+  176:     """
+  177:     import joblib
+  178:     import numpy as np
+  179:     import pandas as pd
+  180:     from pathlib import Path as _P
+  181:     from sklearn.linear_model import LogisticRegression
+  182:     from sklearn.metrics import roc_auc_score
+  183: 
+  184:     # Load trained model and try to extract importances
+  185:     model_dir = MODELS_DIR / f"{ctx.division.lower()}_model"
+  186:     pkl = model_dir / 'model.pkl'
+  187:     model = joblib.load(pkl)
+  188:     base, _ = _unwrap_model_and_features(model)
+  189:     # Feature names from metadata
+  190:     meta = {}
+  191:     feats: list[str] | None = None
+  192:     try:
+  193:         meta = json.loads((model_dir / 'metadata.json').read_text(encoding='utf-8'))
+  194:         feats = meta.get('feature_names') or None
+  195:         if feats:
+  196:             feats = [str(x) for x in feats]
+  197:     except Exception:
+  198:         feats = feats or None
+  199: 
+  200:     imp: pd.Series | None = None
+  201:     try:
+  202:         importances = None
+  203:         if hasattr(base, 'feature_importances_'):
+  204:             importances = getattr(base, 'feature_importances_')
+  205:         elif hasattr(base, 'coef_'):
+  206:             importances = np.abs(np.ravel(base.coef_))
+  207:         if importances is not None:
+  208:             if feats is None and hasattr(base, 'feature_names_in_'):
+  209:                 feats = [str(x) for x in getattr(base, 'feature_names_in_')]
+  210:             names = feats if feats is not None else [f'f{i}' for i in range(len(importances))]
+  211:             imp = pd.Series(importances, index=names).sort_values(ascending=False)
+  212:     except Exception:
+  213:         imp = None
+  214: 
+  215:     # Write ranking and K-sets
+  216:     out_dir = ctx.out_dir
+  217:     rank_path = out_dir / f"ablation_topk_{ctx.division}_{ctx.cutoff}.csv"
+  218:     rows = []
+  219:     if imp is not None:
+  220:         for name, val in imp.items():
+  221:             rows.append({'feature': name, 'importance': float(val)})
+  222:     else:
+  223:         rows.append({'feature': None, 'importance': None})
+  224:     pd.DataFrame(rows).to_csv(rank_path, index=False)
+  225: 
+  226:     # Training comparison (optional)
+  227:     summary = {
+  228:         'status': 'PLANNED' if not run_training else 'UNKNOWN',
+  229:         'cutoff': ctx.cutoff,
+  230:         'k_list': k_list,
+  231:         'baseline': {},
+  232:         'ablations': [],
+  233:     }
+  234:     try:
+  235:         base_metrics_path = OUTPUTS_DIR / f"metrics_{ctx.division.lower()}.json"
+  236:         if base_metrics_path.exists():
+  237:             base_metrics = json.loads(base_metrics_path.read_text(encoding='utf-8'))
+  238:             fin = base_metrics.get('final', {}) or {}
+  239:             summary['baseline'] = {'auc': fin.get('auc'), 'lift10': fin.get('lift@10') or fin.get('lift10')}
+  240:     except Exception:
+  241:         pass
+  242: 
+  243:     if run_training:
+  244:         # Build feature matrix and simple LR validation to estimate impact
+  245:         eng = None
+  246:         try:
+  247:             eng = get_curated_connection()
+  248:         except Exception:
+  249:             eng = get_db_connection()
+  250:         fm = create_feature_matrix(eng, ctx.division, ctx.cutoff, window_months)
+  251:         if not fm.is_empty():
+  252:             df = fm.to_pandas()
+  253:             y = df['bought_in_division'].astype(int).values
+  254:             X = df.drop(columns=['customer_id', 'bought_in_division'])
+  255:             # Simple time-aware split using recency proxy if present
+  256:             rec_col = 'rfm__all__recency_days__life'
+  257:             try:
+  258:                 if rec_col in X.columns:
+  259:                     order = X[rec_col].astype(float).fillna(X[rec_col].astype(float).max()).argsort()
+  260:                     # assign smaller recency (more recent) to validation
+  261:                     n = len(order)
+  262:                     n_valid = max(1, int(0.2 * n))
+  263:                     idx_valid = order[:n_valid]
+  264:                     idx_train = order[n_valid:]
+  265:                 else:
+  266:                     idx = np.arange(len(X))
+  267:                     np.random.seed(42)
+  268:                     np.random.shuffle(idx)
+  269:                     split = int(0.8 * len(idx))
+  270:                     idx_train, idx_valid = idx[:split], idx[split:]
+  271:             except Exception:
+  272:                 idx = np.arange(len(X))
+  273:                 split = int(0.8 * len(idx))
+  274:                 idx_train, idx_valid = idx[:split], idx[split:]
+  275: 
+  276:             def _lift_at_k(y_true: np.ndarray, y_score: np.ndarray, k: int) -> float:
+  277:                 order = np.argsort(-y_score)
+  278:                 k_idx = max(1, int(len(order) * (k/100.0)))
+  279:                 topk = order[:k_idx]
+  280:                 return float((y_true[topk].mean() / max(1e-9, y_true.mean()))) if y_true.mean() > 0 else 0.0
+  281: 
+  282:             # Baseline LR on all features
+  283:             lr = LogisticRegression(max_iter=2000, solver='lbfgs', class_weight='balanced')
+  284:             lr.fit(X.iloc[idx_train], y[idx_train])
+  285:             p_valid = lr.predict_proba(X.iloc[idx_valid])[:,1]
+  286:             auc0 = float(roc_auc_score(y[idx_valid], p_valid))
+  287:             lift10_0 = _lift_at_k(y[idx_valid], p_valid, 10)
+  288:             summary['baseline'].update({'auc_lr': auc0, 'lift10_lr': lift10_0})
+  289: 
+  290:             # Determine ranking
+  291:             ranked = imp.index.tolist() if imp is not None else list(X.columns)
+  292:             for K in k_list:
+  293:                 drop = set(ranked[:min(K, len(ranked))])
+  294:                 keep_cols = [c for c in X.columns if c not in drop]
+  295:                 if not keep_cols:
+  296:                     res = {'k': K, 'auc_lr': None, 'lift10_lr': None}
+  297:                 else:
+  298:                     lr2 = LogisticRegression(max_iter=2000, solver='lbfgs', class_weight='balanced')
+  299:                     lr2.fit(X.iloc[idx_train][keep_cols], y[idx_train])
+  300:                     p2 = lr2.predict_proba(X.iloc[idx_valid][keep_cols])[:,1]
+  301:                     auc2 = float(roc_auc_score(y[idx_valid], p2))
+  302:                     lift10_2 = _lift_at_k(y[idx_valid], p2, 10)
+  303:                     res = {'k': K, 'auc_lr': auc2, 'lift10_lr': lift10_2}
+  304:                 summary['ablations'].append(res)
+  305: 
+  306:             # Determine status: improvements beyond epsilon are suspicious
+  307:             try:
+  308:                 status = 'PASS'
+  309:                 for res in summary['ablations']:
+  310:                     if res.get('auc_lr') is not None and auc0 is not None and (res['auc_lr'] - auc0) > epsilon_auc:
+  311:                         status = 'FAIL'
+  312:                         break
+  313:                     if res.get('lift10_lr') is not None and lift10_0 is not None and (res['lift10_lr'] - lift10_0) > epsilon_lift10:
+  314:                         status = 'FAIL'
+  315:                         break
+  316:                 summary['status'] = status
+  317:             except Exception:
+  318:                 summary['status'] = 'UNKNOWN'
+  319: 
+  320:     # Write summary
+  321:     sum_path = ctx.out_dir / f"ablation_topk_{ctx.division}_{ctx.cutoff}.json"
+  322:     sum_path.write_text(json.dumps(summary, indent=2), encoding='utf-8')
+  323:     return {'ablation_topk': str(sum_path), 'ablation_topk_csv': str(rank_path)}
+  324: 
+  325: 
+  326: def run_shift14_check(ctx: LGContext, window_months: int, run_training: bool = False, epsilon_auc: float = 0.01, epsilon_lift10: float = 0.25) -> dict[str, str]:
+  327:     """Backwards-compatible Shift-14 test wrapper using run_shift_check(days=14)."""
+  328:     return run_shift_check(ctx, window_months, days=14, run_training=run_training, epsilon_auc=epsilon_auc, epsilon_lift10=epsilon_lift10)
+  329: 
+  330: 
+  331: def run_shift_check(ctx: LGContext, window_months: int, days: int, run_training: bool = False, epsilon_auc: float = 0.01, epsilon_lift10: float = 0.25) -> dict[str, str]:
+  332:     """Generalized shift test: compute features at cutoff and cutoff-days and (optionally) train.
+  333: 
+  334:     Writes `shift{days}_metrics_<div>_<cutoff>.json` with PASS/FAIL when training is run; otherwise PLANNED.
+  335:     """
+  336:     import pandas as pd
+  337:     artifacts: dict[str, str] = {}
+  338:     try:
+  339:         engine = get_curated_connection()
+  340:     except Exception:
+  341:         engine = get_db_connection()
+  342: 
+  343:     # Compute shifted cutoff
+  344:     base_cut = pd.to_datetime(ctx.cutoff)
+  345:     cut_shift = (base_cut - timedelta(days=int(days))).date().isoformat()
+  346: 
+  347:     # Build feature matrices to capture prevalence/context
+  348:     try:
+  349:         cfg2 = load_config()
+  350:         mask_tail = int(getattr(getattr(cfg2, 'validation', object()), 'gauntlet_mask_tail_days', 0) or 0)
+  351:         fm_base = create_feature_matrix(engine, ctx.division, ctx.cutoff, window_months, mask_tail_days=mask_tail)
+  352:         fm_shift = create_feature_matrix(engine, ctx.division, cut_shift, window_months, mask_tail_days=mask_tail)
+  353:         base_prev = float(fm_base.to_pandas()['bought_in_division'].mean()) if not fm_base.is_empty() else None
+  354:         shift_prev = float(fm_shift.to_pandas()['bought_in_division'].mean()) if not fm_shift.is_empty() else None
+  355:     except Exception:
+  356:         base_prev = None
+  357:         shift_prev = None
+  358: 
+  359:     status = "PLANNED"
+  360:     comp = {}
+  361: 
+  362:     if run_training:
+  363:         # Preflight: ensure sufficient data/positives to avoid degenerate folds
+  364:         try:
+  365:             ok_base = (fm_base is not None) and (not fm_base.is_empty()) and (int(fm_base.select('bought_in_division').to_pandas().sum().iloc[0]) >= 10)
+  366:         except Exception:
+  367:             ok_base = False
+  368:         try:
+  369:             ok_shift = (fm_shift is not None) and (not fm_shift.is_empty()) and (int(fm_shift.select('bought_in_division').to_pandas().sum().iloc[0]) >= 10)
+  370:         except Exception:
+  371:             ok_shift = False
+  372:         if not (ok_base and ok_shift):
+  373:             status = "SKIPPED"
+  374:             comp = {"reason": "insufficient positives for stable GroupCV folds at base/shift cutoffs"}
+  375:         else:
+  376:             # Best-effort: train base and shifted cutoff with identical SAFE+GroupCV+purge and compare
+  377:             try:
+  378:                 from gosales.utils.paths import OUTPUTS_DIR as _OUT
+  379:                 import shutil
+  380:                 division = ctx.division
+  381:                 div_key = division.lower()
+  382:                 met_path = _OUT / f"metrics_{div_key}.json"
+  383:                 backup_path = None
+  384:                 if met_path.exists():
+  385:                     backup_path = _OUT / f"metrics_{div_key}.json.bak"
+  386:                     shutil.copy2(met_path, backup_path)
+  387:                 # Enforce GroupKFold and purge days; use SAFE mode for Gauntlet training
+  388:                 from gosales.utils.config import load_config as _load
+  389:                 _cfg = _load()
+  390:                 purge = int(getattr(getattr(_cfg, 'validation', object()), 'gauntlet_purge_days', 30) or 30)
+  391:                 label_buf = int(getattr(getattr(_cfg, 'validation', object()), 'gauntlet_label_buffer_days', 0) or 0)
+  392:                 def _train_at(cut: str) -> dict:
+  393:                     cmd = [
+  394:                         sys.executable, "-m", "gosales.models.train",
+  395:                         "--division", division,
+  396:                         "--cutoffs", cut,
+  397:                         "--window-months", str(window_months),
+  398:                         "--group-cv",
+  399:                         "--purge-days", str(int(purge)),
+  400:                         "--safe-mode",
+  401:                         "--label-buffer-days", str(int(label_buf)),
+  402:                     ]
+  403:                     subprocess.run(cmd, check=True)
+  404:                     return json.loads(met_path.read_text(encoding="utf-8")) if met_path.exists() else {}
+  405:                 # Train base and shifted with same SAFE/GroupCV/purge to ensure apples-to-apples
+  406:                 base_metrics = _train_at(ctx.cutoff)
+  407:                 shift_metrics = _train_at(cut_shift)
+  408:                 # Restore original metrics if we backed up; otherwise clean up temp metrics file
+  409:                 if backup_path and backup_path.exists():
+  410:                     shutil.move(str(backup_path), str(met_path))
+  411:                 else:
+  412:                     try:
+  413:                         if met_path.exists():
+  414:                             met_path.unlink()
+  415:                     except Exception:
+  416:                         pass
+  417:                 # Extract comparable metrics
+  418:                 def _final(m):
+  419:                     return m.get("final", {}) if isinstance(m, dict) else {}
+  420:                 bm = _final(base_metrics)
+  421:                 sm = _final(shift_metrics)
+  422:                 # Harmonize lift@10 field name across variants
+  423:                 def _lift10(d: dict) -> float | None:
+  424:                     if d is None:
+  425:                         return None
+  426:                     v = d.get("lift@10") if isinstance(d, dict) else None
+  427:                     if v is None and isinstance(d, dict):
+  428:                         v = d.get("lift10")
+  429:                     return v
+  430:                 comp = {
+  431:                     "auc_base": bm.get("auc"),
+  432:                     "auc_shift": sm.get("auc"),
+  433:                     "lift10_base": _lift10(bm),
+  434:                     "lift10_shift": _lift10(sm),
+  435:                     "brier_base": bm.get("brier"),
+  436:                     "brier_shift": sm.get("brier"),
+  437:                 }
+  438:                 # Determine status: improvement beyond epsilon is suspicious
+  439:                 try:
+  440:                     auc_imp = (float(sm.get("auc", 0.0)) - float(bm.get("auc", 0.0))) if bm.get("auc") is not None and sm.get("auc") is not None else 0.0
+  441:                     # Compare lift@10 if available (supports both keys)
+  442:                     lb = _lift10(bm); ls = _lift10(sm)
+  443:                     lift_imp = (float(ls) - float(lb)) if lb is not None and ls is not None else 0.0
+  444:                     status = "FAIL" if (auc_imp > float(epsilon_auc) or lift_imp > float(epsilon_lift10)) else "PASS"
+  445:                 except Exception as e:
+  446:                     status = "ERROR"
+  447:                     comp = {"error": str(e)}
+  448: 
+  449:         # Auxiliary LR comparison using masked features (gauntlet mask)
+  450:         try:
+  451:             import numpy as _np
+  452:             from sklearn.linear_model import LogisticRegression
+  453:             from sklearn.metrics import roc_auc_score
+  454:             # Build masked matrices
+  455:             mask_tail = int(getattr(getattr(load_config(), 'validation', object()), 'gauntlet_mask_tail_days', 0) or 0)
+  456:             eng2 = None
+  457:             try:
+  458:                 eng2 = get_curated_connection()
+  459:             except Exception:
+  460:                 eng2 = get_db_connection()
+  461:             fb = create_feature_matrix(eng2, ctx.division, ctx.cutoff, window_months, mask_tail_days=mask_tail)
+  462:             fs = create_feature_matrix(eng2, ctx.division, cut_shift, window_months, mask_tail_days=mask_tail)
+  463:             if not fb.is_empty() and not fs.is_empty():
+  464:                 db = fb.to_pandas(); ds = fs.to_pandas()
+  465:                 def _eval(df):
+  466:                     y = df['bought_in_division'].astype(int).values
+  467:                     X = df.drop(columns=['customer_id','bought_in_division'])
+  468:                     # time-aware split
+  469:                     rec = 'rfm__all__recency_days__life'
+  470:                     try:
+  471:                         if rec in X.columns:
+  472:                             order = _np.argsort(_np.nan_to_num(X[rec].astype(float).values, nan=1e9))
+  473:                             n = len(order); nv = max(1, int(0.2*n))
+  474:                             iv = order[:nv]; it = order[nv:]
+  475:                         else:
+  476:                             idx = _np.arange(len(X)); _np.random.seed(42); _np.random.shuffle(idx)
+  477:                             sp = int(0.8*len(idx)); it, iv = idx[:sp], idx[sp:]
+  478:                     except Exception:
+  479:                         idx = _np.arange(len(X)); sp = int(0.8*len(idx)); it, iv = idx[:sp], idx[sp:]
+  480:                     lr = LogisticRegression(max_iter=2000, solver='lbfgs', class_weight='balanced')
+  481:                     lr.fit(X.iloc[it], y[it])
+  482:                     p = lr.predict_proba(X.iloc[iv])[:,1]
+  483:                     def _lift_at_k(y_true, y_score, k=10):
+  484:                         order = _np.argsort(-y_score); kk = max(1, int(len(order)*(k/100.0)))
+  485:                         topk = order[:kk]; m = y_true.mean()
+  486:                         return float(y_true[topk].mean()/m) if m>0 else 0.0
+  487:                     return float(roc_auc_score(y[iv], p)), _lift_at_k(y[iv], p, 10)
+  488:                 auc_b, l10_b = _eval(db)
+  489:                 auc_s, l10_s = _eval(ds)
+  490:                 # Also evaluate after dropping high-risk feature families
+  491:                 def _drop_high_risk(df_pd):
+  492:                     Xcols = [c for c in df_pd.columns if c not in ('customer_id','bought_in_division')]
+  493:                     keep = []
+  494:                     for c in Xcols:
+  495:                         s = str(c).lower()
+  496:                         if s.startswith('assets_expiring_'):
+  497:                             continue
+  498:                         if 'days_since_last' in s or 'recency' in s:
+  499:                             continue
+  500:                         if s.startswith('assets_subs_share_') or s.startswith('assets_on_subs_share_') or s.startswith('assets_off_subs_share_'):
+  501:                             continue
+  502:                         keep.append(c)
+  503:                     cols = ['customer_id','bought_in_division'] + keep
+  504:                     return df_pd[cols]
+  505:                 db2 = _drop_high_risk(db)
+  506:                 ds2 = _drop_high_risk(ds)
+  507:                 auc_b2, l10_b2 = _eval(db2)
+  508:                 auc_s2, l10_s2 = _eval(ds2)
+  509:                 comp.update({
+  510:                     'auc_lr_masked_base': auc_b,
+  511:                     'auc_lr_masked_shift': auc_s,
+  512:                     'lift10_lr_masked_base': l10_b,
+  513:                     'lift10_lr_masked_shift': l10_s,
+  514:                     'auc_lr_masked_dropped_base': auc_b2,
+  515:                     'auc_lr_masked_dropped_shift': auc_s2,
+  516:                     'lift10_lr_masked_dropped_base': l10_b2,
+  517:                     'lift10_lr_masked_dropped_shift': l10_s2,
+  518:                 })
+  519:                 # Annotate masked LR diagnostics but do not gate overall status
+  520:                 try:
+  521:                     imp_auc = max(auc_s - auc_b, auc_s2 - auc_b2)
+  522:                     imp_l10 = max(l10_s - l10_b, l10_s2 - l10_b2)
+  523:                     comp.update({
+  524:                         'aux_masked_lr_auc_imp': float(imp_auc),
+  525:                         'aux_masked_lr_lift10_imp': float(imp_l10),
+  526:                         'aux_masked_lr_status': 'SUSPECT' if (imp_auc > float(epsilon_auc) or imp_l10 > float(epsilon_lift10)) else 'OK',
+  527:                     })
+  528:                 except Exception:
+  529:                     pass
+  530:             except Exception:
+  531:                 pass
+  532: 
+  533:     out = {
+  534:         "status": status,
+  535:         "cutoff": ctx.cutoff,
+  536:         "shift_days": int(days),
+  537:         "shift_cutoff": cut_shift,
+  538:         "window_months": int(window_months),
+  539:         "prevalence_base": base_prev,
+  540:         "prevalence_shift": shift_prev,
+  541:         "comparison": comp,
+  542:         "notes": "Set shift training flag to execute training and metric comparison." if not run_training else None,
+  543:     }
+  544:     out_path = ctx.out_dir / f"shift{int(days)}_metrics_{ctx.division}_{ctx.cutoff}.json"
+  545:     out_path.write_text(json.dumps(out, indent=2), encoding="utf-8")
+  546:     return {f"shift{int(days)}": str(out_path)}
+  547: 
+  548: 
+  549: def run_shift_grid_check(ctx: LGContext, window_months: int, shifts: list[int], run_training: bool, epsilon_auc: float, epsilon_lift10: float) -> dict[str, str]:
+  550:     """Run multiple shift checks and summarize results."""
+  551:     artifacts: dict[str, str] = {}
+  552:     summary = {"overall": "PASS", "shifts": []}
+  553:     for d in shifts:
+  554:         art = run_shift_check(ctx, window_months, days=int(d), run_training=run_training, epsilon_auc=epsilon_auc, epsilon_lift10=epsilon_lift10)
+  555:         artifacts.update(art)
+  556:         # Read status back
+  557:         try:
+  558:             key = f"shift{int(d)}"
+  559:             path = art.get(key)
+  560:             if path:
+  561:                 data = json.loads(Path(path).read_text(encoding="utf-8"))
+  562:                 summary["shifts"].append({"days": int(d), "status": data.get("status"), "comparison": data.get("comparison")})
+  563:                 if data.get("status") == "FAIL":
+  564:                     summary["overall"] = "FAIL"
+  565:         except Exception:
+  566:             summary["shifts"].append({"days": int(d), "status": "UNKNOWN"})
+  567:     sum_path = ctx.out_dir / f"shift_grid_{ctx.division}_{ctx.cutoff}.json"
+  568:     sum_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+  569:     artifacts["shift_grid"] = str(sum_path)
+  570:     return artifacts
+  571: 
+  572: 
+  573: def run_reproducibility_check(ctx: LGContext, window_months: int, eps_auc: float, eps_lift10: float) -> dict[str, str]:
+  574:     """Train the base cutoff twice with Gauntlet knobs and compare deltas; also check customer overlap CSV."""
+  575:     from gosales.utils.paths import OUTPUTS_DIR as _OUT
+  576:     import shutil
+  577:     division = ctx.division
+  578:     div_key = division.lower()
+  579:     met_path = _OUT / f"metrics_{div_key}.json"
+  580:     backup_path = None
+  581:     if met_path.exists():
+  582:         backup_path = _OUT / f"metrics_{div_key}.json.bak"
+  583:         shutil.copy2(met_path, backup_path)
+  584: 
+  585:     # Prepare Gauntlet knobs
+  586:     from gosales.utils.config import load_config as _load
+  587:     _cfg = _load()
+  588:     purge = int(getattr(getattr(_cfg, 'validation', object()), 'gauntlet_purge_days', 30) or 30)
+  589:     label_buf = int(getattr(getattr(_cfg, 'validation', object()), 'gauntlet_label_buffer_days', 0) or 0)
+  590: 
+  591:     def _train_once() -> dict:
+  592:         cmd = [
+  593:             sys.executable, "-m", "gosales.models.train",
+  594:             "--division", division,
+  595:             "--cutoffs", ctx.cutoff,
+  596:             "--window-months", str(window_months),
+  597:             "--group-cv",
+  598:             "--purge-days", str(int(purge)),
+  599:             "--safe-mode",
+  600:             "--label-buffer-days", str(int(label_buf)),
+  601:         ]
+  602:         subprocess.run(cmd, check=True)
+  603:         return json.loads(met_path.read_text(encoding="utf-8")) if met_path.exists() else {}
+  604: 
+  605:     try:
+  606:         m1 = _train_once()
+  607:         m2 = _train_once()
+  608:     finally:
+  609:         if backup_path and backup_path.exists():
+  610:             shutil.move(str(backup_path), str(met_path))
+  611: 
+  612:     def _final(m):
+  613:         return m.get("final", {}) if isinstance(m, dict) else {}
+  614: 
+  615:     f1 = _final(m1); f2 = _final(m2)
+  616: 
+  617:     def _lift10(d: dict) -> float | None:
+  618:         if d is None:
+  619:             return None
+  620:         v = d.get("lift@10") if isinstance(d, dict) else None
+  621:         if v is None and isinstance(d, dict):
+  622:             v = d.get("lift10")
+  623:         return v
+  624: 
+  625:     auc1 = f1.get("auc"); auc2 = f2.get("auc")
+  626:     l10_1 = _lift10(f1); l10_2 = _lift10(f2)
+  627:     b1 = f1.get("brier"); b2 = f2.get("brier")
+  628: 
+  629:     try:
+  630:         d_auc = abs(float(auc2 or 0.0) - float(auc1 or 0.0)) if (auc1 is not None and auc2 is not None) else None
+  631:         d_l10 = abs(float(l10_2 or 0.0) - float(l10_1 or 0.0)) if (l10_1 is not None and l10_2 is not None) else None
+  632:     except Exception:
+  633:         d_auc = None; d_l10 = None
+  634: 
+  635:     # Overlap CSV check
+  636:     overlap_path = _OUT / f"fold_customer_overlap_{div_key}_{ctx.cutoff}.csv"
+  637:     overlap_count = None
+  638:     try:
+  639:         if overlap_path.exists():
+  640:             import pandas as _pd
+  641:             df_overlap = _pd.read_csv(overlap_path)
+  642:             overlap_count = int(len(df_overlap))
+  643:     except Exception:
+  644:         pass
+  645: 
+  646:     status = "PASS"
+  647:     if overlap_count is not None and overlap_count > 0:
+  648:         status = "FAIL"
+  649:     if (d_auc is not None and d_auc > float(eps_auc)) or (d_l10 is not None and d_l10 > float(eps_lift10)):
+  650:         status = "FAIL"
+  651: 
+  652:     out = {
+  653:         "status": status,
+  654:         "cutoff": ctx.cutoff,
+  655:         "window_months": int(window_months),
+  656:         "overlap_csv": str(overlap_path),
+  657:         "overlap_count": int(overlap_count) if overlap_count is not None else None,
+  658:         "metrics_run1": {"auc": auc1, "lift10": l10_1, "brier": b1},
+  659:         "metrics_run2": {"auc": auc2, "lift10": l10_2, "brier": b2},
+  660:         "delta_auc": d_auc,
+  661:         "delta_lift10": d_l10,
+  662:         "eps_auc": float(eps_auc),
+  663:         "eps_lift10": float(eps_lift10),
+  664:     }
+  665:     out_path = ctx.out_dir / f"repro_check_{ctx.division}_{ctx.cutoff}.json"
+  666:     out_path.write_text(json.dumps(out, indent=2), encoding="utf-8")
+  667:     return {"repro_check": str(out_path)}
+  668: 
+  669: 
+  670: def write_consolidated_report(ctx: LGContext, artifacts: dict[str, str]) -> Path:
+  671:     # Determine overall status based on included artifacts
+  672:     status_map = {}
+  673:     for name, path in artifacts.items():
+  674:         try:
+  675:             data = json.loads(Path(path).read_text(encoding="utf-8"))
+  676:             status_map[name] = data.get("status", "UNKNOWN")
+  677:         except Exception:
+  678:             status_map[name] = "UNKNOWN"
+  679:     overall = "PASS"
+  680:     if any(v == "FAIL" for v in status_map.values()):
+  681:         overall = "FAIL"
+  682:     report = {
+  683:         "division": ctx.division,
+  684:         "cutoff": ctx.cutoff,
+  685:         "overall": overall,
+  686:         "checks": status_map,
+  687:     }
+  688:     out = ctx.out_dir / f"leakage_report_{ctx.division}_{ctx.cutoff}.json"
+  689:     out.write_text(json.dumps(report, indent=2), encoding="utf-8")
+  690:     return out
+  691: 
+  692: 
+  693: @click.command()
+  694: @click.option("--division", required=True, help="Target division name (e.g., Solidworks)")
+  695: @click.option("--cutoff", required=True, help="Cutoff date YYYY-MM-DD")
+  696: @click.option("--window-months", default=6, type=int)
+  697: @click.option("--static-only/--no-static-only", default=True, help="Run only static checks (no training)")
+  698: @click.option("--run-shift14-training/--no-run-shift14-training", default=False, help="Run training for shift-14 cutoff and compare metrics (overwrites metrics during run; restored after)")
+  699: @click.option("--run-shift-grid/--no-run-shift-grid", default=False, help="Run shift grid checks (e.g., 7,14,28,56) with training and comparison")
+  700: @click.option("--shift14-eps-auc", type=float, default=None, help="Override epsilon AUC threshold for shift-14 (default from config)")
+  701: @click.option("--shift14-eps-lift10", type=float, default=None, help="Override epsilon lift@10 threshold for shift-14 (default from config)")
+  702: @click.option("--shift-grid", default="7,14,28,56", help="Comma-separated day offsets to evaluate for shift grid (e.g., 7,14,28,56)")
+  703: @click.option("--run-repro-check/--no-run-repro-check", default=False, help="Run reproducibility check (double-train base with Gauntlet knobs and compare deltas)")
+  704: @click.option("--repro-eps-auc", type=float, default=0.002, help="Max allowed delta AUC across repeated runs")
+  705: @click.option("--repro-eps-lift10", type=float, default=0.05, help="Max allowed delta Lift@10 across repeated runs")
+  706: @click.option("--run-topk-ablation/--no-run-topk-ablation", default=False, help="Run Top-K ablation training and compare metrics (heavy)")
+  707: @click.option("--topk-list", default="10,20", help="Comma-separated K list for ablation (e.g., 10,20,50)")
+  708: @click.option("--ablation-eps-auc", type=float, default=None, help="Override epsilon AUC threshold for ablation (default from config)")
+  709: @click.option("--ablation-eps-lift10", type=float, default=None, help="Override epsilon lift@10 threshold for ablation (default from config)")
+  710: @click.option("--config", default=str((Path(__file__).parents[1] / "config.yaml").resolve()))
+  711: def main(division: str, cutoff: str, window_months: int, static_only: bool, run_shift14_training: bool, run_shift_grid: bool, shift14_eps_auc: float | None, shift14_eps_lift10: float | None, shift_grid: str, run_repro_check: bool, repro_eps_auc: float, repro_eps_lift10: float, run_topk_ablation: bool, topk_list: str, ablation_eps_auc: float | None, ablation_eps_lift10: float | None, config: str) -> None:
+  712:     cfg = load_config(config)
+  713:     ctx = _ensure_outdir(division, cutoff)
+  714:     artifacts = {}
+  715:     try:
+  716:         logger.info("Running Leakage Gauntlet static checks for %s @ %s", division, cutoff)
+  717:         artifacts.update(run_static_checks(ctx))
+  718:     except Exception as e:
+  719:         logger.error("Static checks failed: %s", e)
+  720:     try:
+  721:         logger.info("Running feature date audit for %s @ %s", division, cutoff)
+  722:         artifacts.update(run_feature_date_audit(ctx, window_months))
+  723:     except Exception as e:
+  724:         logger.error("Feature date audit failed: %s", e)
+  725:     try:
+  726:         logger.info("Running 14-day shift test (scaffold) for %s @ %s", division, cutoff)
+  727:         eps_auc = float(shift14_eps_auc) if shift14_eps_auc is not None else float(getattr(getattr(cfg, 'validation', object()), 'shift14_epsilon_auc', 0.01))
+  728:         eps_lift = float(shift14_eps_lift10) if shift14_eps_lift10 is not None else float(getattr(getattr(cfg, 'validation', object()), 'shift14_epsilon_lift10', 0.25))
+  729:         artifacts.update(run_shift14_check(ctx, window_months, run_training=run_shift14_training, epsilon_auc=eps_auc, epsilon_lift10=eps_lift))
+  730:     except Exception as e:
+  731:         logger.error("Shift-14 check failed: %s", e)
+  732: 
+  733:     # Shift grid (optional)
+  734:     try:
+  735:         if run_shift_grid:
+  736:             logger.info("Running shift grid checks for %s @ %s", division, cutoff)
+  737:             shifts = [int(x.strip()) for x in str(shift_grid).split(',') if str(x).strip()]
+  738:             eps_auc2 = float(shift14_eps_auc) if shift14_eps_auc is not None else float(getattr(getattr(cfg, 'validation', object()), 'shift14_epsilon_auc', 0.01))
+  739:             eps_lift2 = float(shift14_eps_lift10) if shift14_eps_lift10 is not None else float(getattr(getattr(cfg, 'validation', object()), 'shift14_epsilon_lift10', 0.25))
+  740:             artifacts.update(run_shift_grid_check(ctx, window_months, shifts=shifts, run_training=True, epsilon_auc=eps_auc2, epsilon_lift10=eps_lift2))
+  741:     except Exception as e:
+  742:         logger.error("Shift grid checks failed: %s", e)
+  743: 
+  744:     # Top-K ablation scaffold
+  745:     try:
+  746:         logger.info("Running Top-K ablation (scaffold) for %s @ %s", division, cutoff)
+  747:         k_list = [int(x.strip()) for x in str(topk_list).split(',') if str(x).strip()]
+  748:         eps_auc2 = float(ablation_eps_auc) if ablation_eps_auc is not None else float(getattr(getattr(cfg, 'validation', object()), 'ablation_epsilon_auc', 0.01))
+  749:         eps_lift2 = float(ablation_eps_lift10) if ablation_eps_lift10 is not None else float(getattr(getattr(cfg, 'validation', object()), 'ablation_epsilon_lift10', 0.25))
+  750:         artifacts.update(run_topk_ablation_check(ctx, window_months, k_list=k_list, run_training=run_topk_ablation, epsilon_auc=eps_auc2, epsilon_lift10=eps_lift2))
+  751:     except Exception as e:
+  752:         logger.error("Top-K ablation failed: %s", e)
+  753: 
+  754:     # Reproducibility check (optional)
+  755:     try:
+  756:         if run_repro_check:
+  757:             logger.info("Running reproducibility check for %s @ %s", division, cutoff)
+  758:             artifacts.update(run_reproducibility_check(ctx, window_months, eps_auc=repro_eps_auc, eps_lift10=repro_eps_lift10))
+  759:     except Exception as e:
+  760:         logger.error("Reproducibility check failed: %s", e)
+  761: 
+  762:     # Attach diagnostics (if present) as a summary artifact
+  763:     try:
+  764:         diag = {}
+  765:         perm = ctx.out_dir / 'permutation_diag.json'
+  766:         imp = ctx.out_dir / 'importance_stability.json'
+  767:         summary = {"status": "INFO", "cutoff": ctx.cutoff, "artifacts": {}}
+  768:         if perm.exists():
+  769:             try:
+  770:                 p = json.loads(perm.read_text(encoding='utf-8'))
+  771:                 pv = p.get('p_value')
+  772:                 summary['artifacts']['permutation_diag'] = str(perm)
+  773:                 summary['permutation'] = {
+  774:                     'baseline_auc': p.get('baseline_auc'),
+  775:                     'permuted_auc_mean': p.get('permuted_auc_mean'),
+  776:                     'auc_degradation': p.get('auc_degradation'),
+  777:                     'p_value': pv,
+  778:                 }
+  779:             except Exception:
+  780:                 pass
+  781:         if imp.exists():
+  782:             try:
+  783:                 s = json.loads(imp.read_text(encoding='utf-8'))
+  784:                 summary['artifacts']['importance_stability'] = str(imp)
+  785:                 summary['importance'] = {
+  786:                     'mean_spearman': s.get('mean_spearman'),
+  787:                     'mean_jaccard_topk': s.get('mean_jaccard_topk'),
+  788:                 }
+  789:             except Exception:
+  790:                 pass
+  791:         # Only write if anything present
+  792:         if summary.get('artifacts'):
+  793:             diag_path = ctx.out_dir / f'diagnostics_summary_{ctx.division}_{ctx.cutoff}.json'
+  794:             diag_path.write_text(json.dumps(summary, indent=2), encoding='utf-8')
+  795:             artifacts['diagnostics_summary'] = str(diag_path)
+  796:     except Exception as e:
+  797:         logger.warning("Diagnostics summary attach failed: %s", e)
+  798:     # Future: dynamic checks here when enabled
+  799:     report = write_consolidated_report(ctx, artifacts)
+  800:     logger.info("Wrote leakage report to %s", report)
+  801:     try:
+  802:         # Exit non-zero on failure to allow CI gating
+  803:         data = json.loads(report.read_text(encoding="utf-8"))
+  804:         if data.get("overall") == "FAIL":
+  805:             sys.exit(1)
+  806:     except SystemExit:
+  807:         raise
+  808:     except Exception:
+  809:         pass
+  810: 
+  811: 
+  812: if __name__ == "__main__":
+  813:     main()

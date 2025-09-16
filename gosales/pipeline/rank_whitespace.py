@@ -10,6 +10,9 @@ import pandas as pd
 
 from gosales.utils.logger import get_logger
 from gosales.utils.paths import OUTPUTS_DIR
+from gosales.utils.grades import (
+    assign_letter_grades_from_percentiles,
+)
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.preprocessing import normalize
 
@@ -33,7 +36,21 @@ def _percentile_normalize(s: pd.Series) -> pd.Series:
 
 
 def _compute_affinity_lift(df: pd.DataFrame, col: str = "mb_lift_max") -> pd.Series:
-    vals = pd.to_numeric(df.get(col, pd.Series(dtype=float)), errors="coerce").fillna(0.0)
+    """Compute normalized affinity lift (market-basket) from best available column.
+
+    Prefers ``mb_lift_max``; if absent, falls back to any column starting with
+    ``mb_lift_max`` (e.g., ``mb_lift_max_lag60d``). Returns percentile-normalized values.
+    """
+    src = None
+    if col in df.columns:
+        src = col
+    else:
+        cands = [c for c in df.columns if str(c).startswith(col)]
+        if cands:
+            src = cands[0]
+    if src is None:
+        return pd.Series(np.zeros(len(df)), index=df.index, dtype=float)
+    vals = pd.to_numeric(df[src], errors="coerce").fillna(0.0)
     return _percentile_normalize(vals)
 
 
@@ -363,6 +380,12 @@ class RankInputs:
 
 def rank_whitespace(inputs: RankInputs, *, weights: Iterable[float] = (0.60, 0.20, 0.10, 0.10)) -> pd.DataFrame:
     df = inputs.scores.copy()
+    # Standardize key dtypes
+    try:
+        if 'customer_id' in df.columns:
+            df['customer_id'] = df['customer_id'].astype(str)
+    except Exception:
+        pass
     if df.empty:
         return df
     # Apply simple ownership eligibility and capture ALS centroid
@@ -523,8 +546,31 @@ def rank_whitespace(inputs: RankInputs, *, weights: Iterable[float] = (0.60, 0.2
 
     # Explanations
     df['nba_reason'] = df.apply(_explain, axis=1)
+    # Executive-friendly percentiles and letter grades
+    try:
+        # p_icp percentile is already in p_icp_pct; derive letter grade
+        df['p_icp_grade'] = assign_letter_grades_from_percentiles(pd.to_numeric(df.get('p_icp_pct', 0.0), errors='coerce').fillna(0.0))
+    except Exception:
+        df['p_icp_grade'] = 'F'
+    try:
+        # Champion score percentile and grade per division
+        if 'score' in df.columns and 'division_name' in df.columns:
+            pct = df.groupby('division_name')['score'].rank(method='average', pct=True).astype(float)
+            df['score_pct'] = pct
+            df['score_grade'] = assign_letter_grades_from_percentiles(pct)
+        else:
+            df['score_pct'] = 0.0
+            df['score_grade'] = 'F'
+    except Exception:
+        df['score_pct'] = 0.0
+        df['score_grade'] = 'F'
     # Output columns
-    out_cols = ['customer_id', 'customer_name', 'division_name', 'score', 'score_challenger', 'p_icp', 'p_icp_pct', 'lift_norm', 'als_norm', 'EV_norm', 'nba_reason']
+    out_cols = [
+        'customer_id', 'customer_name', 'division_name',
+        'score', 'score_pct', 'score_grade', 'score_challenger',
+        'p_icp', 'p_icp_pct', 'p_icp_grade', 'lift_norm', 'als_norm', 'EV_norm',
+        'nba_reason'
+    ]
     present = [c for c in out_cols if c in df.columns]
     return df[present].reset_index(drop=True)
 

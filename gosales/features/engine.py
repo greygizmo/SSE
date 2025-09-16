@@ -1093,6 +1093,14 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
 
             # Convert to polars and join
             industry_features = pl.from_pandas(customers_with_industry_pd)
+            # Ensure string columns are Utf8 to avoid PyString/Arrow warnings downstream
+            try:
+                industry_features = industry_features.with_columns([
+                    pl.col("industry").cast(pl.Utf8, strict=False),
+                    pl.col("industry_sub").cast(pl.Utf8, strict=False),
+                ])
+            except Exception:
+                pass
             feature_columns = ["customer_id","industry","industry_sub"] + \
                 [f"is_{industry_key_map[i]}" for i in top_industries] + \
                 [f"is_sub_{sub_key_map[s]}" for s in top_subs]
@@ -1102,6 +1110,14 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
                 on="customer_id",
                 how="left"
             ).fill_null(0)
+            try:
+                # Re-assert Utf8 after join in case engine conversion introduced Arrow-backed strings
+                feature_matrix = feature_matrix.with_columns([
+                    pl.col("industry").cast(pl.Utf8, strict=False),
+                    pl.col("industry_sub").cast(pl.Utf8, strict=False),
+                ])
+            except Exception:
+                pass
             
             logger.info(f"Successfully joined industry data. Added {len(top_industries)} industry and {len(top_subs)} sub-industry dummies.")
 
@@ -1160,10 +1176,48 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
                     sub['enc__industry_sub__gp_share_24m_smooth'] = (sub['gp_sum_target'] + alpha_sub * sub['p_gp_parent'] * sub['gp_sum']) / (sub['gp_sum'] + alpha_sub)
                     sub_enc = sub[['industry_sub','enc__industry_sub__tx_rate_24m_smooth','enc__industry_sub__gp_share_24m_smooth']]
                     # Join encoders onto feature matrix by industry keys
-                    feature_matrix = feature_matrix.join(pl.from_pandas(ind_enc), on='industry', how='left')
-                    feature_matrix = feature_matrix.join(pl.from_pandas(sub_enc), on='industry_sub', how='left')
+                    # Ensure string dtypes on both sides and numeric encoder columns to avoid conversion errors
+                    if 'industry' in feature_matrix.columns:
+                        feature_matrix = feature_matrix.with_columns(
+                            pl.col('industry').cast(pl.Utf8, strict=False).fill_null("")
+                        )
+                    if 'industry_sub' in feature_matrix.columns:
+                        feature_matrix = feature_matrix.with_columns(
+                            pl.col('industry_sub').cast(pl.Utf8, strict=False).fill_null("")
+                        )
+
+                    ind_enc_pl = pl.from_pandas(ind_enc)
+                    if 'industry' in ind_enc_pl.columns:
+                        ind_enc_pl = ind_enc_pl.with_columns(pl.col('industry').cast(pl.Utf8, strict=False))
+                        ind_enc_pl = ind_enc_pl.with_columns(pl.col('industry').fill_null(""))
+                        # Cast all non-key columns to Float64
+                        for _c in [c for c in ind_enc_pl.columns if c != 'industry']:
+                            ind_enc_pl = ind_enc_pl.with_columns(pl.col(_c).cast(pl.Float64, strict=False))
+
+                    sub_enc_pl = pl.from_pandas(sub_enc)
+                    if 'industry_sub' in sub_enc_pl.columns:
+                        sub_enc_pl = sub_enc_pl.with_columns(pl.col('industry_sub').cast(pl.Utf8, strict=False))
+                        sub_enc_pl = sub_enc_pl.with_columns(pl.col('industry_sub').fill_null(""))
+                        for _c in [c for c in sub_enc_pl.columns if c != 'industry_sub']:
+                            sub_enc_pl = sub_enc_pl.with_columns(pl.col(_c).cast(pl.Float64, strict=False))
+
+                    if 'industry' in feature_matrix.columns and 'industry' in ind_enc_pl.columns:
+                        feature_matrix = feature_matrix.join(ind_enc_pl, on='industry', how='left')
+                    if 'industry_sub' in feature_matrix.columns and 'industry_sub' in sub_enc_pl.columns:
+                        feature_matrix = feature_matrix.join(sub_enc_pl, on='industry_sub', how='left')
             except Exception as e:
-                logger.warning(f"Pooled encoder features failed (non-blocking): {e}")
+                try:
+                    _silence = bool(getattr(cfg.load_config().features, 'silence_pooled_encoder_warnings', False))
+                except Exception:
+                    _silence = False
+                msg = f"Pooled encoder features failed (non-blocking): {e}"
+                if _silence:
+                    try:
+                        logger.debug(msg)
+                    except Exception:
+                        pass
+                else:
+                    logger.warning(msg)
         else:
             logger.warning("No industry data available for joining.")
             

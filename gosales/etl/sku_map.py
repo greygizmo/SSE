@@ -360,6 +360,17 @@ def get_model_targets(model: str) -> Tuple[str, ...]:
         return tuple(x for x in ("SW_Inspection",) if x in m)
     if model == "Post_Processing":
         return tuple(x for x in ("Post_Processing",) if x in m)
+    if model == "CPE":
+        return tuple(
+            x
+            for x in (
+                "HV_Simulation",
+                "CATIA",
+                "Delmia_Apriso",
+                "DELMIA",
+            )
+            if x in m
+        )
     return tuple()
 
 
@@ -387,6 +398,7 @@ def get_supported_models() -> Tuple[str, ...]:
         "CAMWorks",
         "SW_Electrical",
         "SW_Inspection",
+        "CPE",
     )
     m = get_sku_mapping()
     # Keep only where at least one target resolves
