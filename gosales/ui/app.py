@@ -1,7 +1,6 @@
 import json
 import time
 from pathlib import Path
-from datetime import datetime
 
 import pandas as pd
 import streamlit as st
@@ -143,6 +142,14 @@ st.markdown("""
     .custom-success {
         background: linear-gradient(135deg, #d4edda, #c3e6cb);
         border: 1px solid #c3e6cb;
+        border-radius: 8px;
+        padding: 15px;
+        margin: 10px 0;
+    }
+
+    .custom-warning {
+        background: linear-gradient(135deg, #fff3cd, #ffeaa7);
+        border: 1px solid #ffeaa7;
         border-radius: 8px;
         padding: 15px;
         margin: 10px 0;
@@ -794,7 +801,6 @@ elif tab == "Metrics":
         if cal_path.exists():
             st.subheader("🎯 Model Calibration")
             st.caption("How well our predictions match reality - the closer the lines, the more reliable our predictions.")
-
             cal = _read_csv(cal_path)
             try:
                 import plotly.graph_objects as go
@@ -842,7 +848,6 @@ elif tab == "Metrics":
         if g_path.exists():
             st.subheader("🚀 Gains Chart")
             st.caption("Shows conversion rates by predicted score decile - how much better we are than random selection.")
-
             gains = _read_csv(g_path)
             try:
                 import plotly.graph_objects as go
@@ -915,6 +920,52 @@ elif tab == "Metrics":
             thr = _read_csv(th_path)
             st.dataframe(thr, use_container_width=True)
             st.download_button("Download thresholds CSV", data=thr.to_csv(index=False), file_name=th_path.name)
+
+        # ICP Scores (Per-Customer) with grades and percentiles
+        icp_path = OUTPUTS_DIR / 'icp_scores.csv'
+        if icp_path.exists():
+            st.subheader("ICP Scores (Per-Customer)")
+            icp_df = _read_csv(icp_path)
+            if not icp_df.empty:
+                ic1, ic2, ic3 = st.columns([2,2,2])
+                with ic1:
+                    q_icp = st.text_input("Search customer", "", help="Filter by customer_name contains text")
+                with ic2:
+                    div_opts_icp = sorted(icp_df['division_name'].dropna().unique().tolist()) if 'division_name' in icp_df.columns else []
+                    sel_divs_icp = st.multiselect("Division", div_opts_icp, default=div_opts_icp)
+                with ic3:
+                    grade_opts = ['A','B','C','D','F']
+                    sel_grades_icp = st.multiselect("Grade", grade_opts, default=grade_opts)
+                filt_icp = pd.Series(True, index=icp_df.index)
+                if q_icp and 'customer_name' in icp_df.columns:
+                    filt_icp &= icp_df['customer_name'].astype(str).str.contains(q_icp, case=False, na=False)
+                if sel_divs_icp:
+                    filt_icp &= icp_df['division_name'].isin(sel_divs_icp)
+                if 'icp_grade' in icp_df.columns and sel_grades_icp:
+                    filt_icp &= icp_df['icp_grade'].isin(sel_grades_icp)
+                icp_view = icp_df.loc[filt_icp]
+                sort_opts_icp = [c for c in ['icp_score','icp_percentile','icp_grade'] if c in icp_view.columns]
+                sort_by_icp = st.selectbox('Sort ICP by', sort_opts_icp or icp_view.columns.tolist(), index=0, key='icp_sort')
+                icp_view = icp_view.sort_values(sort_by_icp, ascending=False, na_position='last')
+                show_cols_icp = [c for c in ['customer_id','customer_name','division_name','icp_score','icp_percentile','icp_grade'] if c in icp_view.columns]
+                st.dataframe(icp_view[show_cols_icp].head(500), use_container_width=True)
+                st.download_button("Download ICP Scores", data=icp_view.to_csv(index=False), file_name='icp_scores.csv')
+
+                # Grade distribution (histogram) by division
+                try:
+                    if 'icp_grade' in icp_df.columns:
+                        st.markdown("**ICP Grade Distribution**")
+                        div_opts_hist = ['All'] + (sorted(icp_df['division_name'].dropna().unique().tolist()) if 'division_name' in icp_df.columns else [])
+                        sel_div_hist = st.selectbox('Division (for histogram)', div_opts_hist, index=0)
+                        hist_df = icp_df.copy()
+                        if sel_div_hist != 'All' and 'division_name' in hist_df.columns:
+                            hist_df = hist_df.loc[hist_df['division_name'] == sel_div_hist]
+                        order = ['A','B','C','D','F']
+                        counts = hist_df['icp_grade'].astype(str).value_counts().reindex(order).fillna(0).astype(int)
+                        counts.index.name = 'grade'
+                        st.bar_chart(counts)
+                except Exception as e:
+                    st.warning(f"ICP grade histogram error: {e}")
 
 elif tab == "Explainability":
     st.header("Explainability (Phase 3)")
@@ -996,7 +1047,7 @@ elif tab == "Whitespace":
                     div_opts = sorted(df['division_name'].dropna().unique().tolist()) if 'division_name' in df.columns else []
                     sel_divs = st.multiselect("Division", div_opts, default=div_opts, help="Restrict to specific divisions") if div_opts else []
                 with fcol3:
-                    cand = [c for c in ['score','p_icp','p_icp_pct','EV_norm','als_norm','lift_norm'] if c in df.columns]
+                    cand = [c for c in ['score','score_pct','p_icp','p_icp_pct','EV_norm','als_norm','lift_norm'] if c in df.columns]
                     score_col = cand[0] if cand else None
                     if score_col is not None:
                         vmin = float(pd.to_numeric(df[score_col], errors='coerce').min())
@@ -1017,7 +1068,7 @@ elif tab == "Whitespace":
                 # Sort + TopK controls
                 scol1, scol2 = st.columns([3, 1])
                 with scol1:
-                    sort_opts = [c for c in ['score','p_icp','p_icp_pct','EV_norm','als_norm','lift_norm'] if c in df.columns]
+                    sort_opts = [c for c in ['score','score_pct','p_icp','p_icp_pct','EV_norm','als_norm','lift_norm'] if c in df.columns]
                     sort_by = st.selectbox('Sort by', sort_opts or df.columns.tolist(), index=0)
                 with scol2:
                     top_k = st.number_input('Top K', min_value=10, max_value=10000, value=500, step=50)
@@ -1028,17 +1079,54 @@ elif tab == "Whitespace":
                     st.markdown('"- customer_id/customer_name: who the recommendation is for."')
                     st.markdown('"- division_name: the product/target (e.g., Printers, SWX_Seats)."')
                     st.markdown('"- score: blended next-best-action score combining model probability, affinity, similarity, and expected value."')
-                    st.markdown('"- p_icp: model probability; p_icp_pct: percentile within this division (0-1)."')
+                    st.markdown('"- score_pct: percentile of the blended score within the division; score_grade: A/B/C/D/F bins (A ≈ top 10%)."')
+                    st.markdown('"- p_icp: model probability; p_icp_pct: per-division percentile (0-1); p_icp_grade: A/B/C/D/F bins."')
                     st.markdown('"- lift_norm: market-basket affinity (normalized); als_norm: similarity to current owners (normalized)."')
                     st.markdown('"- EV_norm: expected value proxy (normalized). nba_reason: short text explanation."')
                 # Simple filters on key columns when present
-                default_cols = [c for c in ['"customer_id"','"customer_name"','"division_name"','"score"','"p_icp"','"p_icp_pct"','"EV_norm"','"nba_reason"'] if c in df.columns]
+                default_cols = [c for c in ['customer_id','customer_name','division_name','score','score_pct','score_grade','p_icp','p_icp_pct','p_icp_grade','EV_norm','nba_reason'] if c in df.columns]
                 cols = st.multiselect('"Columns to show"', df.columns.tolist(), default=default_cols or df.columns.tolist()[:12], help='"Tip: reduce visible columns to focus on key signals"')
                 if cols:
                     st.dataframe(df[cols].head(200), use_container_width=True)
                 else:
                     st.dataframe(df.head(200), use_container_width=True)
                 st.download_button("Download whitespace", data=df.to_csv(index=False), file_name=ws.name)
+
+                # Grade distribution (histogram) by division for whitespace
+                try:
+                    st.subheader("Whitespace Grade Distribution")
+                    # Prefer an explicit grade column if present; else derive from score_pct
+                    grade_col = None
+                    for c in ['whitespace_grade','ws_grade','score_grade','grade']:
+                        if c in df.columns:
+                            grade_col = c
+                            break
+                    if grade_col is None and 'score_pct' in df.columns:
+                        def _to_grade(p):
+                            try:
+                                p = float(p)
+                            except Exception:
+                                return 'F'
+                            if p >= 0.90: return 'A'
+                            if p >= 0.75: return 'B'
+                            if p >= 0.50: return 'C'
+                            if p >= 0.25: return 'D'
+                            return 'F'
+                        df = df.copy()
+                        df['ws_grade'] = df['score_pct'].apply(_to_grade)
+                        grade_col = 'ws_grade'
+                    if grade_col:
+                        div_opts_ws = ['All'] + (sorted(df['division_name'].dropna().unique().tolist()) if 'division_name' in df.columns else [])
+                        sel_div_ws = st.selectbox('Division (for histogram)', div_opts_ws, index=0, key='ws_hist_div')
+                        hist_ws = df
+                        if sel_div_ws != 'All' and 'division_name' in df.columns:
+                            hist_ws = df.loc[df['division_name'] == sel_div_ws]
+                        order = ['A','B','C','D','F']
+                        counts_ws = hist_ws[grade_col].astype(str).value_counts().reindex(order).fillna(0).astype(int)
+                        counts_ws.index.name = 'grade'
+                        st.bar_chart(counts_ws)
+                except Exception as e:
+                    st.warning(f"Whitespace grade histogram error: {e}")
         # Explanations
         ex = OUTPUTS_DIR / f"whitespace_explanations_{sel_cut}.csv"
         if ex.exists():
@@ -1469,74 +1557,59 @@ elif tab == "Architecture":
     **Navigation:** Use the dropdown below to select different architectural views.
     """)
 
-    # Architecture diagram selector
-    architecture_options = {
-        "🏗️ Overall Architecture": {
-            "file": "gosales/docs/architecture/01_overall_architecture.mmd",
-            "description": "High-level overview of the complete GoSales Engine system"
-        },
-        "🔄 ETL Flow": {
-            "file": "gosales/docs/architecture/02_etl_flow.mmd",
-            "description": "Data extraction, transformation, and loading process"
-        },
-        "⚙️ Feature Engineering Flow": {
-            "file": "gosales/docs/architecture/03_feature_engineering_flow.mmd",
-            "description": "Customer, product, temporal, and ALS feature generation"
-        },
-        "🤖 Model Training Flow": {
-            "file": "gosales/docs/architecture/04_model_training_flow.mmd",
-            "description": "LightGBM training with MLflow integration"
-        },
-        "🎬 Pipeline Orchestration Flow": {
-            "file": "gosales/docs/architecture/05_pipeline_orchestration_flow.mmd",
-            "description": "End-to-end pipeline execution and customer scoring"
-        },
-        "✅ Validation & Testing Flow": {
-            "file": "gosales/docs/architecture/06_validation_testing_flow.mmd",
-            "description": "Quality assurance and testing framework"
-        },
-        "📈 Monitoring System Flow": {
-            "file": "gosales/docs/architecture/07_monitoring_system_flow.mmd",
-            "description": "Enterprise monitoring and alerting system"
-        },
-        "🖥️ UI/Dashboard Flow": {
-            "file": "gosales/docs/architecture/08_ui_dashboard_flow.mmd",
-            "description": "Streamlit dashboard with 7 specialized tabs"
-        },
-        "🔄 Sequence Diagrams": {
-            "file": "gosales/docs/architecture/09_sequence_diagrams.mmd",
-            "description": "Key interaction patterns and workflows"
-        },
-        "📋 Leakage Gauntlet Methodology": {
-            "file": "gosales/docs/LEAKAGE_GAUNTLET.md",
-            "description": "Comprehensive leakage detection and prevention methodology"
-        },
-        "🤖 Grok Code Review Report": {
-            "file": "gosales/docs/grok_suggestions.md",
-            "description": "Detailed code analysis and improvement recommendations"
-        },
-        "💡 GPT5 Suggestions Analysis": {
-            "file": "gosales/docs/GPT5_suggestions.md",
-            "description": "AI-powered suggestions for pipeline enhancements"
-        },
-        "📊 Assets & Modeling TODO": {
-            "file": "gosales/docs/TODO_assets_and_modeling.md",
-            "description": "Development roadmap for assets and modeling features"
-        }
-    }
+    # Dynamically discover available architecture diagrams (.mmd with mermaid blocks)
+    def _discover_architecture_diagrams() -> list[dict]:
+        results: list[dict] = []
+        arch_dir = Path("gosales/docs/architecture")
+        for p in sorted(arch_dir.glob("*.mmd")):
+            try:
+                text = p.read_text(encoding='utf-8', errors='ignore')
+            except Exception:
+                continue
+            # Only include files that actually contain a mermaid code block
+            if "```mermaid" not in text:
+                continue
+            title = None
+            description = None
+            if text.startswith("---"):
+                fm_end = text.find("---", 3)
+                if fm_end != -1:
+                    fm = text[3:fm_end]
+                    for line in fm.splitlines():
+                        low = line.strip()
+                        if low.lower().startswith("title:"):
+                            title = line.split(":", 1)[1].strip()
+                        elif low.lower().startswith("description:"):
+                            description = line.split(":", 1)[1].strip()
+            if not title:
+                title = p.stem.replace("_", " ").title()
+            if not description:
+                description = title
+            results.append({"label": title, "file": str(p), "description": description})
+        return results
 
-    selected_architecture = st.selectbox(
+    _arch_items = _discover_architecture_diagrams()
+    if not _arch_items:
+        st.info("No Mermaid architecture diagrams found in gosales/docs/architecture")
+        _arch_items = []
+
+    _labels = [it["label"] for it in _arch_items]
+    selected_label = st.selectbox(
         "Select Architecture Diagram",
-        options=list(architecture_options.keys()),
+        options=_labels if _labels else ["(none)"] ,
         index=0
     )
 
-    st.markdown(f"**Description:** {architecture_options[selected_architecture]['description']}")
+    _selected = next((it for it in _arch_items if it["label"] == selected_label), None)
+    if _selected:
+        st.markdown(f"**Description:** {_selected['description']}")
+    else:
+        st.markdown("**Description:** (none)")
 
     # Load and display the selected diagram
-    diagram_path = Path(architecture_options[selected_architecture]['file'])
+    diagram_path = Path(_selected['file']) if _selected else None
 
-    if diagram_path.exists():
+    if diagram_path and diagram_path.exists():
         diagram_content = _read_text(diagram_path)
 
         # Extract just the mermaid content (remove frontmatter)
@@ -1584,7 +1657,7 @@ elif tab == "Architecture":
                 st.info("💡 For better diagram visualization, install streamlit-mermaid: `pip install streamlit-mermaid`")
 
             # Provide a download link
-            clean_filename = selected_architecture.replace(' ', '_').replace('🏗️', '').replace('🔄', '').replace('⚙️', '').replace('🤖', '').replace('🎬', '').replace('✅', '').replace('📈', '').replace('🖥️', '').replace('🔄', '').strip('_')
+            clean_filename = Path(_selected['file']).stem if _selected else 'diagram'
             st.download_button(
                 label="📥 Download Diagram",
                 data=diagram_content,
