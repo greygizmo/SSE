@@ -401,7 +401,7 @@ with st.sidebar:
     # Use radio buttons for navigation
     tab = st.radio(
         "Select Page",
-        ["Overview", "Metrics", "Explainability", "Whitespace", "Validation", "Runs", "Monitoring", "Architecture", "Quality Assurance", "Configuration & Launch", "Feature Guide", "About"],
+        ["Overview", "Metrics", "Explainability", "Whitespace", "Prospects", "Validation", "Runs", "Monitoring", "Architecture", "Quality Assurance", "Configuration & Launch", "Feature Guide", "Customer Enrichment", "About"],
         index=0,
         label_visibility="collapsed",
         help="Choose the dashboard section to view"
@@ -947,7 +947,7 @@ elif tab == "Metrics":
                 sort_opts_icp = [c for c in ['icp_score','icp_percentile','icp_grade'] if c in icp_view.columns]
                 sort_by_icp = st.selectbox('Sort ICP by', sort_opts_icp or icp_view.columns.tolist(), index=0, key='icp_sort')
                 icp_view = icp_view.sort_values(sort_by_icp, ascending=False, na_position='last')
-                show_cols_icp = [c for c in ['customer_id','customer_name','division_name','icp_score','icp_percentile','icp_grade'] if c in icp_view.columns]
+                show_cols_icp = [c for c in ['customer_id','customer_name','division_name','icp_score','icp_percentile','icp_grade','reason_1','reason_2','reason_3'] if c in icp_view.columns]
                 st.dataframe(icp_view[show_cols_icp].head(500), use_container_width=True)
                 st.download_button("Download ICP Scores", data=icp_view.to_csv(index=False), file_name='icp_scores.csv')
 
@@ -1038,95 +1038,160 @@ elif tab == "Whitespace":
             # Filters
             df = _read_csv(ws)
             if not df.empty:
-                # Enhanced filtering and display controls
                 st.caption(f"Whitespace file: {ws.name} • Updated: {_fmt_mtime(ws)}")
-                fcol1, fcol2, fcol3 = st.columns([2, 2, 2])
-                with fcol1:
-                    q = st.text_input("Search customer", "", help="Filter rows where customer_name contains text")
-                with fcol2:
-                    div_opts = sorted(df['division_name'].dropna().unique().tolist()) if 'division_name' in df.columns else []
-                    sel_divs = st.multiselect("Division", div_opts, default=div_opts, help="Restrict to specific divisions") if div_opts else []
-                with fcol3:
-                    cand = [c for c in ['score','score_pct','p_icp','p_icp_pct','EV_norm','als_norm','lift_norm'] if c in df.columns]
-                    score_col = cand[0] if cand else None
+                division_cols = [c for c in ["division_name", "division"] if c in df.columns]
+                score_candidates = [c for c in ["score","score_pct","p_icp","p_icp_pct","EV_norm","als_norm","lift_norm"] if c in df.columns]
+                score_col = score_candidates[0] if score_candidates else None
+                score_threshold = None
+                score_series = None
+                col_div, col_cust, col_name, col_score = st.columns([2, 2, 2, 3])
+                with col_div:
+                    division_query = st.text_input(
+                        "Division filter",
+                        "",
+                        help="Filter rows where division_name or division contains text",
+                    )
+                with col_cust:
+                    customer_query = st.text_input(
+                        "Customer ID filter",
+                        "",
+                        help="Filter rows where customer_id contains text",
+                    )
+                with col_name:
+                    name_query = st.text_input(
+                        "Customer name contains",
+                        "",
+                        help="Optional match on customer_name",
+                    )
+                with col_score:
                     if score_col is not None:
-                        vmin = float(pd.to_numeric(df[score_col], errors='coerce').min())
-                        vmax = float(pd.to_numeric(df[score_col], errors='coerce').max())
-                        rng = st.slider(f"{score_col} range", min_value=vmin, max_value=vmax, value=(vmin, vmax))
+                        score_series = pd.to_numeric(df[score_col], errors="coerce")
+                        valid_scores = score_series.dropna()
+                        if not valid_scores.empty:
+                            min_score = float(valid_scores.min())
+                            max_score = float(valid_scores.max())
+                            if min_score < max_score:
+                                score_threshold = st.slider(
+                                    f"{score_col} minimum",
+                                    min_value=min_score,
+                                    max_value=max_score,
+                                    value=min_score,
+                                    help="Hide rows below the selected threshold",
+                                )
+                            else:
+                                score_threshold = min_score
+                                st.caption(f"{score_col} = {min_score:.3f} for all rows")
+                        else:
+                            st.caption(f"No numeric values available in {score_col}")
                     else:
-                        rng = None
-                # Apply filters in place to df so legacy view uses it
+                        st.caption("No score column available for threshold filter.")
                 filt = pd.Series(True, index=df.index)
-                if q and 'customer_name' in df.columns:
-                    filt &= df['customer_name'].astype(str).str.contains(q, case=False, na=False)
-                if sel_divs:
-                    filt &= df['division_name'].isin(sel_divs) if 'division_name' in df.columns else True
-                if rng is not None and score_col is not None:
-                    vals = pd.to_numeric(df[score_col], errors='coerce')
-                    filt &= (vals >= rng[0]) & (vals <= rng[1])
-                df = df.loc[filt]
-                # Sort + TopK controls
-                scol1, scol2 = st.columns([3, 1])
-                with scol1:
-                    sort_opts = [c for c in ['score','score_pct','p_icp','p_icp_pct','EV_norm','als_norm','lift_norm'] if c in df.columns]
-                    sort_by = st.selectbox('Sort by', sort_opts or df.columns.tolist(), index=0)
-                with scol2:
-                    top_k = st.number_input('Top K', min_value=10, max_value=10000, value=500, step=50)
-                if sort_by:
-                    df = df.sort_values(sort_by, ascending=False, na_position='last')
-                df = df.head(int(top_k))
-                with st.expander('"What these columns mean"', expanded=True):
-                    st.markdown('"- customer_id/customer_name: who the recommendation is for."')
-                    st.markdown('"- division_name: the product/target (e.g., Printers, SWX_Seats)."')
-                    st.markdown('"- score: blended next-best-action score combining model probability, affinity, similarity, and expected value."')
-                    st.markdown('"- score_pct: percentile of the blended score within the division; score_grade: A/B/C/D/F bins (A ≈ top 10%)."')
-                    st.markdown('"- p_icp: model probability; p_icp_pct: per-division percentile (0-1); p_icp_grade: A/B/C/D/F bins."')
-                    st.markdown('"- lift_norm: market-basket affinity (normalized); als_norm: similarity to current owners (normalized)."')
-                    st.markdown('"- EV_norm: expected value proxy (normalized). nba_reason: short text explanation."')
-                # Simple filters on key columns when present
-                default_cols = [c for c in ['customer_id','customer_name','division_name','score','score_pct','score_grade','p_icp','p_icp_pct','p_icp_grade','EV_norm','nba_reason'] if c in df.columns]
-                cols = st.multiselect('"Columns to show"', df.columns.tolist(), default=default_cols or df.columns.tolist()[:12], help='"Tip: reduce visible columns to focus on key signals"')
-                if cols:
-                    st.dataframe(df[cols].head(200), use_container_width=True)
+                if division_query and division_cols:
+                    division_mask = pd.Series(False, index=df.index)
+                    for col in division_cols:
+                        division_mask |= df[col].astype(str).str.contains(division_query, case=False, na=False)
+                    filt &= division_mask
+                if customer_query and "customer_id" in df.columns:
+                    filt &= df["customer_id"].astype(str).str.contains(customer_query, case=False, na=False)
+                if name_query and "customer_name" in df.columns:
+                    filt &= df["customer_name"].astype(str).str.contains(name_query, case=False, na=False)
+                if score_threshold is not None and score_col is not None:
+                    if score_series is None:
+                        score_series = pd.to_numeric(df[score_col], errors="coerce")
+                    filt &= score_series >= score_threshold
+                filtered = df.loc[filt].copy()
+                display_df = filtered.copy()
+                if display_df.empty:
+                    st.info("No rows match the current filters.")
                 else:
-                    st.dataframe(df.head(200), use_container_width=True)
-                st.download_button("Download whitespace", data=df.to_csv(index=False), file_name=ws.name)
-
-                # Grade distribution (histogram) by division for whitespace
-                try:
-                    st.subheader("Whitespace Grade Distribution")
-                    # Prefer an explicit grade column if present; else derive from score_pct
-                    grade_col = None
-                    for c in ['whitespace_grade','ws_grade','score_grade','grade']:
-                        if c in df.columns:
-                            grade_col = c
-                            break
-                    if grade_col is None and 'score_pct' in df.columns:
-                        def _to_grade(p):
-                            try:
-                                p = float(p)
-                            except Exception:
-                                return 'F'
-                            if p >= 0.90: return 'A'
-                            if p >= 0.75: return 'B'
-                            if p >= 0.50: return 'C'
-                            if p >= 0.25: return 'D'
-                            return 'F'
-                        df = df.copy()
-                        df['ws_grade'] = df['score_pct'].apply(_to_grade)
-                        grade_col = 'ws_grade'
-                    if grade_col:
-                        div_opts_ws = ['All'] + (sorted(df['division_name'].dropna().unique().tolist()) if 'division_name' in df.columns else [])
-                        sel_div_ws = st.selectbox('Division (for histogram)', div_opts_ws, index=0, key='ws_hist_div')
-                        hist_ws = df
-                        if sel_div_ws != 'All' and 'division_name' in df.columns:
-                            hist_ws = df.loc[df['division_name'] == sel_div_ws]
-                        order = ['A','B','C','D','F']
-                        counts_ws = hist_ws[grade_col].astype(str).value_counts().reindex(order).fillna(0).astype(int)
-                        counts_ws.index.name = 'grade'
-                        st.bar_chart(counts_ws)
-                except Exception as e:
-                    st.warning(f"Whitespace grade histogram error: {e}")
+                    scol1, scol2 = st.columns([3, 1])
+                    with scol1:
+                        sort_opts = [
+                            c
+                            for c in ["score", "score_pct", "p_icp", "p_icp_pct", "EV_norm", "als_norm", "lift_norm"]
+                            if c in display_df.columns
+                        ]
+                        sort_by = st.selectbox("Sort by", sort_opts or display_df.columns.tolist(), index=0)
+                    with scol2:
+                        top_k = st.number_input("Top K", min_value=10, max_value=10000, value=500, step=50)
+                    if sort_by:
+                        display_df = display_df.sort_values(sort_by, ascending=False, na_position="last")
+                    display_df = display_df.head(int(top_k))
+                    with st.expander('"What these columns mean"', expanded=True):
+                        st.markdown('"- customer_id/customer_name: who the recommendation is for."')
+                        st.markdown('"- division_name: the product/target (e.g., Printers, SWX_Seats)."')
+                        st.markdown('"- score: blended next-best-action score combining model probability, affinity, similarity, and expected value."')
+                        st.markdown('"- score_pct: percentile of the blended score within the division; score_grade: A/B/C/D/F bins (A ≈ top 10%)."')
+                        st.markdown('"- p_icp: model probability; p_icp_pct: per-division percentile (0-1); p_icp_grade: A/B/C/D/F bins."')
+                        st.markdown('"- lift_norm: market-basket affinity (normalized); als_norm: similarity to current owners (normalized)."')
+                        st.markdown('"- EV_norm: expected value proxy (normalized). nba_reason: short text explanation."')
+                    default_cols = [
+                        c
+                        for c in [
+                            "customer_id",
+                            "customer_name",
+                            "division_name",
+                            "division",
+                            "score",
+                            "score_pct",
+                            "score_grade",
+                            "p_icp",
+                            "p_icp_pct",
+                            "p_icp_grade",
+                            "EV_norm",
+                            "nba_reason",
+                        ]
+                        if c in display_df.columns
+                    ]
+                    cols = st.multiselect(
+                        '"Columns to show"',
+                        display_df.columns.tolist(),
+                        default=default_cols or display_df.columns.tolist()[:12],
+                        help='"Tip: reduce visible columns to focus on key signals"',
+                    )
+                    if cols:
+                        st.dataframe(display_df[cols].head(200), use_container_width=True)
+                    else:
+                        st.dataframe(display_df.head(200), use_container_width=True)
+                    try:
+                        st.subheader("Whitespace Grade Distribution")
+                        grade_col = None
+                        for col in ["whitespace_grade", "ws_grade", "score_grade", "grade"]:
+                            if col in display_df.columns:
+                                grade_col = col
+                                break
+                        if grade_col is None and "score_pct" in display_df.columns:
+                            def _to_grade(p):
+                                try:
+                                    p = float(p)
+                                except Exception:
+                                    return "F"
+                                if p >= 0.90:
+                                    return "A"
+                                if p >= 0.75:
+                                    return "B"
+                                if p >= 0.50:
+                                    return "C"
+                                if p >= 0.25:
+                                    return "D"
+                                return "F"
+                            display_df = display_df.copy()
+                            display_df["ws_grade"] = display_df["score_pct"].apply(_to_grade)
+                            grade_col = "ws_grade"
+                        if grade_col:
+                            div_field = "division_name" if "division_name" in display_df.columns else ("division" if "division" in display_df.columns else None)
+                            div_opts_ws = ["All"] + (sorted(display_df[div_field].dropna().unique().tolist()) if div_field else [])
+                            sel_div_ws = st.selectbox("Division (for histogram)", div_opts_ws, index=0, key="ws_hist_div")
+                            hist_ws = display_df
+                            if div_field and sel_div_ws != "All":
+                                hist_ws = display_df.loc[display_df[div_field] == sel_div_ws]
+                            order = ["A", "B", "C", "D", "F"]
+                            counts_ws = hist_ws[grade_col].astype(str).value_counts().reindex(order).fillna(0).astype(int)
+                            counts_ws.index.name = "grade"
+                            st.bar_chart(counts_ws)
+                    except Exception as e:
+                        st.warning(f"Whitespace grade histogram error: {e}")
+                st.download_button("Download whitespace", data=display_df.to_csv(index=False), file_name=ws.name)
         # Explanations
         ex = OUTPUTS_DIR / f"whitespace_explanations_{sel_cut}.csv"
         if ex.exists():
@@ -1705,6 +1770,64 @@ elif tab == "Architecture":
     st.caption("🔧 Use these diagrams for development, debugging, onboarding, and system optimization.")
     st.caption("📊 All diagrams are automatically generated from the actual codebase structure.")
 
+
+
+elif tab == "Prospects":
+    st.header("🔎 Prospects")
+    st.markdown("Use prospect scores to prioritize outreach. Select division and cutoff to review top prospects with reasons.")
+
+    from gosales.utils.db import get_curated_connection
+    import pandas as pd
+
+    eng = get_curated_connection()
+    # Discover available prospect score tables
+    try:
+        tables = pd.read_sql("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'scores_prospects_%'", eng)["name"].tolist()
+    except Exception:
+        tables = []
+
+    div_map = {t.replace('scores_prospects_','').capitalize(): t for t in tables}
+    if not div_map:
+        st.info("No prospect score tables found. Train/score prospect models first.")
+    else:
+        sel_div = st.selectbox("Division", sorted(div_map.keys()))
+        table = div_map[sel_div]
+        # Load recent cutoff values
+        df_all = pd.read_sql(f"SELECT * FROM {table}", eng)
+        if df_all.empty:
+            st.info("No scores available in table.")
+        else:
+            df_all['cutoff_date'] = pd.to_datetime(df_all['cutoff_date'])
+            cutoffs = sorted(df_all['cutoff_date'].dropna().dt.date.unique().tolist())
+            sel_cutoff = st.selectbox("Cutoff", cutoffs, index=len(cutoffs)-1)
+            view = df_all[df_all['cutoff_date'].dt.date == sel_cutoff].copy()
+
+            # Filters
+            terrs = sorted(view.get('cat_territory_standardized', pd.Series(dtype=str)).fillna('missing').unique().tolist())
+            sel_terr = st.selectbox("Territory", ["All"] + terrs)
+            if sel_terr != "All":
+                view = view[view['cat_territory_standardized'] == sel_terr]
+
+            topk = st.number_input("Top K per territory (optional)", min_value=0, value=0, step=10, help="0 to show all")
+            if topk and 'rank_territory' in view.columns:
+                view = view[view['rank_territory'] <= topk]
+
+            cols_primary = [c for c in [
+                'customer_id','score','rank_global','rank_territory',
+                'cat_territory_standardized','cat_territory_name','cat_region',
+                'reason_1','reason_2','reason_3'
+            ] if c in view.columns]
+            cols_extra = [c for c in [
+                'feat_contact_score','feat_has_weblead','feat_has_email','feat_has_phone',
+                'feat_has_cpe_history','feat_has_hw_history','feat_has_3dx_history',
+                'feat_account_age_days'
+            ] if c in view.columns]
+
+            st.markdown("### Results")
+            st.dataframe(view[cols_primary + cols_extra], use_container_width=True)
+
+            csv = view.to_csv(index=False).encode('utf-8')
+            st.download_button("Download CSV", csv, file_name=f"prospects_{sel_div.lower()}_{sel_cutoff}.csv", mime='text/csv')
 elif tab == "Quality Assurance":
     st.header("🛡️ Quality Assurance & Leakage Testing")
     st.markdown("""

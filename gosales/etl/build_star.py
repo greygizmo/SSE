@@ -19,6 +19,7 @@ from gosales.etl.ingest import robust_read_csv
 from gosales.utils.logger import get_logger
 from gosales.etl.sku_map import get_sku_mapping
 from gosales.etl.cleaners import clean_currency_value, coerce_datetime, summarise_dataframe_schema
+from gosales.utils.identifiers import normalize_identifier_expr, normalize_identifier_series
 from gosales.etl.contracts import (
     check_required_columns,
     check_primary_key_not_null,
@@ -142,12 +143,22 @@ def build_star_schema(engine, config_path: str | Path | None = None, rebuild: bo
             div_col = src_map.get('division')
             name_col = src_map.get('customer_name')
             inv_col = src_map.get('invoice_id')
+            inv_date_col = src_map.get('invoice_date')
             if cust_col and cust_col in df.columns:
                 df['CustomerId'] = df[cust_col]
             if date_col and date_col in df.columns:
                 df['Rec Date'] = df[date_col]
             if inv_col and inv_col in df.columns:
                 df['InvoiceId'] = df[inv_col]
+            if inv_date_col and inv_date_col in df.columns:
+                df['invoice_date'] = df[inv_date_col]
+            elif 'invoice_date' not in df.columns:
+                for candidate in ("Invoice_Date", "Invoice Date"):
+                    if candidate in df.columns:
+                        df['invoice_date'] = df[candidate]
+                        break
+            if 'invoice_date' not in df.columns:
+                df['invoice_date'] = None
             if div_col and div_col in df.columns:
                 df['Division'] = df[div_col]
             if name_col and name_col in df.columns:
@@ -333,7 +344,7 @@ def build_star_schema(engine, config_path: str | Path | None = None, rebuild: bo
         ])
         .with_columns([
             # Keep customer_id as string (GUID-safe) for downstream joins
-            pl.col("customer_id").cast(pl.Utf8),
+            normalize_identifier_expr(pl.col("customer_id")).alias("customer_id"),
             # Normalised name and numeric prefix for robust matching
             pl.col("customer_name").cast(pl.Utf8).str.to_lowercase().str.replace_all(r"\s+", " ").alias("customer_name_norm"),
             pl.col("customer_name")
@@ -361,14 +372,24 @@ def build_star_schema(engine, config_path: str | Path | None = None, rebuild: bo
         })
         .with_columns([
             # Ensure consistent string typing for customer_id
-            pl.col("customer_id").cast(pl.Utf8),
+            normalize_identifier_expr(pl.col("customer_id")).alias("customer_id"),
             # Preserve original columns for feature engineering (already lowercase)
             pl.col("branch").cast(pl.Utf8),
             pl.col("rep").cast(pl.Utf8),
-            pl.col("order_date").cast(pl.Date),
+            pl.coalesce([
+                pl.col("order_date").cast(pl.Date, strict=False),
+                pl.col("order_date").cast(pl.Utf8).str.strip_chars().str.strptime(pl.Date, format="%Y-%m-%d", strict=False),
+                pl.col("order_date").cast(pl.Utf8).str.strip_chars().str.strptime(pl.Date, format="%m/%d/%Y %H:%M", strict=False),
+                pl.col("order_date").cast(pl.Utf8).str.strip_chars().str.strptime(pl.Date, format="%m/%d/%Y", strict=False),
+            ]).alias("order_date"),
             pl.col("division").cast(pl.Utf8),
-            pl.col("invoice_date").cast(pl.Date),
-            pl.col("InvoiceId").alias("invoice_id").cast(pl.Utf8),
+            pl.coalesce([
+                pl.col("invoice_date").cast(pl.Date, strict=False),
+                pl.col("invoice_date").cast(pl.Utf8).str.strip_chars().str.strptime(pl.Date, format="%Y-%m-%d", strict=False),
+                pl.col("invoice_date").cast(pl.Utf8).str.strip_chars().str.strptime(pl.Date, format="%m/%d/%Y %H:%M", strict=False),
+                pl.col("invoice_date").cast(pl.Utf8).str.strip_chars().str.strptime(pl.Date, format="%m/%d/%Y", strict=False),
+            ]).alias("invoice_date"),
+            normalize_identifier_expr(pl.col("InvoiceId")).alias("invoice_id"),
         ])
         .filter(pl.col("customer_id").is_not_null())
     )
@@ -606,10 +627,28 @@ def build_star_schema(engine, config_path: str | Path | None = None, rebuild: bo
     fact_transactions_pd = fact_transactions.to_pandas()
     
     # Clean the data
-    fact_transactions_pd['customer_id'] = fact_transactions_pd['CustomerId'].astype(str)
+    fact_transactions_pd['customer_id'] = normalize_identifier_series(fact_transactions_pd['CustomerId'])
     fact_transactions_pd['order_date'] = coerce_datetime(fact_transactions_pd['Rec Date'])
     if 'InvoiceId' in fact_transactions_pd.columns:
-        fact_transactions_pd['invoice_id'] = fact_transactions_pd['InvoiceId'].astype(str)
+        fact_transactions_pd['invoice_id'] = normalize_identifier_series(fact_transactions_pd['InvoiceId'])
+    else:
+        fact_transactions_pd['invoice_id'] = pd.Series([None] * len(fact_transactions_pd))
+
+    if 'invoice_id' in fact_transactions_pd.columns:
+        missing_invoice = fact_transactions_pd['invoice_id'].isna() | (fact_transactions_pd['invoice_id'] == '')
+        if missing_invoice.any():
+            surrogate_keys = (
+                fact_transactions_pd.loc[missing_invoice, 'customer_id'].fillna('UNK').astype(str)
+                + '|'
+                + fact_transactions_pd.loc[missing_invoice, 'order_date'].dt.strftime('%Y%m%d')
+            )
+            counts = surrogate_keys.groupby(surrogate_keys).cumcount()
+            fact_transactions_pd.loc[missing_invoice, 'invoice_id'] = (
+                'AUTO-' + surrogate_keys.fillna('UNK') + '-' + (counts + 1).astype(str)
+            )
+
+    # Drop rows without a mapped customer_id
+    fact_transactions_pd = fact_transactions_pd[fact_transactions_pd['customer_id'].notna()].copy()
 
     # Clean currency columns using shared cleaner
     fact_transactions_pd['gross_profit'] = fact_transactions_pd['gross_profit'].apply(clean_currency_value)

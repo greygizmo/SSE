@@ -11,6 +11,7 @@ from gosales.utils.db import get_curated_connection
 from gosales.utils.paths import OUTPUTS_DIR, DATA_DIR
 from gosales.utils.logger import get_logger
 from gosales.etl.sku_map import get_model_targets
+from gosales.utils.identifiers import normalize_identifier_series
 
 
 logger = get_logger(__name__)
@@ -45,12 +46,17 @@ def _read_facts(curated_engine) -> pd.DataFrame:
     df = pd.read_sql(sql, curated_engine)
     if not df.empty:
         df["order_date"] = pd.to_datetime(df["order_date"], errors="coerce")
-        for c in ("customer_id", "invoice_id", "product_sku", "product_division"):
+        if "customer_id" in df.columns:
+            df["customer_id"] = normalize_identifier_series(df["customer_id"])
+        if "invoice_id" in df.columns:
+            df["invoice_id"] = normalize_identifier_series(df["invoice_id"])
+        for c in ("product_sku", "product_division"):
             if c in df.columns:
                 df[c] = df[c].astype(str)
         for c in ("gross_profit", "quantity"):
             if c in df.columns:
                 df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+        df = df.dropna(subset=["customer_id", "order_date"]).reset_index(drop=True)
     return df
 
 
@@ -71,10 +77,22 @@ def build_fact_events(curated_engine=None, models: Iterable[str] = DEFAULT_MODEL
     # Ensure invoice_id exists; if not, synthesize a surrogate from order_date+customer
     if "invoice_id" not in facts.columns:
         facts["invoice_id"] = (
-            facts["customer_id"].astype(str)
+            facts["customer_id"].fillna("UNK").astype(str)
             + "|"
             + pd.to_datetime(facts["order_date"]).dt.strftime("%Y%m%d")
         )
+    else:
+        missing_mask = facts["invoice_id"].isna() | (facts["invoice_id"] == "")
+        if missing_mask.any():
+            surrogate_keys = (
+                facts.loc[missing_mask, "customer_id"].fillna("UNK").astype(str)
+                + "|"
+                + facts.loc[missing_mask, "order_date"].dt.strftime("%Y%m%d")
+            )
+            counts = surrogate_keys.groupby(surrogate_keys).cumcount()
+            facts.loc[missing_mask, "invoice_id"] = (
+                "AUTO-" + surrogate_keys.fillna("UNK") + "-" + (counts + 1).astype(str)
+            )
 
     # Base event grain
     base = (
@@ -91,9 +109,10 @@ def build_fact_events(curated_engine=None, models: Iterable[str] = DEFAULT_MODEL
         if not targets:
             continue
         mask = facts["product_sku"].isin(targets)
-        sub = facts.loc[mask, ["invoice_id", "quantity", "gross_profit"]].copy()
+        sub = facts.loc[mask, ["invoice_id", "customer_id", "order_date", "quantity", "gross_profit"]].copy()
+        group_cols = ["invoice_id", "customer_id", "order_date"]
         agg = (
-            sub.groupby("invoice_id")
+            sub.groupby(group_cols, dropna=False)
             .agg({"quantity": "sum", "gross_profit": "sum"})
             .reset_index()
             .rename(
@@ -110,8 +129,9 @@ def build_fact_events(curated_engine=None, models: Iterable[str] = DEFAULT_MODEL
         lab_frames.append(agg)
 
     events = base
+    group_cols = ["invoice_id", "customer_id", "order_date"]
     for lf in lab_frames:
-        events = events.merge(lf, on="invoice_id", how="left")
+        events = events.merge(lf, on=group_cols, how="left")
 
     # Fill NaNs for missing models with zeros
     for col in events.columns:

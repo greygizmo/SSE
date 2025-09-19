@@ -10,6 +10,7 @@ from gosales.utils.sql import validate_identifier, ensure_allowed_identifier
 from gosales.sql.queries import moneyball_assets_select, items_category_limited_select
 from gosales.utils.config import load_config
 from gosales.utils.logger import get_logger
+from gosales.utils.identifiers import normalize_identifier_series
 
 logger = get_logger(__name__)
 
@@ -88,33 +89,56 @@ def _load_sources() -> Tuple[pd.DataFrame, pd.DataFrame]:
 
 
 def _map_customers_to_ids(mb: pd.DataFrame) -> pd.DataFrame:
-    """Map Moneyball customer names -> canonical customer_id via dim_customer or sales_log.
+    """Attach canonical customer_id to Moneyball rows.
 
-    Strategy: exact string match on normalized name; do NOT use numeric prefixes.
+    Primary strategy: use NetSuite internalid where available; fall back to legacy
+    name-based joins only for the small slice of rows missing internalid.
     """
+
+    mapped = mb.copy()
+
+    # 1) Preferred mapping: align on NetSuite entityid (matches Moneyball customer_name)
+    try:
+        ns_cur = get_curated_connection()
+        ns_df = pd.read_sql("SELECT internalid, entityid FROM dim_ns_customer", ns_cur)
+        ns_df = ns_df.dropna(subset=['internalid', 'entityid']).copy()
+        ns_df['entityid_norm'] = _norm(ns_df['entityid'])
+        ns_map = ns_df.drop_duplicates('entityid_norm').set_index('entityid_norm')['internalid']
+        mapped['customer_id'] = mapped['customer_name_norm'].map(ns_map)
+    except Exception as exc:
+        logger.warning(f"dim_ns_customer lookup failed, falling back to legacy mapping: {exc}")
+        mapped['customer_id'] = None
+
+    mapped['customer_id'] = normalize_identifier_series(mapped['customer_id'])
+
+    missing_mask = mapped['customer_id'].isna()
+    if not missing_mask.any():
+        return mapped
+
+    # 2) Fallback map via dim_customer (or raw sales_log) for rows without matches.
     try:
         cur = get_curated_connection()
         dc = pd.read_sql("SELECT customer_id, customer_name, customer_name_norm FROM dim_customer", cur)
     except Exception:
-        # Fallback: build map from source sales_log
         try:
             src = get_db_connection()
-            sl = pd.read_sql("SELECT [Customer] AS customer_name, [CompanyId] AS customer_id FROM dbo.saleslog", src)
+            sl = pd.read_sql(
+                "SELECT [Customer] AS customer_name, [CompanyId] AS customer_id FROM dbo.saleslog",
+                src,
+            )
             sl['customer_name_norm'] = _norm(sl['customer_name'])
             dc = sl.groupby('customer_name_norm')[['customer_name', 'customer_id']].first().reset_index()
         except Exception as e:
             logger.warning(f"Failed to load customer id map from curated and sales_log: {e}")
-            dc = pd.DataFrame(columns=['customer_name_norm', 'customer_id', 'customer_name'])
+            dc = pd.DataFrame(columns=['customer_name_norm', 'customer_id'])
 
-    # Deduplicate by norm key
     if not dc.empty:
-        dc = dc.dropna(subset=['customer_name_norm']).copy()
+        dc = dc.dropna(subset=['customer_name_norm', 'customer_id']).copy()
         dc['customer_name_norm'] = _norm(dc['customer_name_norm'])
-        dc = dc.groupby('customer_name_norm')[['customer_id', 'customer_name']].first().reset_index()
-        mapped = mb.merge(dc, on='customer_name_norm', how='left', suffixes=('', '_dim'))
-    else:
-        mapped = mb.copy()
-        mapped['customer_id'] = np.nan
+        id_map = dc.drop_duplicates('customer_name_norm').set_index('customer_name_norm')['customer_id']
+        fallback_ids = mapped.loc[missing_mask, 'customer_name_norm'].map(id_map)
+        mapped.loc[missing_mask, 'customer_id'] = normalize_identifier_series(fallback_ids)
+
     return mapped
 
 
@@ -185,14 +209,14 @@ def build_fact_assets(write: bool = True) -> pd.DataFrame:
     ]].copy()
 
     # Coerce types
-    fact['customer_id'] = fact['customer_id'].astype(str)
+    fact['customer_id'] = normalize_identifier_series(fact['customer_id'])
     fact['qty'] = pd.to_numeric(fact['qty'], errors='coerce').fillna(1.0)
 
     if write:
         cur = get_curated_connection()
         # Wrap destructive write in a transaction to allow rollback on failure; use batched insert
         with cur.begin() as conn:
-            fact.to_sql('fact_assets', conn, if_exists='replace', index=False, method='multi', chunksize=5000)
+            fact.to_sql('fact_assets', conn, if_exists='replace', index=False, method='multi', chunksize=50)
         logger.info(f"Wrote fact_assets with {len(fact):,} rows")
     return fact
 

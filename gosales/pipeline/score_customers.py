@@ -13,6 +13,7 @@ import joblib
 from gosales.utils.db import get_db_connection, get_curated_connection, validate_connection
 from gosales.utils.logger import get_logger
 from gosales.utils.paths import MODELS_DIR, OUTPUTS_DIR
+from gosales.models.shap_utils import compute_shap_reasons
 from gosales.utils.normalize import normalize_division
 from gosales.utils.config import load_config
 import numpy as np
@@ -346,6 +347,16 @@ def score_customers_for_division(
         customer_names["customer_id"] = customer_names["customer_id"].astype(str)
         scores_df = scores_df.merge(customer_names, on="customer_id", how="left")
         
+        
+        # Optional SHAP reason codes for explainability (best-effort)
+        try:
+            reasons = compute_shap_reasons(model, X, X.columns, top_k=3)
+            reasons.index = scores_df.index
+            for i, col in enumerate(["reason_1","reason_2","reason_3"], start=1):
+                if col not in scores_df.columns:
+                    scores_df[col] = reasons[f"reason_{i}"]
+        except Exception as _exc:
+            pass
         logger.info(f"Successfully scored {len(scores_df)} customers for {division_name}")
         return pl.from_pandas(scores_df)
         

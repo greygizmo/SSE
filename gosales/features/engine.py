@@ -828,6 +828,25 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
 
     # Fill nulls for all other columns in pandas for easier handling
     feature_matrix_pd = feature_matrix.to_pandas()
+
+    # Optional: augment with cutoff-safe NetSuite customer features (territory/contact/etc.)
+    try:
+        from gosales.features.ns_customer_features import build_ns_customer_features
+        cutoff_for_ns = cutoff_date if cutoff_date else pd.Timestamp.today().date().isoformat()
+        ns_pl = build_ns_customer_features(cutoff_for_ns)
+        ns_pd = ns_pl.to_pandas()
+        if not ns_pd.empty:
+            feature_matrix_pd = feature_matrix_pd.merge(ns_pd, on="customer_id", how="left")
+            # Handle nulls by family
+            cust_cat = [c for c in feature_matrix_pd.columns if c.startswith("cust_cat_")]
+            cust_feat = [c for c in feature_matrix_pd.columns if c.startswith("cust_feat_")]
+            for c in cust_cat:
+                feature_matrix_pd[c] = feature_matrix_pd[c].fillna("missing").astype(str)
+            for c in cust_feat:
+                feature_matrix_pd[c] = pd.to_numeric(feature_matrix_pd[c], errors='coerce').fillna(0)
+    except Exception as _e:
+        # Non-fatal; continue without NS augmentation
+        pass
     
     # Drop the date columns that are no longer needed for ML
     date_columns = [col for col in feature_matrix_pd.columns if 'date' in col.lower()]
