@@ -1264,8 +1264,8 @@
     "is_sub_02_1_aircraft_manufacture_or_assembly",
     "is_sub_04_1_packaging_machinery",
     "is_sub_11_5_subcontractor_flooring_roofing_walls_site_prep",
-    "is_sub_07_5_telecommunication_and_navigation",
     "is_sub_education_and_research",
+    "is_sub_07_5_telecommunication_and_navigation",
     "is_sub_07_7_electrical_components_capacitors_batteries_lighting",
     "is_sub_05_3_plastics_molding",
     "is_sub_12_5_education",
@@ -1274,7 +1274,7 @@
     "is_sub_06_3_heating_and_refrigeration_equipment_furnaces_oven",
     "is_sub_10_6_oil_and_gas_petroleum",
     "is_sub_01_4_automotive_and_transportation_services",
-    "is_sub_11_4_subcontractor_structural_steel_and_wood",
+    "is_sub_manufactured_products",
     "growth_ratio_24_over_23",
     "is_industrial_machinery_x_services",
     "is_services_x_services",
@@ -1325,15 +1325,15 @@
     "is_mold_tool_and_die_x_growth",
     "is_education_and_research_x_growth"
   ],
-  "trained_at": "2025-09-18T22:17:00.626253Z",
-  "best_model": "LightGBM",
+  "trained_at": "2025-09-21T07:24:19.254064Z",
+  "best_model": "Logistic Regression",
   "best_auc": null,
-  "calibration_method": "isotonic",
+  "calibration_method": "sigmoid",
   "calibration_mae": null,
   "brier_score": null,
   "class_balance": {
-    "positives": 94,
-    "negatives": 25763,
-    "scale_pos_weight": 274.0744680851064
+    "positives": 93,
+    "negatives": 25840,
+    "scale_pos_weight": 277.8494623655914
   }
 }

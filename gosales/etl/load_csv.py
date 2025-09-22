@@ -45,6 +45,8 @@ if __name__ == "__main__":
         "Analytics_order_tags.csv": "analytics_order_tags",
         "Analytics_SalesLogs.csv": "analytics_sales_logs",
         "Sales_Log.csv": "sales_log",
+        # Industry enrichment lookup (used to build dim_customer)
+        "TR - Industry Enrichment.csv": "industry_enrichment",
     }
 
     # Load each CSV file into the database

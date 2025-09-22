@@ -1,8 +1,5 @@
----
-title: GoSales Engine - Overall Architecture
----
+%% GoSales Engine - Overall Architecture
 
-```mermaid
 graph TB
     %% Data Sources
     subgraph "External Data Sources"
@@ -14,70 +11,70 @@ graph TB
     %% Core Pipeline Components
     subgraph "Data Pipeline"
         subgraph "ETL Phase"
-            Ingest[Data Ingestion<br/>ingest.py]
-            Clean[Data Cleaning<br/>cleaners.py]
-            Transform[Data Transformation<br/>build_star.py]
-            Load[Data Loading<br/>load_csv.py]
+            Ingest["Data Ingestion<br/>ingest.py"]
+            Clean["Data Cleaning<br/>cleaners.py"]
+            Transform["Data Transformation<br/>build_star.py"]
+            Load["Data Loading<br/>load_csv.py"]
         end
 
         subgraph "Feature Engineering Phase"
-            FeatureBuild[Feature Engineering<br/>engine.py]
-            CycleAware[Cycle-aware Recency<br/>log + hazard decays]
-            OffsetsDeltas[Offset Windows + Deltas<br/>cutoff-60d, 12m vs prev12m]
-            PooledEnc[Hierarchical/Pooled Encoders<br/>industry/sub (non-leaky)]
-            AffinityLag[Lagged Affinity (Market Basket)<br/>embargo >=60d]
-            ALSEmbedding[ALS Embedding<br/>als_embed.py]
-            LabelGen[Label Generation<br/>targets.py]
-            CacheSystem[Feature Caching<br/>cache.py]
+            FeatureBuild["Feature Engineering<br/>engine.py"]
+            CycleAware["Cycle-aware Recency<br/>log + hazard decays"]
+            OffsetsDeltas["Offset Windows + Deltas<br/>cutoff-60d, 12m vs prev12m"]
+            PooledEnc["Hierarchical/Pooled Encoders<br/>industry/sub (non-leaky)"]
+            AffinityLag["Lagged Affinity (Market Basket)<br/>embargo >=60d"]
+            ALSEmbedding["ALS Embedding<br/>als_embed.py"]
+            LabelGen["Label Generation<br/>targets.py"]
+            CacheSystem["Feature Caching<br/>cache.py"]
         end
 
         subgraph "Model Training Phase"
-            TrainDivision[Division Training<br/>train.py (SAFE per-division)]
-            Calibration[Calibration<br/>Platt/Isotonic]
-            ModelCard[Model Card<br/>top-K yield, calibration]
-            ModelArtifacts[Model Artifacts<br/>model.pkl, feature_list]
-            Metrics[Model Metrics<br/>metrics.json, gains, thresholds]
+            TrainDivision["Division Training<br/>train.py (SAFE per-division)"]
+            Calibration["Calibration<br/>Platt/Isotonic"]
+            ModelCard["Model Card<br/>top-K yield, calibration"]
+            ModelArtifacts["Model Artifacts<br/>model.pkl, feature_list"]
+            Metrics["Model Metrics<br/>metrics.json, gains, thresholds"]
         end
 
         subgraph "Pipeline Orchestration"
-            ScoreAll[Full Pipeline Runner<br/>score_all.py]
-            ScoreCustomers[Customer Scoring<br/>score_customers.py]
-            LabelAudit[Label Auditing<br/>label_audit.py]
-            Prequential[Prequential Evaluation<br/>prequential_eval.py]
-            LeakageGauntlet[Leakage Gauntlet<br/>run_leakage_gauntlet.py]
-            AdjacencyAbl[Adjacency Ablation Triad<br/>adjacency_ablation.py]
-            AutoSAFE[Auto-SAFE From Ablation<br/>auto_safe_from_ablation.py]
+            ScoreAll["Full Pipeline Runner<br/>score_all.py"]
+            ScoreCustomers["Customer Scoring<br/>score_customers.py"]
+            LabelAudit["Label Auditing<br/>label_audit.py"]
+            Prequential["Prequential Evaluation<br/>prequential_eval.py"]
+            LeakageGauntlet["Leakage Gauntlet<br/>run_leakage_gauntlet.py"]
+            AdjacencyAbl["Adjacency Ablation Triad<br/>adjacency_ablation.py"]
+            AutoSAFE["Auto-SAFE From Ablation<br/>auto_safe_from_ablation.py"]
         end
     end
 
     %% Validation & Quality
     subgraph "Validation & Testing"
-        DataValidation[Data Validation<br/>data_validator.py]
-        SchemaValidation[Schema Validation<br/>schema.py]
-        HoldoutValidation[Holdout Testing<br/>validate_holdout.py]
-        DecilesValidation[Deciles Analysis<br/>deciles.py]
-        PreqReports[Prequential Reports<br/>AUC/Lift/Brier curves]
-        Permutation[Permutation Test<br/>p-value]
-        ShiftGrid[Shift-Grid {7,14,28,56}<br/>non-improving]
-        AdjGate[Adjacency Ablation Gate<br/>Full >= SAFE or SAFE policy]
-        CIGate[CI Gate<br/>ci_gate.py]
+        DataValidation["Data Validation<br/>data_validator.py"]
+        SchemaValidation["Schema Validation<br/>schema.py"]
+        HoldoutValidation["Holdout Testing<br/>validate_holdout.py"]
+        DecilesValidation["Deciles Analysis<br/>deciles.py"]
+        PreqReports["Prequential Reports<br/>AUC/Lift/Brier curves"]
+        Permutation["Permutation Test<br/>p-value"]
+        ShiftGrid["Shift-Grid {7,14,28,56}<br/>non-improving"]
+        AdjGate["Adjacency Ablation Gate<br/>Full >= SAFE or SAFE policy"]
+        CIGate["CI Gate<br/>ci_gate.py"]
     end
 
     %% Monitoring & Observability
     subgraph "Monitoring System"
-        PipelineMonitor[Pipeline Monitor<br/>pipeline_monitor.py]
-        DataCollector[Data Collector<br/>data_collector.py]
-        DriftDetection[Drift Detection<br/>drift.py]
-        AlertSystem[Alert Management]
+        PipelineMonitor["Pipeline Monitor<br/>pipeline_monitor.py"]
+        DataCollector["Data Collector<br/>data_collector.py"]
+        DriftDetection["Drift Detection<br/>drift.py"]
+        AlertSystem["Alert Management"]
     end
 
     %% User Interface
     subgraph "User Interface"
-        StreamlitApp[Streamlit Dashboard<br/>app.py]
-        FeatureGuide[Feature Guide<br/>families + config]
-        BusinessYield[Business Yield (Top-K)<br/>table + coverage]
-        PreqPanel[Prequential Viewer<br/>curves + table]
-        AblationPanel[Adjacency Ablation Viewer]
+        StreamlitApp["Streamlit Dashboard<br/>app.py"]
+        FeatureGuide["Feature Guide<br/>families + config"]
+        BusinessYield["Business Yield (Top-K)<br/>table + coverage"]
+        PreqPanel["Prequential Viewer<br/>curves + table"]
+        AblationPanel["Adjacency Ablation Viewer"]
     end
 
     %% Storage Layer
@@ -166,4 +163,3 @@ graph TB
     class PipelineMonitor,DataCollector,DriftDetection,AlertSystem monitoring
     class StreamlitApp,FeatureGuide,BusinessYield,PreqPanel,AblationPanel ui
     class SQLite,Outputs,Logs storage
-```

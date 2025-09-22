@@ -1,19 +1,16 @@
----
-title: GoSales Engine - Adjacency Ablation Triad and Auto-SAFE
----
+%% GoSales Engine - Adjacency Ablation Triad and Auto-SAFE
 
-```mermaid
 graph TB
-    Start([Adjacency Ablation Start]) --> Inputs
+    Start(["Adjacency Ablation Start"]) --> Inputs
     Inputs[Inputs: division, train_cutoff,
            holdout_cutoff, window_months] --> Variants
 
     subgraph "Train @ train_cutoff; Eval @ holdout_cutoff"
-        Variants[Build Variants]
-        Full[Full Features]
-        NoRec[No Recency + Short Windows]
-        SAFE[SAFE Policy (drop adjacency families)]
-        FitSel[Fit LR & LGBM; select by holdout AUC]
+        Variants["Build Variants"]
+        Full["Full Features"]
+        NoRec["No Recency + Short Windows"]
+        SAFE["SAFE Policy (drop adjacency families)"]
+        FitSel["Fit LR & LGBM; select by holdout AUC"]
         Compare[Compare Metrics
                 AUC, Lift@K, Brier]
     end
@@ -22,7 +19,7 @@ graph TB
     Variants --> NoRec --> FitSel
     Variants --> SAFE --> FitSel
 
-    Compare --> Delta[Delta AUC<br/>Full - SAFE]
+    Compare --> Delta["Delta AUC<br/>Full - SAFE"]
     Delta --> Artifacts[Write Artifacts
                          JSON, CSV]
 
@@ -44,5 +41,3 @@ graph TB
     class Inputs,FitSel,Compare,Delta,Artifacts,UI node
     class Variants,Full,NoRec,SAFE var
     class Gate,AutoSAFE gate
-```
-

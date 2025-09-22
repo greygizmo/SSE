@@ -1,115 +1,112 @@
----
-title: GoSales Engine - Monitoring System Flow
----
+%% GoSales Engine - Monitoring System Flow
 
-```mermaid
 graph TB
     %% Start
-    Start([Monitoring Start]) --> InitializeMonitor
+    Start(["Monitoring Start"]) --> InitializeMonitor
 
     %% Monitoring Initialization
     subgraph "Monitoring Setup"
-        InitializeMonitor[Initialize Monitoring System<br/>pipeline_monitor.py]
-        LoadMonitoringConfig[Load Monitoring Configuration<br/>config.yaml]
-        SetupMetricsCollection[Setup Metrics Collection<br/>data_collector.py]
-        InitializeAlertSystem[Initialize Alert System<br/>Threshold Definitions]
-        SetupLogging[Setup Monitoring Logging<br/>Centralized Logging]
-        ValidateMonitoringEnvironment[Validate Monitoring Environment<br/>Dependencies Check]
+        InitializeMonitor["Initialize Monitoring System<br/>pipeline_monitor.py"]
+        LoadMonitoringConfig["Load Monitoring Configuration<br/>config.yaml"]
+        SetupMetricsCollection["Setup Metrics Collection<br/>data_collector.py"]
+        InitializeAlertSystem["Initialize Alert System<br/>Threshold Definitions"]
+        SetupLogging["Setup Monitoring Logging<br/>Centralized Logging"]
+        ValidateMonitoringEnvironment["Validate Monitoring Environment<br/>Dependencies Check"]
     end
 
     %% Real-time Data Collection
     subgraph "Real-time Data Collection"
-        CollectSystemMetrics[Collect System Metrics<br/>CPU, Memory, Disk]
-        TrackPipelineProgress[Track Pipeline Progress<br/>Stage Completion]
-        MonitorDataQuality[Monitor Data Quality<br/>Type Consistency, Completeness]
-        CapturePerformanceMetrics[Capture Performance Metrics<br/>Execution Time, Throughput]
-        GatherResourceUsage[Gather Resource Usage<br/>Resource Consumption]
-        RecordErrorEvents[Record Error Events<br/>Exception Tracking]
+        CollectSystemMetrics["Collect System Metrics<br/>CPU, Memory, Disk"]
+        TrackPipelineProgress["Track Pipeline Progress<br/>Stage Completion"]
+        MonitorDataQuality["Monitor Data Quality<br/>Type Consistency, Completeness"]
+        CapturePerformanceMetrics["Capture Performance Metrics<br/>Execution Time, Throughput"]
+        GatherResourceUsage["Gather Resource Usage<br/>Resource Consumption"]
+        RecordErrorEvents["Record Error Events<br/>Exception Tracking"]
     end
 
     %% Pipeline Health Monitoring
     subgraph "Pipeline Health Monitoring"
-        MonitorETLHealth[Monitor ETL Health<br/>Data Loading Success]
-        TrackFeatureEngineering[Track Feature Engineering<br/>Feature Generation Quality]
-        MonitorModelPerformance[Monitor Model Performance<br/>Prediction Quality]
-        WatchDataDrift[Watch Data Drift<br/>Feature Distribution Changes]
-        TrackModelDrift[Track Model Drift<br/>Performance Degradation]
-        MonitorSystemAvailability[Monitor System Availability<br/>Uptime, Accessibility]
+        MonitorETLHealth["Monitor ETL Health<br/>Data Loading Success"]
+        TrackFeatureEngineering["Track Feature Engineering<br/>Feature Generation Quality"]
+        MonitorModelPerformance["Monitor Model Performance<br/>Prediction Quality"]
+        WatchDataDrift["Watch Data Drift<br/>Feature Distribution Changes"]
+        TrackModelDrift["Track Model Drift<br/>Performance Degradation"]
+        MonitorSystemAvailability["Monitor System Availability<br/>Uptime, Accessibility"]
     end
 
     %% Alert Generation & Management
     subgraph "Alert Generation & Management"
-        EvaluateAlertConditions[Evaluate Alert Conditions<br/>Threshold Comparisons]
-        GenerateCriticalAlerts[Generate Critical Alerts<br/>Immediate Action Required]
-        CreateWarningAlerts[Create Warning Alerts<br/>Attention Needed]
-        ClassifyAlertSeverity[Classify Alert Severity<br/>Critical, Warning, Info]
-        RouteAlertsToChannels[Route Alerts to Channels<br/>Email, Slack, Dashboard]
-        TrackAlertHistory[Track Alert History<br/>Alert Timeline]
+        EvaluateAlertConditions["Evaluate Alert Conditions<br/>Threshold Comparisons"]
+        GenerateCriticalAlerts["Generate Critical Alerts<br/>Immediate Action Required"]
+        CreateWarningAlerts["Create Warning Alerts<br/>Attention Needed"]
+        ClassifyAlertSeverity["Classify Alert Severity<br/>Critical, Warning, Info"]
+        RouteAlertsToChannels["Route Alerts to Channels<br/>Email, Slack, Dashboard"]
+        TrackAlertHistory["Track Alert History<br/>Alert Timeline"]
     end
 
     %% Data Lineage Tracking
     subgraph "Data Lineage Tracking"
-        TrackDataOrigins[Track Data Origins<br/>Source Identification]
-        MonitorDataTransformations[Monitor Data Transformations<br/>ETL Step Tracking]
-        RecordFeatureDerivation[Record Feature Derivation<br/>Feature Engineering Steps]
-        CaptureModelInputs[Capture Model Inputs<br/>Training Data Sources]
-        LogOutputGeneration[Log Output Generation<br/>Result Creation Process]
-        MaintainLineageMetadata[Maintain Lineage Metadata<br/>Complete Audit Trail]
+        TrackDataOrigins["Track Data Origins<br/>Source Identification"]
+        MonitorDataTransformations["Monitor Data Transformations<br/>ETL Step Tracking"]
+        RecordFeatureDerivation["Record Feature Derivation<br/>Feature Engineering Steps"]
+        CaptureModelInputs["Capture Model Inputs<br/>Training Data Sources"]
+        LogOutputGeneration["Log Output Generation<br/>Result Creation Process"]
+        MaintainLineageMetadata["Maintain Lineage Metadata<br/>Complete Audit Trail"]
     end
 
     %% Performance Analytics
     subgraph "Performance Analytics"
-        AnalyzeExecutionTimes[Analyze Execution Times<br/>Stage Duration Analysis]
-        CalculateThroughputMetrics[Calculate Throughput Metrics<br/>Records Per Second]
-        MonitorResourceEfficiency[Monitor Resource Efficiency<br/>Resource Utilization]
-        TrackScalabilityMetrics[Track Scalability Metrics<br/>Performance vs Load]
-        GeneratePerformanceReports[Generate Performance Reports<br/>Optimization Insights]
-        IdentifyBottlenecks[Identify Bottlenecks<br/>Performance Issues]
+        AnalyzeExecutionTimes["Analyze Execution Times<br/>Stage Duration Analysis"]
+        CalculateThroughputMetrics["Calculate Throughput Metrics<br/>Records Per Second"]
+        MonitorResourceEfficiency["Monitor Resource Efficiency<br/>Resource Utilization"]
+        TrackScalabilityMetrics["Track Scalability Metrics<br/>Performance vs Load"]
+        GeneratePerformanceReports["Generate Performance Reports<br/>Optimization Insights"]
+        IdentifyBottlenecks["Identify Bottlenecks<br/>Performance Issues"]
     end
 
     %% Quality Assurance Monitoring
     subgraph "Quality Assurance Monitoring"
-        MonitorDataQualityMetrics[Monitor Data Quality Metrics<br/>Completeness, Accuracy]
-        TrackTypeConsistency[Track Type Consistency<br/>Data Type Validation]
-        ValidateSchemaCompliance[Validate Schema Compliance<br/>Structure Adherence]
-        MonitorStatisticalDrift[Monitor Statistical Drift<br/>Distribution Changes]
-        CheckDataFreshness[Check Data Freshness<br/>Data Timeliness]
-        GenerateQualityReports[Generate Quality Reports<br/>Quality Assessment]
+        MonitorDataQualityMetrics["Monitor Data Quality Metrics<br/>Completeness, Accuracy"]
+        TrackTypeConsistency["Track Type Consistency<br/>Data Type Validation"]
+        ValidateSchemaCompliance["Validate Schema Compliance<br/>Structure Adherence"]
+        MonitorStatisticalDrift["Monitor Statistical Drift<br/>Distribution Changes"]
+        CheckDataFreshness["Check Data Freshness<br/>Data Timeliness"]
+        GenerateQualityReports["Generate Quality Reports<br/>Quality Assessment"]
     end
 
     %% Dashboard Integration
     subgraph "Dashboard Integration"
-        UpdateRealTimeMetrics[Update Real-time Metrics<br/>Live Dashboard Data]
-        GenerateMonitoringReports[Generate Monitoring Reports<br/>Summary Reports]
-        CreateVisualizations[Create Visualizations<br/>Charts & Graphs]
-        SetupInteractiveFeatures[Setup Interactive Features<br/>Drill-down Capabilities]
-        ConfigureAlertNotifications[Configure Alert Notifications<br/>User Preferences]
-        MaintainHistoricalData[Maintain Historical Data<br/>Trend Analysis]
+        UpdateRealTimeMetrics["Update Real-time Metrics<br/>Live Dashboard Data"]
+        GenerateMonitoringReports["Generate Monitoring Reports<br/>Summary Reports"]
+        CreateVisualizations["Create Visualizations<br/>Charts & Graphs"]
+        SetupInteractiveFeatures["Setup Interactive Features<br/>Drill-down Capabilities"]
+        ConfigureAlertNotifications["Configure Alert Notifications<br/>User Preferences"]
+        MaintainHistoricalData["Maintain Historical Data<br/>Trend Analysis"]
     end
 
     %% Automated Actions
     subgraph "Automated Actions"
-        TriggerAutoRecovery[Trigger Auto Recovery<br/>Self-healing Actions]
-        ExecuteScheduledMaintenance[Execute Scheduled Maintenance<br/>Routine Tasks]
-        ScaleResourcesAutomatically[Scale Resources Automatically<br/>Dynamic Scaling]
-        GenerateIncidentReports[Generate Incident Reports<br/>Problem Documentation]
-        InitiateBackupProcedures[Initiate Backup Procedures<br/>Data Protection]
-        CoordinateWithExternalSystems[Coordinate With External Systems<br/>System Integration]
+        TriggerAutoRecovery["Trigger Auto Recovery<br/>Self-healing Actions"]
+        ExecuteScheduledMaintenance["Execute Scheduled Maintenance<br/>Routine Tasks"]
+        ScaleResourcesAutomatically["Scale Resources Automatically<br/>Dynamic Scaling"]
+        GenerateIncidentReports["Generate Incident Reports<br/>Problem Documentation"]
+        InitiateBackupProcedures["Initiate Backup Procedures<br/>Data Protection"]
+        CoordinateWithExternalSystems["Coordinate With External Systems<br/>System Integration"]
     end
 
     %% Reporting & Analytics
     subgraph "Reporting & Analytics"
-        GenerateDailyReports[Generate Daily Reports<br/>Daily Summary]
-        CreateWeeklyAnalytics[Create Weekly Analytics<br/>Weekly Trends]
-        ProduceMonthlyInsights[Produce Monthly Insights<br/>Monthly Analysis]
-        GenerateCustomReports[Generate Custom Reports<br/>Ad-hoc Analysis]
-        ExportMonitoringData[Export Monitoring Data<br/>External Systems]
-        ArchiveHistoricalReports[Archive Historical Reports<br/>Long-term Storage]
+        GenerateDailyReports["Generate Daily Reports<br/>Daily Summary"]
+        CreateWeeklyAnalytics["Create Weekly Analytics<br/>Weekly Trends"]
+        ProduceMonthlyInsights["Produce Monthly Insights<br/>Monthly Analysis"]
+        GenerateCustomReports["Generate Custom Reports<br/>Ad-hoc Analysis"]
+        ExportMonitoringData["Export Monitoring Data<br/>External Systems"]
+        ArchiveHistoricalReports["Archive Historical Reports<br/>Long-term Storage"]
     end
 
     %% End
-    ArchiveHistoricalReports --> Success([Monitoring Active])
-    GenerateIncidentReports --> Failure([System Issues Detected])
+    ArchiveHistoricalReports --> Success(["Monitoring Active"])
+    GenerateIncidentReports --> Failure(["System Issues Detected"])
 
     %% Main Flow Connections
     Start --> InitializeMonitor
@@ -221,4 +218,3 @@ graph TB
     class GenerateDailyReports,CreateWeeklyAnalytics,ProduceMonthlyInsights,GenerateCustomReports,ExportMonitoringData,ArchiveHistoricalReports reporting
     class Success success
     class Failure failure
-```

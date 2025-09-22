@@ -1,114 +1,111 @@
----
-title: GoSales Engine - Validation & Testing Flow
----
+%% GoSales Engine - Validation & Testing Flow
 
-```mermaid
 graph TB
     %% Start
-    Start([Validation Start]) --> InitializeValidation
+    Start(["Validation Start"]) --> InitializeValidation
 
     %% Validation Initialization
     subgraph "Validation Setup"
-        InitializeValidation[Initialize Validation Framework<br/>ci_gate.py]
-        LoadValidationConfig[Load Validation Configuration<br/>config.yaml]
-        SetupTestEnvironment[Setup Test Environment<br/>Dependencies & Paths]
-        InitializeTestLogging[Initialize Test Logging<br/>logger.py]
-        ValidateTestPrerequisites[Validate Test Prerequisites<br/>Data & Models Available]
+        InitializeValidation["Initialize Validation Framework<br/>ci_gate.py"]
+        LoadValidationConfig["Load Validation Configuration<br/>config.yaml"]
+        SetupTestEnvironment["Setup Test Environment<br/>Dependencies & Paths"]
+        InitializeTestLogging["Initialize Test Logging<br/>logger.py"]
+        ValidateTestPrerequisites["Validate Test Prerequisites<br/>Data & Models Available"]
     end
 
     %% Data Quality Validation
     subgraph "Data Quality Validation"
-        ExecuteDataValidator[Execute Data Validator<br/>data_validator.py]
-        ValidateSchemaCompliance[Validate Schema Compliance<br/>Column Types & Names]
-        CheckDataCompleteness[Check Data Completeness<br/>Missing Value Analysis]
-        ValidateDataConsistency[Validate Data Consistency<br/>Cross-table Validation]
-        PerformStatisticalChecks[Perform Statistical Checks<br/>Distribution Analysis]
-        GenerateDataQualityReport[Generate Data Quality Report<br/>Quality Metrics Summary]
+        ExecuteDataValidator["Execute Data Validator<br/>data_validator.py"]
+        ValidateSchemaCompliance["Validate Schema Compliance<br/>Column Types & Names"]
+        CheckDataCompleteness["Check Data Completeness<br/>Missing Value Analysis"]
+        ValidateDataConsistency["Validate Data Consistency<br/>Cross-table Validation"]
+        PerformStatisticalChecks["Perform Statistical Checks<br/>Distribution Analysis"]
+        GenerateDataQualityReport["Generate Data Quality Report<br/>Quality Metrics Summary"]
     end
 
     %% Model Validation
     subgraph "Model Validation"
-        LoadModelForValidation[Load Model for Validation<br/>MLmodel Integration]
-        ValidateModelInputs[Validate Model Inputs<br/>Feature Matrix Compatibility]
-        ExecuteModelPredictions[Execute Model Predictions<br/>Batch Scoring]
-        ValidatePredictionOutputs[Validate Prediction Outputs<br/>Format & Range Checks]
-        CheckModelPerformance[Check Model Performance<br/>Performance Thresholds]
-        GenerateModelValidationReport[Generate Model Validation Report<br/>Model Quality Summary]
+        LoadModelForValidation["Load Model for Validation<br/>MLmodel Integration"]
+        ValidateModelInputs["Validate Model Inputs<br/>Feature Matrix Compatibility"]
+        ExecuteModelPredictions["Execute Model Predictions<br/>Batch Scoring"]
+        ValidatePredictionOutputs["Validate Prediction Outputs<br/>Format & Range Checks"]
+        CheckModelPerformance["Check Model Performance<br/>Performance Thresholds"]
+        GenerateModelValidationReport["Generate Model Validation Report<br/>Model Quality Summary"]
     end
 
     %% Holdout Validation
     subgraph "Holdout Validation"
-        ExecuteHoldoutValidation[Execute Holdout Validation<br/>validate_holdout.py]
-        LoadHoldoutDataset[Load Holdout Dataset<br/>Unseen Historical Data]
-        PrepareHoldoutFeatures[Prepare Holdout Features<br/>Feature Engineering on Holdout]
-        GenerateHoldoutPredictions[Generate Holdout Predictions<br/>Model Scoring on Holdout]
-        CalculateHoldoutMetrics[Calculate Holdout Metrics<br/>AUC, F1, Precision, Recall]
-        CompareWithBaseline[Compare With Baseline<br/>Performance vs. Random]
-        GenerateHoldoutReport[Generate Holdout Report<br/>Validation Summary]
+        ExecuteHoldoutValidation["Execute Holdout Validation<br/>validate_holdout.py"]
+        LoadHoldoutDataset["Load Holdout Dataset<br/>Unseen Historical Data"]
+        PrepareHoldoutFeatures["Prepare Holdout Features<br/>Feature Engineering on Holdout"]
+        GenerateHoldoutPredictions["Generate Holdout Predictions<br/>Model Scoring on Holdout"]
+        CalculateHoldoutMetrics["Calculate Holdout Metrics<br/>AUC, F1, Precision, Recall"]
+        CompareWithBaseline["Compare With Baseline<br/>Performance vs. Random"]
+        GenerateHoldoutReport["Generate Holdout Report<br/>Validation Summary"]
     end
 
     %% Deciles Analysis
     subgraph "Deciles Analysis"
-        ExecuteDecilesAnalysis[Execute Deciles Analysis<br/>deciles.py]
-        SortPredictionsByScore[Sort Predictions by Score<br/>Descending Order]
-        CreateDecileBuckets[Create Decile Buckets<br/>10 Equal Groups]
-        CalculateDecileMetrics[Calculate Decile Metrics<br/>Conversion Rates, Lift]
-        AnalyzeDecileTrends[Analyze Decile Trends<br/>Performance Across Deciles]
-        GenerateDecilePlots[Generate Decile Plots<br/>Visual Analysis]
-        CreateDecileReport[Create Decile Report<br/>Decile Analysis Summary]
+        ExecuteDecilesAnalysis["Execute Deciles Analysis<br/>deciles.py"]
+        SortPredictionsByScore["Sort Predictions by Score<br/>Descending Order"]
+        CreateDecileBuckets["Create Decile Buckets<br/>10 Equal Groups"]
+        CalculateDecileMetrics["Calculate Decile Metrics<br/>Conversion Rates, Lift"]
+        AnalyzeDecileTrends["Analyze Decile Trends<br/>Performance Across Deciles"]
+        GenerateDecilePlots["Generate Decile Plots<br/>Visual Analysis"]
+        CreateDecileReport["Create Decile Report<br/>Decile Analysis Summary"]
     end
 
     %% Business Logic Validation
     subgraph "Business Logic Validation"
-        ValidateBusinessRules[Validate Business Rules<br/>Domain Logic Checks]
-        CheckScoringThresholds[Check Scoring Thresholds<br/>Business Thresholds]
-        ValidateCustomerFilters[Validate Customer Filters<br/>Eligibility Criteria]
-        AssessBusinessImpact[Assess Business Impact<br/>ROI Projections]
-        GenerateBusinessReport[Generate Business Report<br/>Business Validation Summary]
+        ValidateBusinessRules["Validate Business Rules<br/>Domain Logic Checks"]
+        CheckScoringThresholds["Check Scoring Thresholds<br/>Business Thresholds"]
+        ValidateCustomerFilters["Validate Customer Filters<br/>Eligibility Criteria"]
+        AssessBusinessImpact["Assess Business Impact<br/>ROI Projections"]
+        GenerateBusinessReport["Generate Business Report<br/>Business Validation Summary"]
     end
 
     %% Statistical Validation
     subgraph "Statistical Validation"
-        PerformDistributionTests[Perform Distribution Tests<br/>KS Tests, Chi-Square]
-        CheckFeatureStability[Check Feature Stability<br/>Feature Drift Analysis]
-        ValidateModelCalibration[Validate Model Calibration<br/>Calibration Curves]
-        AssessPredictionVariance[Assess Prediction Variance<br/>Confidence Intervals]
-        GenerateStatisticalReport[Generate Statistical Report<br/>Statistical Validation Summary]
+        PerformDistributionTests["Perform Distribution Tests<br/>KS Tests, Chi-Square"]
+        CheckFeatureStability["Check Feature Stability<br/>Feature Drift Analysis"]
+        ValidateModelCalibration["Validate Model Calibration<br/>Calibration Curves"]
+        AssessPredictionVariance["Assess Prediction Variance<br/>Confidence Intervals"]
+        GenerateStatisticalReport["Generate Statistical Report<br/>Statistical Validation Summary"]
     end
 
     %% Integration Testing
     subgraph "Integration Testing"
-        TestETLIntegration[Test ETL Integration<br/>End-to-End Data Flow]
-        TestFeatureIntegration[Test Feature Integration<br/>Feature Pipeline]
-        TestModelIntegration[Test Model Integration<br/>Model Loading & Scoring]
-        TestAPIIntegration[Test API Integration<br/>Streamlit Endpoints]
-        ValidateSystemIntegration[Validate System Integration<br/>Component Interactions]
-        GenerateIntegrationReport[Generate Integration Report<br/>Integration Test Summary]
+        TestETLIntegration["Test ETL Integration<br/>End-to-End Data Flow"]
+        TestFeatureIntegration["Test Feature Integration<br/>Feature Pipeline"]
+        TestModelIntegration["Test Model Integration<br/>Model Loading & Scoring"]
+        TestAPIIntegration["Test API Integration<br/>Streamlit Endpoints"]
+        ValidateSystemIntegration["Validate System Integration<br/>Component Interactions"]
+        GenerateIntegrationReport["Generate Integration Report<br/>Integration Test Summary"]
     end
 
     %% Performance Testing
     subgraph "Performance Testing"
-        ExecutePerformanceTests[Execute Performance Tests<br/>Load & Stress Tests]
-        MeasureExecutionTime[Measure Execution Time<br/>Timing Benchmarks]
-        MonitorResourceUsage[Monitor Resource Usage<br/>CPU, Memory, Disk]
-        TestScalability[Test Scalability<br/>Large Dataset Handling]
-        ValidateConcurrency[Validate Concurrency<br/>Parallel Processing]
-        GeneratePerformanceReport[Generate Performance Report<br/>Performance Analysis]
+        ExecutePerformanceTests["Execute Performance Tests<br/>Load & Stress Tests"]
+        MeasureExecutionTime["Measure Execution Time<br/>Timing Benchmarks"]
+        MonitorResourceUsage["Monitor Resource Usage<br/>CPU, Memory, Disk"]
+        TestScalability["Test Scalability<br/>Large Dataset Handling"]
+        ValidateConcurrency["Validate Concurrency<br/>Parallel Processing"]
+        GeneratePerformanceReport["Generate Performance Report<br/>Performance Analysis"]
     end
 
     %% CI Gate Validation
     subgraph "CI Gate Validation"
-        ExecuteCIGate[Execute CI Gate<br/>ci_gate.py]
-        CheckAllValidationResults[Check All Validation Results<br/>Pass/Fail Criteria]
-        ValidateQualityThresholds[Validate Quality Thresholds<br/>Minimum Standards]
-        GenerateFinalReport[Generate Final Report<br/>Comprehensive Validation Summary]
-        DetermineBuildStatus[Determine Build Status<br/>Pass/Fail Decision]
-        SendNotification[Send Notification<br/>Stakeholder Alerts]
+        ExecuteCIGate["Execute CI Gate<br/>ci_gate.py"]
+        CheckAllValidationResults["Check All Validation Results<br/>Pass/Fail Criteria"]
+        ValidateQualityThresholds["Validate Quality Thresholds<br/>Minimum Standards"]
+        GenerateFinalReport["Generate Final Report<br/>Comprehensive Validation Summary"]
+        DetermineBuildStatus["Determine Build Status<br/>Pass/Fail Decision"]
+        SendNotification["Send Notification<br/>Stakeholder Alerts"]
     end
 
     %% End States
-    SendNotification --> Success([Validation Success])
-    GenerateFinalReport --> Failure([Validation Failed])
+    SendNotification --> Success(["Validation Success"])
+    GenerateFinalReport --> Failure(["Validation Failed"])
 
     %% Main Flow Connections
     Start --> InitializeValidation
@@ -224,10 +221,10 @@ graph TB
     class PerformDistributionTests,CheckFeatureStability,ValidateModelCalibration,AssessPredictionVariance,GenerateStatisticalReport statistical
     %% Horizon Evaluation & Adjacency Gates
     subgraph "Horizon Evaluation & Adjacency Gates"
-        PrequentialEval[Prequential Evaluation<br/>AUC/Lift/Brier by month]
-        PermutationTest[Permutation Test<br/>p-value]
-        ShiftGridTest[Shift Grid Test<br/>{7,14,28,56} days non-improving]
-        AdjacencyGate[Adjacency Ablation Gate<br/>Full >= SAFE or SAFE policy]
+        PrequentialEval["Prequential Evaluation<br/>AUC/Lift/Brier by month"]
+        PermutationTest["Permutation Test<br/>p-value"]
+        ShiftGridTest["Shift Grid Test<br/>{7,14,28,56} days non-improving"]
+        AdjacencyGate["Adjacency Ablation Gate<br/>Full >= SAFE or SAFE policy"]
     end
     class TestETLIntegration,TestFeatureIntegration,TestModelIntegration,TestAPIIntegration,ValidateSystemIntegration,GenerateIntegrationReport integration
     class ExecutePerformanceTests,MeasureExecutionTime,MonitorResourceUsage,TestScalability,ValidateConcurrency,GeneratePerformanceReport performance
@@ -235,4 +232,3 @@ graph TB
     class ExecuteCIGate,CheckAllValidationResults,ValidateQualityThresholds,GenerateFinalReport,DetermineBuildStatus,SendNotification ci
     class Success success
     class Failure failure
-```

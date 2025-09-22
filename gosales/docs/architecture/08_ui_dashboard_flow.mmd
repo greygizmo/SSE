@@ -1,151 +1,148 @@
----
-title: GoSales Engine - UI/Dashboard Flow
----
+%% GoSales Engine - UI/Dashboard Flow
 
-```mermaid
 graph TB
     %% Start
-    Start([Dashboard Start]) --> InitializeStreamlit
+    Start(["Dashboard Start"]) --> InitializeStreamlit
 
     %% Streamlit Initialization
     subgraph "Streamlit Setup"
-        InitializeStreamlit[Initialize Streamlit App<br/>app.py]
-        LoadStreamlitConfig[Load Streamlit Configuration<br/>streamlit.config]
-        SetupPageLayout[Setup Page Layout<br/>Wide Layout, Navigation]
-        InitializeSessionState[Initialize Session State<br/>User Session Management]
-        LoadApplicationAssets[Load Application Assets<br/>CSS, Images, Icons]
-        ValidateUserPermissions[Validate User Permissions<br/>Access Control]
+        InitializeStreamlit["Initialize Streamlit App<br/>app.py"]
+        LoadStreamlitConfig["Load Streamlit Configuration<br/>streamlit.config"]
+        SetupPageLayout["Setup Page Layout<br/>Wide Layout, Navigation"]
+        InitializeSessionState["Initialize Session State<br/>User Session Management"]
+        LoadApplicationAssets["Load Application Assets<br/>CSS, Images, Icons"]
+        ValidateUserPermissions["Validate User Permissions<br/>Access Control"]
     end
 
     %% Navigation & Routing
     subgraph "Navigation & Routing"
-        RenderSidebarNavigation[Render Sidebar Navigation<br/>Menu Structure]
-        HandlePageRouting[Handle Page Routing<br/>URL-based Navigation]
-        ManageTabSelection[Manage Tab Selection<br/>Active Tab State]
-        SetupPageRefresh[Setup Page Refresh<br/>Auto-refresh Intervals]
-        HandleUserInteractions[Handle User Interactions<br/>Click Events, Form Submissions]
-        MaintainNavigationHistory[Maintain Navigation History<br/>Breadcrumb Trail]
+        RenderSidebarNavigation["Render Sidebar Navigation<br/>Menu Structure"]
+        HandlePageRouting["Handle Page Routing<br/>URL-based Navigation"]
+        ManageTabSelection["Manage Tab Selection<br/>Active Tab State"]
+        SetupPageRefresh["Setup Page Refresh<br/>Auto-refresh Intervals"]
+        HandleUserInteractions["Handle User Interactions<br/>Click Events, Form Submissions"]
+        MaintainNavigationHistory["Maintain Navigation History<br/>Breadcrumb Trail"]
     end
 
     %% Overview Dashboard
     subgraph "Overview Dashboard"
-        LoadOverviewData[Load Overview Data<br/>Pipeline Summary]
-        GenerateETLMetrics[Generate ETL Metrics<br/>Data Loading Stats]
-        DisplayFeatureStats[Display Feature Statistics<br/>Feature Engineering Summary]
-        ShowModelPerformance[Show Model Performance<br/>Model Health Overview]
-        PresentKeyKPIs[Present Key KPIs<br/>Business Metrics]
-        CreateOverviewVisualizations[Create Overview Visualizations<br/>Summary Charts]
+        LoadOverviewData["Load Overview Data<br/>Pipeline Summary"]
+        GenerateETLMetrics["Generate ETL Metrics<br/>Data Loading Stats"]
+        DisplayFeatureStats["Display Feature Statistics<br/>Feature Engineering Summary"]
+        ShowModelPerformance["Show Model Performance<br/>Model Health Overview"]
+        PresentKeyKPIs["Present Key KPIs<br/>Business Metrics"]
+        CreateOverviewVisualizations["Create Overview Visualizations<br/>Summary Charts"]
     end
 
     %% Metrics Dashboard
     subgraph "Metrics Dashboard"
-        LoadModelMetrics[Load Model Metrics<br/>Performance Data]
-        GeneratePerformanceCharts[Generate Performance Charts<br/>ROC Curves, Confusion Matrix]
-        ShowCalibrationPlot[Show Calibration Plot<br/>reliability curve]
-        DisplayFeatureImportance[Display Feature Importance<br/>SHAP Values, Feature Rankings]
-        ShowBusinessYield[Show Business Yield (Top-K)<br/>table + coverage]
-        ShowModelComparison[Show Model Comparison<br/>Cross-model Analysis]
-        CreateMetricsVisualizations[Create Metrics Visualizations<br/>Interactive Plots]
-        ExportMetricsReports[Export Metrics Reports<br/>Downloadable Reports]
+        LoadModelMetrics["Load Model Metrics<br/>Performance Data"]
+        GeneratePerformanceCharts["Generate Performance Charts<br/>ROC Curves, Confusion Matrix"]
+        ShowCalibrationPlot["Show Calibration Plot<br/>reliability curve"]
+        DisplayFeatureImportance["Display Feature Importance<br/>SHAP Values, Feature Rankings"]
+        ShowBusinessYield["Show Business Yield (Top-K)<br/>table + coverage"]
+        ShowModelComparison["Show Model Comparison<br/>Cross-model Analysis"]
+        CreateMetricsVisualizations["Create Metrics Visualizations<br/>Interactive Plots"]
+        ExportMetricsReports["Export Metrics Reports<br/>Downloadable Reports"]
     end
 
     %% Explainability Dashboard
     subgraph "Explainability Dashboard"
-        LoadSHAPData[Load SHAP Data<br/>Explanation Values]
-        GenerateSHAPPlots[Generate SHAP Plots<br/>Waterfall, Summary Plots]
-        CreateFeatureAttribution[Create Feature Attribution<br/>Individual Predictions]
-        ShowGlobalExplanations[Show Global Explanations<br/>Feature Impact Analysis]
-        DisplayModelInsights[Display Model Insights<br/>Business Interpretations]
-        ExportExplanationReports[Export Explanation Reports<br/>SHAP Reports]
+        LoadSHAPData["Load SHAP Data<br/>Explanation Values"]
+        GenerateSHAPPlots["Generate SHAP Plots<br/>Waterfall, Summary Plots"]
+        CreateFeatureAttribution["Create Feature Attribution<br/>Individual Predictions"]
+        ShowGlobalExplanations["Show Global Explanations<br/>Feature Impact Analysis"]
+        DisplayModelInsights["Display Model Insights<br/>Business Interpretations"]
+        ExportExplanationReports["Export Explanation Reports<br/>SHAP Reports"]
     end
 
     %% Whitespace Dashboard
     subgraph "Whitespace Dashboard"
-        LoadWhitespaceData[Load Whitespace Data<br/>Opportunity Analysis]
-        GenerateOpportunityHeatmap[Generate Opportunity Heatmap<br/>Customer-Division Matrix]
-        DisplayMarketPotential[Display Market Potential<br/>Revenue Opportunities]
-        ShowPrioritizedRecommendations[Show Prioritized Recommendations<br/>Actionable Insights]
-        CreateWhitespaceVisualizations[Create Whitespace Visualizations<br/>Opportunity Charts]
-        ExportWhitespaceReports[Export Whitespace Reports<br/>Opportunity Analysis]
+        LoadWhitespaceData["Load Whitespace Data<br/>Opportunity Analysis"]
+        GenerateOpportunityHeatmap["Generate Opportunity Heatmap<br/>Customer-Division Matrix"]
+        DisplayMarketPotential["Display Market Potential<br/>Revenue Opportunities"]
+        ShowPrioritizedRecommendations["Show Prioritized Recommendations<br/>Actionable Insights"]
+        CreateWhitespaceVisualizations["Create Whitespace Visualizations<br/>Opportunity Charts"]
+        ExportWhitespaceReports["Export Whitespace Reports<br/>Opportunity Analysis"]
     end
 
     %% Validation Dashboard
     subgraph "Validation Dashboard"
-        LoadValidationResults[Load Validation Results<br/>Test Results Data]
-        DisplayHoldoutMetrics[Display Holdout Metrics<br/>Unseen Data Performance]
-        ShowDecileAnalysis[Show Decile Analysis<br/>Performance Distribution]
-        PresentDataQualityMetrics[Present Data Quality Metrics<br/>Quality Scores]
-        GenerateValidationVisualizations[Generate Validation Visualizations<br/>Validation Charts]
-        ExportValidationReports[Export Validation Reports<br/>Validation Summary]
+        LoadValidationResults["Load Validation Results<br/>Test Results Data"]
+        DisplayHoldoutMetrics["Display Holdout Metrics<br/>Unseen Data Performance"]
+        ShowDecileAnalysis["Show Decile Analysis<br/>Performance Distribution"]
+        PresentDataQualityMetrics["Present Data Quality Metrics<br/>Quality Scores"]
+        GenerateValidationVisualizations["Generate Validation Visualizations<br/>Validation Charts"]
+        ExportValidationReports["Export Validation Reports<br/>Validation Summary"]
     end
 
     %% Runs Dashboard
     subgraph "Runs Dashboard"
-        LoadPipelineRuns[Load Pipeline Runs<br/>Execution History]
-        DisplayRunTimeline[Display Run Timeline<br/>Execution Timeline]
-        ShowRunDetails[Show Run Details<br/>Individual Run Analysis]
-        GeneratePerformanceTrends[Generate Performance Trends<br/>Historical Performance]
-        CreateRunVisualizations[Create Run Visualizations<br/>Execution Charts]
-        ExportRunReports[Export Run Reports<br/>Execution History]
+        LoadPipelineRuns["Load Pipeline Runs<br/>Execution History"]
+        DisplayRunTimeline["Display Run Timeline<br/>Execution Timeline"]
+        ShowRunDetails["Show Run Details<br/>Individual Run Analysis"]
+        GeneratePerformanceTrends["Generate Performance Trends<br/>Historical Performance"]
+        CreateRunVisualizations["Create Run Visualizations<br/>Execution Charts"]
+        ExportRunReports["Export Run Reports<br/>Execution History"]
     end
 
     %% Quality Assurance Dashboard
     subgraph "Quality Assurance Dashboard"
-        LoadLeakageData[Load Leakage Test Data<br/>run_leakage_gauntlet.py]
-        ExecuteLeakageGauntlet[Execute Leakage Gauntlet<br/>Static Scan, Feature Audit]
-        RunAblationTests[Run Ablation Tests<br/>Assets-Off, Adjacency Triad]
-        ShowAdjacencyAbl[Show Adjacency Ablation Results<br/>triad table + Delta AUC]
-        ShowPreqPanel[Show Prequential Panel<br/>curves + table]
-        GenerateDriftSnapshots[Generate Drift Snapshots<br/>drift_snapshots.py]
-        DisplayQAMetrics[Display QA Metrics<br/>Test Results, Performance]
-        CreateLeakageVisualizations[Create Leakage Visualizations<br/>Quality Charts]
-        ExportQAReports[Export QA Reports<br/>Comprehensive Reports]
+        LoadLeakageData["Load Leakage Test Data<br/>run_leakage_gauntlet.py"]
+        ExecuteLeakageGauntlet["Execute Leakage Gauntlet<br/>Static Scan, Feature Audit"]
+        RunAblationTests["Run Ablation Tests<br/>Assets-Off, Adjacency Triad"]
+        ShowAdjacencyAbl["Show Adjacency Ablation Results<br/>triad table + Delta AUC"]
+        ShowPreqPanel["Show Prequential Panel<br/>curves + table"]
+        GenerateDriftSnapshots["Generate Drift Snapshots<br/>drift_snapshots.py"]
+        DisplayQAMetrics["Display QA Metrics<br/>Test Results, Performance"]
+        CreateLeakageVisualizations["Create Leakage Visualizations<br/>Quality Charts"]
+        ExportQAReports["Export QA Reports<br/>Comprehensive Reports"]
     end
 
     %% Monitoring Dashboard
     subgraph "Monitoring Dashboard"
-        LoadMonitoringData[Load Monitoring Data<br/>data_collector.py]
-        DisplayPipelineHealth[Display Pipeline Health<br/>Real-time Status]
-        ShowDataQualityMonitoring[Show Data Quality Monitoring<br/>Type Consistency, Completeness]
-        PresentPerformanceMetrics[Present Performance Metrics<br/>Throughput, Latency]
-        GenerateAlertDashboard[Generate Alert Dashboard<br/>Active Alerts & History]
-        CreateDataLineageView[Create Data Lineage View<br/>Data Flow Visualization]
-        ExportMonitoringReports[Export Monitoring Reports<br/>System Health Reports]
+        LoadMonitoringData["Load Monitoring Data<br/>data_collector.py"]
+        DisplayPipelineHealth["Display Pipeline Health<br/>Real-time Status"]
+        ShowDataQualityMonitoring["Show Data Quality Monitoring<br/>Type Consistency, Completeness"]
+        PresentPerformanceMetrics["Present Performance Metrics<br/>Throughput, Latency"]
+        GenerateAlertDashboard["Generate Alert Dashboard<br/>Active Alerts & History"]
+        CreateDataLineageView["Create Data Lineage View<br/>Data Flow Visualization"]
+        ExportMonitoringReports["Export Monitoring Reports<br/>System Health Reports"]
     end
 
     %% Data Management
     subgraph "Data Management"
-        HandleDataCaching[Handle Data Caching<br/>Performance Optimization]
-        ManageSessionState[Manage Session State<br/>User-specific Data]
-        OptimizeDataLoading[Optimize Data Loading<br/>Lazy Loading, Pagination]
-        ImplementDataFiltering[Implement Data Filtering<br/>Search & Filter Capabilities]
-        ManageDataExports[Manage Data Exports<br/>Multiple Format Support]
-        HandleDataUpdates[Handle Data Updates<br/>Real-time Refresh]
+        HandleDataCaching["Handle Data Caching<br/>Performance Optimization"]
+        ManageSessionState["Manage Session State<br/>User-specific Data"]
+        OptimizeDataLoading["Optimize Data Loading<br/>Lazy Loading, Pagination"]
+        ImplementDataFiltering["Implement Data Filtering<br/>Search & Filter Capabilities"]
+        ManageDataExports["Manage Data Exports<br/>Multiple Format Support"]
+        HandleDataUpdates["Handle Data Updates<br/>Real-time Refresh"]
     end
 
     %% User Experience
     subgraph "User Experience"
-        ImplementLoadingStates[Implement Loading States<br/>Progress Indicators]
-        HandleErrorStates[Handle Error States<br/>Error Messages & Recovery]
-        ProvideInteractiveFeatures[Provide Interactive Features<br/>Drill-down, Tooltips]
-        EnsureResponsiveDesign[Ensure Responsive Design<br/>Mobile Compatibility]
-        SetupUserPreferences[Setup User Preferences<br/>Personalization Options]
-        ProvideHelpDocumentation[Provide Help Documentation<br/>Tooltips & Guides]
+        ImplementLoadingStates["Implement Loading States<br/>Progress Indicators"]
+        HandleErrorStates["Handle Error States<br/>Error Messages & Recovery"]
+        ProvideInteractiveFeatures["Provide Interactive Features<br/>Drill-down, Tooltips"]
+        EnsureResponsiveDesign["Ensure Responsive Design<br/>Mobile Compatibility"]
+        SetupUserPreferences["Setup User Preferences<br/>Personalization Options"]
+        ProvideHelpDocumentation["Provide Help Documentation<br/>Tooltips & Guides"]
     end
 
     %% Integration Layer
     subgraph "Integration Layer"
-        ConnectToDatabase[Connect to Database<br/>db.py Integration]
-        InterfaceWithModels[Interface With Models<br/>Model Loading]
-        AccessFileSystem[Access File System<br/>paths.py Integration]
-        HandleAPIRequests[Handle API Requests<br/>External Service Calls]
-        ManageConfiguration[Manage Configuration<br/>config.py Integration]
-        CoordinateWithMonitoring[Coordinate With Monitoring<br/>pipeline_monitor.py]
+        ConnectToDatabase["Connect to Database<br/>db.py Integration"]
+        InterfaceWithModels["Interface With Models<br/>Model Loading"]
+        AccessFileSystem["Access File System<br/>paths.py Integration"]
+        HandleAPIRequests["Handle API Requests<br/>External Service Calls"]
+        ManageConfiguration["Manage Configuration<br/>config.py Integration"]
+        CoordinateWithMonitoring["Coordinate With Monitoring<br/>pipeline_monitor.py"]
     end
 
     %% End
-    ProvideHelpDocumentation --> Success([Dashboard Active])
-    ExportMonitoringReports --> Failure([Dashboard Issues])
+    ProvideHelpDocumentation --> Success(["Dashboard Active"])
+    ExportMonitoringReports --> Failure(["Dashboard Issues"])
 
     %% Main Flow Connections
     Start --> InitializeStreamlit
@@ -289,4 +286,3 @@ graph TB
     class ConnectToDatabase,InterfaceWithModels,AccessFileSystem,HandleAPIRequests,ManageConfiguration,CoordinateWithMonitoring integration
     class Success success
     class Failure failure
-```

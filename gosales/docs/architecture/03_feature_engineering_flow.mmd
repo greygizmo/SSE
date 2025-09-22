@@ -1,104 +1,101 @@
----
-title: GoSales Engine - Feature Engineering Flow
----
+%% GoSales Engine - Feature Engineering Flow
 
-```mermaid
 graph TB
     %% Start
-    Start([Feature Engineering Start]) --> InitializeMonitor
+    Start(["Feature Engineering Start"]) --> InitializeMonitor
 
     %% Initialization Phase
     subgraph "Initialization & Setup"
-        InitializeMonitor[Initialize Pipeline Monitor<br/>pipeline_monitor.py]
-        LoadConfiguration[Load Feature Configuration<br/>config.py]
-        SetupDatabase[Setup Database Connections<br/>db.py]
-        ValidateTypeSystem[Validate Type System<br/>types.py]
+        InitializeMonitor["Initialize Pipeline Monitor<br/>pipeline_monitor.py"]
+        LoadConfiguration["Load Feature Configuration<br/>config.py"]
+        SetupDatabase["Setup Database Connections<br/>db.py"]
+        ValidateTypeSystem["Validate Type System<br/>types.py"]
     end
 
     %% Data Loading Phase
     subgraph "Data Loading & Preparation"
-        LoadTransactions[Load Transaction Data<br/>fact_transactions]
-        LoadCustomers[Load Customer Data<br/>dim_customer]
-        LoadProducts[Load Product Data<br/>dim_product]
-        LoadRawSalesLog[Load Raw Sales Data<br/>fact_sales_log_raw]
-        EnforceCustomerIdTypes[Enforce customer_id Types<br/>TypeEnforcer]
+        LoadTransactions["Load Transaction Data<br/>fact_transactions"]
+        LoadCustomers["Load Customer Data<br/>dim_customer"]
+        LoadProducts["Load Product Data<br/>dim_product"]
+        LoadRawSalesLog["Load Raw Sales Data<br/>fact_sales_log_raw"]
+        EnforceCustomerIdTypes["Enforce customer_id Types<br/>TypeEnforcer"]
     end
 
     %% Customer Feature Engineering
     subgraph "Customer-Level Features"
-        AggregateTransactionHistory[Aggregate Transaction History<br/>Sum, Count, Avg by Customer]
-        CalculateRecency[Calculate Recency Metrics<br/>Days Since Last Purchase]
-        ComputeMonetaryValue[Compute Monetary Value<br/>Total Spend, Avg Order Value]
-        AnalyzePurchaseFrequency[Analyze Purchase Frequency<br/>Orders per Month]
-        DeriveCustomerLifetime[Derive Customer Lifetime<br/>First Purchase to Now]
+        AggregateTransactionHistory["Aggregate Transaction History<br/>Sum, Count, Avg by Customer"]
+        CalculateRecency["Calculate Recency Metrics<br/>Days Since Last Purchase"]
+        ComputeMonetaryValue["Compute Monetary Value<br/>Total Spend, Avg Order Value"]
+        AnalyzePurchaseFrequency["Analyze Purchase Frequency<br/>Orders per Month"]
+        DeriveCustomerLifetime["Derive Customer Lifetime<br/>First Purchase to Now"]
     end
 
     %% Product Feature Engineering
     subgraph "Product-Level Features"
-        AnalyzeProductPopularity[Analyze Product Popularity<br/>Purchase Frequency by Product]
-        CalculateProductMargins[Calculate Product Margins<br/>Profitability Metrics]
-        TrackProductTrends[Track Product Trends<br/>Time-based Analysis]
-        ComputeProductAffinity[Compute Product Affinity<br/>Cross-selling Opportunities]
+        AnalyzeProductPopularity["Analyze Product Popularity<br/>Purchase Frequency by Product"]
+        CalculateProductMargins["Calculate Product Margins<br/>Profitability Metrics"]
+        TrackProductTrends["Track Product Trends<br/>Time-based Analysis"]
+        ComputeProductAffinity["Compute Product Affinity<br/>Cross-selling Opportunities"]
     end
 
     %% Temporal Feature Engineering
     subgraph "Temporal Features"
-        CreateTimeWindows[Create Time Windows<br/>Rolling Windows: 30/60/90/180/365 days]
-        CalculateRollingMetrics[Calculate Rolling Metrics<br/>Moving Averages, Trends]
-        GenerateSeasonalFeatures[Generate Seasonal Features<br/>Monthly/Quarterly Patterns]
-        ComputeGrowthRates[Compute Growth Rates<br/>YoY, MoM Changes]
-        BuildAdvancedTemporal[Build Advanced Temporal Features<br/>Advanced Analytics]
+        CreateTimeWindows["Create Time Windows<br/>Rolling Windows: 30/60/90/180/365 days"]
+        CalculateRollingMetrics["Calculate Rolling Metrics<br/>Moving Averages, Trends"]
+        GenerateSeasonalFeatures["Generate Seasonal Features<br/>Monthly/Quarterly Patterns"]
+        ComputeGrowthRates["Compute Growth Rates<br/>YoY, MoM Changes"]
+        BuildAdvancedTemporal["Build Advanced Temporal Features<br/>Advanced Analytics"]
     end
 
     %% Collaborative Filtering Features
     subgraph "ALS Embedding Features"
-        PrepareALSInput[Prepare ALS Input Data<br/>Customer-Product Matrix]
-        ConfigureALSModel[Configure ALS Model<br/>Hyperparameters, Factors]
-        TrainALSModel[Train ALS Model<br/>Matrix Factorization]
-        ExtractCustomerEmbeddings[Extract Customer Embeddings<br/>Latent Factors]
-        ExtractProductEmbeddings[Extract Product Embeddings<br/>Latent Factors]
-        ComputeSimilarityScores[Compute Similarity Scores<br/>Cosine Similarity]
+        PrepareALSInput["Prepare ALS Input Data<br/>Customer-Product Matrix"]
+        ConfigureALSModel["Configure ALS Model<br/>Hyperparameters, Factors"]
+        TrainALSModel["Train ALS Model<br/>Matrix Factorization"]
+        ExtractCustomerEmbeddings["Extract Customer Embeddings<br/>Latent Factors"]
+        ExtractProductEmbeddings["Extract Product Embeddings<br/>Latent Factors"]
+        ComputeSimilarityScores["Compute Similarity Scores<br/>Cosine Similarity"]
     end
 
     %% External Feature Integration
     subgraph "External Feature Integration"
-        LoadIndustryData[Load Industry Classification Data<br/>External Data Sources]
-        MapCustomerIndustries[Map Customer Industries<br/>Industry Classification]
-        CalculateIndustryMetrics[Calculate Industry Metrics<br/>Industry Averages]
-        IntegrateMarketData[Integrate Market Data<br/>Market Trends]
-        ValidateIndustryMapping[Validate Industry Mapping<br/>Data Quality Checks]
+        LoadIndustryData["Load Industry Classification Data<br/>External Data Sources"]
+        MapCustomerIndustries["Map Customer Industries<br/>Industry Classification"]
+        CalculateIndustryMetrics["Calculate Industry Metrics<br/>Industry Averages"]
+        IntegrateMarketData["Integrate Market Data<br/>Market Trends"]
+        ValidateIndustryMapping["Validate Industry Mapping<br/>Data Quality Checks"]
     end
 
     %% Branch/Rep Feature Engineering
     subgraph "Branch & Rep Features"
-        ExtractBranchInfo[Extract Branch Information<br/>From fact_sales_log_raw]
-        ExtractRepInfo[Extract Rep Information<br/>From fact_sales_log_raw]
-        AggregateBranchPerformance[Aggregate Branch Performance<br/>Sales by Branch]
-        AnalyzeRepPerformance[Analyze Rep Performance<br/>Sales by Rep]
-        CalculateBranchRepMetrics[Calculate Branch/Rep Metrics<br/>Performance Indicators]
+        ExtractBranchInfo["Extract Branch Information<br/>From fact_sales_log_raw"]
+        ExtractRepInfo["Extract Rep Information<br/>From fact_sales_log_raw"]
+        AggregateBranchPerformance["Aggregate Branch Performance<br/>Sales by Branch"]
+        AnalyzeRepPerformance["Analyze Rep Performance<br/>Sales by Rep"]
+        CalculateBranchRepMetrics["Calculate Branch/Rep Metrics<br/>Performance Indicators"]
     end
 
     %% Feature Validation & Quality
     subgraph "Feature Validation & Quality"
-        ValidateFeatureConsistency[Validate Feature Consistency<br/>Type & Value Checks]
-        CheckFeatureCompleteness[Check Feature Completeness<br/>Missing Value Analysis]
-        DetectFeatureDrift[Detect Feature Drift<br/>Distribution Changes]
-        ComputeFeatureImportance[Compute Feature Importance<br/>Preliminary Analysis]
-        GenerateFeatureReports[Generate Feature Reports<br/>Quality Metrics]
+        ValidateFeatureConsistency["Validate Feature Consistency<br/>Type & Value Checks"]
+        CheckFeatureCompleteness["Check Feature Completeness<br/>Missing Value Analysis"]
+        DetectFeatureDrift["Detect Feature Drift<br/>Distribution Changes"]
+        ComputeFeatureImportance["Compute Feature Importance<br/>Preliminary Analysis"]
+        GenerateFeatureReports["Generate Feature Reports<br/>Quality Metrics"]
     end
 
     %% Feature Storage & Caching
     subgraph "Feature Storage & Output"
-        CacheFeatureMatrix[Cache Feature Matrix<br/>cache.py]
-        SaveFeatureMetadata[Save Feature Metadata<br/>Feature Descriptions]
-        ExportFeatureMatrix[Export Feature Matrix<br/>CSV/Parquet]
-        UpdateFeatureRegistry[Update Feature Registry<br/>Feature Catalog]
-        ValidateFeatureOutput[Validate Feature Output<br/>Final Quality Check]
+        CacheFeatureMatrix["Cache Feature Matrix<br/>cache.py"]
+        SaveFeatureMetadata["Save Feature Metadata<br/>Feature Descriptions"]
+        ExportFeatureMatrix["Export Feature Matrix<br/>CSV/Parquet"]
+        UpdateFeatureRegistry["Update Feature Registry<br/>Feature Catalog"]
+        ValidateFeatureOutput["Validate Feature Output<br/>Final Quality Check"]
     end
 
     %% End
-    ValidateFeatureOutput --> Success([Feature Engineering Success])
-    GenerateFeatureReports --> Failure([Feature Engineering Failed])
+    ValidateFeatureOutput --> Success(["Feature Engineering Success"])
+    GenerateFeatureReports --> Failure(["Feature Engineering Failed"])
 
     %% Main Flow Connections
     Start --> InitializeMonitor
@@ -203,4 +200,3 @@ graph TB
     class CacheFeatureMatrix,SaveFeatureMetadata,ExportFeatureMatrix,UpdateFeatureRegistry,ValidateFeatureOutput storage
     class Success success
     class Failure failure
-```

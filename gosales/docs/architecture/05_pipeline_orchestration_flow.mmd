@@ -1,111 +1,108 @@
----
-title: GoSales Engine - Pipeline Orchestration Flow
----
+%% GoSales Engine - Pipeline Orchestration Flow
 
-```mermaid
 graph TB
     %% Start
-    Start([Pipeline Start]) --> InitializeOrchestrator
+    Start(["Pipeline Start"]) --> InitializeOrchestrator
 
     %% Orchestrator Initialization
     subgraph "Orchestrator Setup"
-        InitializeOrchestrator[Initialize Pipeline Orchestrator<br/>score_all.py]
-        LoadPipelineConfig[Load Pipeline Configuration<br/>config.yaml]
-        SetupLogging[Setup Centralized Logging<br/>logger.py]
-        InitializeMonitoring[Initialize Pipeline Monitor<br/>pipeline_monitor.py]
-        ValidateEnvironment[Validate Runtime Environment<br/>Dependencies Check]
+        InitializeOrchestrator["Initialize Pipeline Orchestrator<br/>score_all.py"]
+        LoadPipelineConfig["Load Pipeline Configuration<br/>config.yaml"]
+        SetupLogging["Setup Centralized Logging<br/>logger.py"]
+        InitializeMonitoring["Initialize Pipeline Monitor<br/>pipeline_monitor.py"]
+        ValidateEnvironment["Validate Runtime Environment<br/>Dependencies Check"]
     end
 
     %% Data Pipeline Phase
     subgraph "Data Pipeline Execution"
-        ExecuteETLPhase[Execute ETL Phase<br/>build_star.py]
-        ExecuteFeaturePhase[Execute Feature Engineering Phase<br/>engine.py]
-        ValidateDataQuality[Validate Data Quality<br/>data_validator.py]
-        TrackDataLineage[Track Data Lineage<br/>pipeline_monitor.py]
+        ExecuteETLPhase["Execute ETL Phase<br/>build_star.py"]
+        ExecuteFeaturePhase["Execute Feature Engineering Phase<br/>engine.py"]
+        ValidateDataQuality["Validate Data Quality<br/>data_validator.py"]
+        TrackDataLineage["Track Data Lineage<br/>pipeline_monitor.py"]
     end
 
     %% Model Selection Phase
     subgraph "Model Selection & Loading"
-        DiscoverAvailableModels[Discover Available Models<br/>Model Registry]
-        LoadDivisionModels[Load Division-Specific Models<br/>model.pkl files]
-        ValidateModelIntegrity[Validate Model Integrity<br/>MLmodel files]
-        SetupModelCaching[Setup Model Caching<br/>Performance Optimization]
-        InitializeModelMetrics[Initialize Model Metrics Collection<br/>metrics.py]
+        DiscoverAvailableModels["Discover Available Models<br/>Model Registry"]
+        LoadDivisionModels["Load Division-Specific Models<br/>model.pkl files"]
+        ValidateModelIntegrity["Validate Model Integrity<br/>MLmodel files"]
+        SetupModelCaching["Setup Model Caching<br/>Performance Optimization"]
+        InitializeModelMetrics["Initialize Model Metrics Collection<br/>metrics.py"]
     end
 
     %% Customer Scoring Phase
     subgraph "Customer Scoring Execution"
-        PrepareScoringData[Prepare Scoring Data<br/>Feature Matrix]
-        ExecuteDivisionScoring[Execute Division-Specific Scoring<br/>Parallel Processing]
-        AggregateScoringResults[Aggregate Scoring Results<br/>Across Divisions]
-        ApplyBusinessRules[Apply Business Rules<br/>Eligibility Filters]
-        CalculateFinalScores[Calculate Final Scores<br/>Weighted Averages]
+        PrepareScoringData["Prepare Scoring Data<br/>Feature Matrix"]
+        ExecuteDivisionScoring["Execute Division-Specific Scoring<br/>Parallel Processing"]
+        AggregateScoringResults["Aggregate Scoring Results<br/>Across Divisions"]
+        ApplyBusinessRules["Apply Business Rules<br/>Eligibility Filters"]
+        CalculateFinalScores["Calculate Final Scores<br/>Weighted Averages"]
     end
 
     %% Whitespace Analysis Phase
     subgraph "Whitespace Analysis"
-        IdentifyUnscoredCustomers[Identify Unscored Customers<br/>Gap Analysis]
-        AnalyzeMarketOpportunities[Analyze Market Opportunities<br/>Opportunity Sizing]
-        GenerateWhitespaceRecommendations[Generate Whitespace Recommendations<br/>Prioritized List]
-        CalculatePotentialValue[Calculate Potential Value<br/>Revenue Impact]
-        CreateOpportunityMatrix[Create Opportunity Matrix<br/>Customer-Division Mapping]
+        IdentifyUnscoredCustomers["Identify Unscored Customers<br/>Gap Analysis"]
+        AnalyzeMarketOpportunities["Analyze Market Opportunities<br/>Opportunity Sizing"]
+        GenerateWhitespaceRecommendations["Generate Whitespace Recommendations<br/>Prioritized List"]
+        CalculatePotentialValue["Calculate Potential Value<br/>Revenue Impact"]
+        CreateOpportunityMatrix["Create Opportunity Matrix<br/>Customer-Division Mapping"]
     end
 
     %% Results Processing Phase
     subgraph "Results Processing & Storage"
-        FormatOutputResults[Format Output Results<br/>CSV/JSON Format]
-        GeneratePerformanceReports[Generate Performance Reports<br/>Metrics Summary]
-        SaveModelPredictions[Save Model Predictions<br/>Detailed Outputs]
-        UpdateOutputMetadata[Update Output Metadata<br/>Timestamps, Versions]
-        ArchivePreviousResults[Archive Previous Results<br/>Historical Tracking]
+        FormatOutputResults["Format Output Results<br/>CSV/JSON Format"]
+        GeneratePerformanceReports["Generate Performance Reports<br/>Metrics Summary"]
+        SaveModelPredictions["Save Model Predictions<br/>Detailed Outputs"]
+        UpdateOutputMetadata["Update Output Metadata<br/>Timestamps, Versions"]
+        ArchivePreviousResults["Archive Previous Results<br/>Historical Tracking"]
     end
 
     %% Quality Assurance Phase
     subgraph "Quality Assurance"
-        ValidateOutputSchema[Validate Output Schema<br/>schema.py]
-        PerformStatisticalValidation[Perform Statistical Validation<br/>Distribution Checks]
-        CheckBusinessLogic[Check Business Logic<br/>Rule Validation]
-        GenerateQualityReport[Generate Quality Report<br/>QA Summary]
-        FlagAnomalies[Flag Anomalies & Issues<br/>Alert Generation]
+        ValidateOutputSchema["Validate Output Schema<br/>schema.py"]
+        PerformStatisticalValidation["Perform Statistical Validation<br/>Distribution Checks"]
+        CheckBusinessLogic["Check Business Logic<br/>Rule Validation"]
+        GenerateQualityReport["Generate Quality Report<br/>QA Summary"]
+        FlagAnomalies["Flag Anomalies & Issues<br/>Alert Generation"]
     end
 
     %% Horizon & Adjacency Analysis
     subgraph "Horizon & Adjacency Analysis"
-        RunPrequential[Run Prequential Evaluation<br/>prequential_eval.py]
-        RunAdjacencyAbl[Run Adjacency Ablation Triad<br/>adjacency_ablation.py]
-        ApplyAutoSAFE[Apply Auto-SAFE Policy<br/>auto_safe_from_ablation.py]
+        RunPrequential["Run Prequential Evaluation<br/>prequential_eval.py"]
+        RunAdjacencyAbl["Run Adjacency Ablation Triad<br/>adjacency_ablation.py"]
+        ApplyAutoSAFE["Apply Auto-SAFE Policy<br/>auto_safe_from_ablation.py"]
     end
 
     %% Customer-Specific Scoring Phase
     subgraph "Customer-Specific Processing"
-        LoadCustomerData[Load Customer Data<br/>Individual Customer]
-        GenerateCustomerFeatures[Generate Customer Features<br/>Real-time Feature Creation]
-        ExecuteCustomerScoring[Execute Customer Scoring<br/>score_customers.py]
-        ApplyCustomerFilters[Apply Customer Filters<br/>Business Rules]
-        FormatCustomerOutput[Format Customer Output<br/>Individual Report]
+        LoadCustomerData["Load Customer Data<br/>Individual Customer"]
+        GenerateCustomerFeatures["Generate Customer Features<br/>Real-time Feature Creation"]
+        ExecuteCustomerScoring["Execute Customer Scoring<br/>score_customers.py"]
+        ApplyCustomerFilters["Apply Customer Filters<br/>Business Rules"]
+        FormatCustomerOutput["Format Customer Output<br/>Individual Report"]
     end
 
     %% Label Audit Phase
     subgraph "Label Audit & Validation"
-        ExecuteLabelAudit[Execute Label Audit<br/>label_audit.py]
-        ValidateLabelConsistency[Validate Label Consistency<br/>Historical Comparison]
-        CheckLabelDrift[Check Label Drift<br/>Distribution Changes]
-        GenerateAuditReport[Generate Audit Report<br/>Label Quality Summary]
-        UpdateLabelMetadata[Update Label Metadata<br/>Audit Trail]
+        ExecuteLabelAudit["Execute Label Audit<br/>label_audit.py"]
+        ValidateLabelConsistency["Validate Label Consistency<br/>Historical Comparison"]
+        CheckLabelDrift["Check Label Drift<br/>Distribution Changes"]
+        GenerateAuditReport["Generate Audit Report<br/>Label Quality Summary"]
+        UpdateLabelMetadata["Update Label Metadata<br/>Audit Trail"]
     end
 
     %% Monitoring & Reporting Phase
     subgraph "Monitoring & Reporting"
-        CollectPipelineMetrics[Collect Pipeline Metrics<br/>data_collector.py]
-        GeneratePipelineReport[Generate Pipeline Report<br/>Execution Summary]
-        SendStatusNotifications[Send Status Notifications<br/>Email/Slack Alerts]
-        UpdateDashboardData[Update Dashboard Data<br/>Real-time Metrics]
-        LogPipelineExecution[Log Pipeline Execution<br/>Complete Audit Trail]
+        CollectPipelineMetrics["Collect Pipeline Metrics<br/>data_collector.py"]
+        GeneratePipelineReport["Generate Pipeline Report<br/>Execution Summary"]
+        SendStatusNotifications["Send Status Notifications<br/>Email/Slack Alerts"]
+        UpdateDashboardData["Update Dashboard Data<br/>Real-time Metrics"]
+        LogPipelineExecution["Log Pipeline Execution<br/>Complete Audit Trail"]
     end
 
     %% End States
-    LogPipelineExecution --> Success([Pipeline Success])
-    GenerateQualityReport --> Failure([Pipeline Failed])
+    LogPipelineExecution --> Success(["Pipeline Success"])
+    GenerateQualityReport --> Failure(["Pipeline Failed"])
 
     %% Main Flow Connections
     Start --> InitializeOrchestrator
@@ -211,4 +208,3 @@ graph TB
     class CollectPipelineMetrics,GeneratePipelineReport,SendStatusNotifications,UpdateDashboardData,LogPipelineExecution monitoring
     class Success success
     class Failure failure
-```

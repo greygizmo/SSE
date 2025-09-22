@@ -179,6 +179,50 @@ graph TD
 
 ---
 
+### Leakage Gauntlet (Batch)
+
+Run leakage checks across all divisions at a cutoff and emit a cross-division summary JSON.
+
+```powershell
+$env:PYTHONPATH = "$PWD"
+python -m gosales.pipeline.run_leakage_all --cutoff 2024-06-30 --window-months 6
+# Optional: include shift-grid summaries (non-gating info)
+python -m gosales.pipeline.run_leakage_all --cutoff 2024-06-30 --window-months 6 --run-shift-grid
+
+# Limit to specific divisions
+python -m gosales.pipeline.run_leakage_all --cutoff 2024-06-30 --divisions "Printers,SWX_Seats,Training"
+```
+
+Artifacts
+- Per-division report: `gosales/outputs/leakage/<Division>/<cutoff>/leakage_report_<Division>_<cutoff>.json`
+- Cross-division summary: `gosales/outputs/leakage/leakage_summary_<cutoff>.json`
+
+Gauntlet gates
+- Gates PASS/FAIL on: static_scan, feature_date_audit, shift14 (dynamic), reproducibility.
+- Provides non-gating info: top-k ablation (OK/SUSPECT), optional shift-grid summary.
+
+```mermaid
+flowchart TD
+    A[Start Batch] --> B[Resolve Targets]
+    B --> C{For each division}
+    C --> D[Static Scan]
+    C --> E[Feature-Date Audit]
+    C --> F[Shift-14 (LR)]
+    C --> G[Reproducibility (LR)]
+    D --> H{Gate}
+    E --> H
+    F --> H
+    G --> H
+    H -->|Per-division JSON| I[Write Report]
+    I --> J{Any FAIL?}
+    J -->|Yes| K[Overall FAIL]
+    J -->|No| L[Overall PASS]
+    K --> M[Write Cross-Div Summary]
+    L --> M
+```
+
+---
+
 ### Multi-division support
 
 Known divisions are sourced from `etl/sku_map.division_set()`; cross-division features adapt automatically.

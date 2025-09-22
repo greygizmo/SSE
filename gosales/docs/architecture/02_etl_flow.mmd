@@ -1,43 +1,81 @@
----
-title: GoSales Engine - ETL Phase Flow
----
+%% GoSales Engine - ETL Phase Flow (Azure SQL to SQLite)
 
-```mermaid
 graph TB
-    Start --> Config
-    Config --> Connect
-    Connect --> Ingest
-    Ingest --> Clean
-    Clean --> Transform
-    Transform --> Load
-    Load --> Success
+    Start(("Start ETL")) --> ConfigLoad
 
-    subgraph "Configuration"
-        Config[Configuration<br/>Setup]
+    subgraph "Configuration & Connectivity"
+        ConfigLoad["Load settings.yaml & division config"]
+        EnvLoad["Read .env credentials"]
+        ConnectionCheck["Check Azure SQL connectivity"]
+        SchemaSnapshot["Fetch source schema metadata"]
     end
 
     subgraph "Data Ingestion"
-        Connect[Connect to<br/>Azure SQL]
-        Ingest[Ingest Data<br/>Polars DF]
+        PullCustomers["Extract customer views<br/>dbo.customer_customerOnly"]
+        PullHeaders["Extract cleaned headers<br/>dbo.customer_cleaned_headers"]
+        PullAssets["Extract asset telemetry<br/>fact_assets staging"]
+        PullTransactions["Extract transactions<br/>fact_transactions staging"]
     end
 
-    subgraph "Data Cleaning"
-        Clean[Clean &<br/>Standardize]
+    subgraph "Data Cleaning & Harmonization"
+        CastIds["Cast identifiers to string<br/>internalid, customer_id"]
+        NormalizeNames["Normalize names & territories"]
+        ParentMapping["Resolve parent/child accounts"]
+        FilterColumns["Drop unused or leaky fields"]
+        NullGuards["Apply null + type guards"]
     end
 
-    subgraph "Data Transformation"
-        Transform[Create Star<br/>Schema]
+    subgraph "Star Schema Build"
+        BuildDimCustomer["Build dim_customer<br/>enriched identifiers"]
+        BuildFactTransactions["Assemble fact_transactions<br/>time-bucketed"]
+        BuildFactAssets["Assemble fact_assets<br/>internalid aligned"]
+        SnapshotLogs["Persist fact_sales_log_raw"]
     end
 
-    subgraph "Data Loading"
-        Load[Load to<br/>SQLite]
+    subgraph "Load & Quality Gates"
+        LoadSQLite["Load curated tables to SQLite"]
+        PanderaChecks["Run schema & recency checks"]
+        Diagnostics["Write ETL diagnostics + metrics"]
     end
 
-    subgraph "Results"
-        Success[ETL Success]
+    subgraph "Outputs"
+        Success["ETL Success"]
     end
 
-    %% Styling
-    classDef default fill:#e3f2fd,stroke:#1565c0,stroke-width:2px
-    classDef success fill:#c8e6c9,stroke:#2e7d32,stroke-width:3px
-```
+    ConfigLoad --> EnvLoad --> ConnectionCheck --> SchemaSnapshot
+    SchemaSnapshot --> PullCustomers
+    SchemaSnapshot --> PullHeaders
+    SchemaSnapshot --> PullAssets
+    SchemaSnapshot --> PullTransactions
+
+    PullCustomers --> CastIds
+    PullHeaders --> CastIds
+    PullAssets --> CastIds
+    PullTransactions --> CastIds
+    CastIds --> NormalizeNames --> ParentMapping --> FilterColumns --> NullGuards
+
+    NullGuards --> BuildDimCustomer
+    NullGuards --> BuildFactTransactions
+    NullGuards --> BuildFactAssets
+    BuildFactTransactions --> SnapshotLogs
+
+    BuildDimCustomer --> LoadSQLite
+    BuildFactTransactions --> LoadSQLite
+    BuildFactAssets --> LoadSQLite
+    SnapshotLogs --> LoadSQLite
+
+    LoadSQLite --> PanderaChecks --> Diagnostics --> Success
+
+    classDef config fill:#e3f2fd,stroke:#1565c0,stroke-width:2px
+    classDef ingest fill:#ede7f6,stroke:#4a148c,stroke-width:2px
+    classDef clean fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px
+    classDef star fill:#fff3e0,stroke:#ef6c00,stroke-width:2px
+    classDef load fill:#fce4ec,stroke:#ad1457,stroke-width:2px
+    classDef done fill:#c8e6c9,stroke:#2e7d32,stroke-width:3px
+
+    class ConfigLoad,EnvLoad,ConnectionCheck,SchemaSnapshot config
+    class PullCustomers,PullHeaders,PullAssets,PullTransactions ingest
+    class CastIds,NormalizeNames,ParentMapping,FilterColumns,NullGuards clean
+    class BuildDimCustomer,BuildFactTransactions,BuildFactAssets,SnapshotLogs star
+    class LoadSQLite,PanderaChecks,Diagnostics load
+    class Success done

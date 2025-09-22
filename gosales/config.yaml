@@ -18,6 +18,8 @@ database:
     items_category_limited: dbo.items_category_limited
   # Optional explicit allow-list of DB objects used in dynamic SQL
   allowed_identifiers:
+    - sales_log
+    - industry_enrichment
     - dbo.saleslog
     - dbo.customer_asset_rollups
     - dbo.[Moneyball Assets]
