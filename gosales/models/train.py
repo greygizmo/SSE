@@ -380,151 +380,165 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
                     raise
                 # Non-fatal for non-group splits; proceed
 
-        # Baseline LR (elastic-net via saga)
-        if 'logreg' in model_names:
-            lr_params = cfg.modeling.lr_grid
-            best_lr_pipe = None
-            best_lr_auc = -1
-            best_conv = True
-            # Expanded grid and higher iteration budget
-            grid_l1 = lr_params.get('l1_ratio', [0.0, 0.2, 0.5, 0.8])
-            grid_C = lr_params.get('C', [0.1, 0.5, 1.0])
-            # Class-weight control
-            cw_cfg = str(cfg.modeling.class_weight).lower() if getattr(cfg, 'modeling', None) else 'balanced'
-            class_weight = None if cw_cfg in ('none', 'null', '') else 'balanced'
-            for l1_ratio in grid_l1:
-                for C in grid_C:
-                    if float(l1_ratio) == 0.0:
-                        lr = LogisticRegression(
-                            penalty='l2', solver='lbfgs', C=C, max_iter=10000, tol=1e-3,
-                            class_weight=class_weight, random_state=cfg.modeling.seed
-                        )
-                    else:
-                        lr = LogisticRegression(
-                            penalty='elasticnet', solver='saga', l1_ratio=l1_ratio, C=C,
-                            max_iter=10000, tol=1e-3, class_weight=class_weight, random_state=cfg.modeling.seed
-                        )
-                    pipe = Pipeline([
-                        ('scaler', StandardScaler(with_mean=False)),
-                        ('model', lr),
-                    ])
-                    with warnings.catch_warnings(record=True) as ws:
-                        warnings.simplefilter("always", ConvergenceWarning)
-                        pipe.fit(X_train, y_train)
-                        conv_warn = any(isinstance(w.message, ConvergenceWarning) for w in ws)
-                    p = pipe.predict_proba(X_valid)[:, 1]
-                    auc_lr = roc_auc_score(y_valid, p)
-                    if auc_lr > best_lr_auc:
-                        best_lr_auc = auc_lr
-                        best_lr_pipe = pipe
-                        best_conv = not conv_warn
-            if best_lr_pipe is not None:
-                # Calibration on the entire pipeline
-                best_cal = None
-                best_brier = 1e9
-                for m in cal_methods:
-                    cal = _calibrate(best_lr_pipe, X_train, y_train, X_valid, m)
-                    p = cal.predict_proba(X_valid)[:, 1]
-                    brier = brier_score_loss(y_valid, p)
-                    if brier < best_brier:
-                        best_brier = brier
-                        best_cal = cal
-                p = best_cal.predict_proba(X_valid)[:, 1]
-                lift10 = _lift_at_k(y_valid, p, 10)
-                # Pull n_iter_ from underlying LR if available
-                try:
-                    lr_inner = best_lr_pipe.named_steps.get('model')
-                    n_iter_val = getattr(lr_inner, 'n_iter_', None)
-                    if isinstance(n_iter_val, (list, np.ndarray)):
-                        n_iter_val = [int(x) for x in np.ravel(n_iter_val).tolist()]
-                except Exception:
-                    n_iter_val = None
-                results.append({
-                    "cutoff": cutoff, "model": "logreg", "auc": float(best_lr_auc),
-                    "lift10": float(lift10), "brier": float(best_brier), "calibration": best_cal.method,
-                    "converged": bool(best_conv), "n_iter": n_iter_val
-                })
+            # Baseline LR (elastic-net via saga)
+            if 'logreg' in model_names:
+                lr_params = cfg.modeling.lr_grid
+                best_lr_pipe = None
+                best_lr_auc = -1
+                best_conv = True
+                # Expanded grid and higher iteration budget
+                grid_l1 = lr_params.get('l1_ratio', [0.0, 0.2, 0.5, 0.8])
+                grid_C = lr_params.get('C', [0.1, 0.5, 1.0])
+                # Class-weight control
+                cw_cfg = str(cfg.modeling.class_weight).lower() if getattr(cfg, 'modeling', None) else 'balanced'
+                class_weight = None if cw_cfg in ('none', 'null', '') else 'balanced'
+                for l1_ratio in grid_l1:
+                    for C in grid_C:
+                        if float(l1_ratio) == 0.0:
+                            lr = LogisticRegression(
+                                penalty='l2', solver='lbfgs', C=C, max_iter=10000, tol=1e-3,
+                                class_weight=class_weight, random_state=cfg.modeling.seed
+                            )
+                        else:
+                            lr = LogisticRegression(
+                                penalty='elasticnet', solver='saga', l1_ratio=l1_ratio, C=C,
+                                max_iter=10000, tol=1e-3, class_weight=class_weight, random_state=cfg.modeling.seed
+                            )
+                        pipe = Pipeline([
+                            ('scaler', StandardScaler(with_mean=False)),
+                            ('model', lr),
+                        ])
+                        with warnings.catch_warnings(record=True) as ws:
+                            warnings.simplefilter("always", ConvergenceWarning)
+                            pipe.fit(X_train, y_train)
+                            conv_warn = any(isinstance(w.message, ConvergenceWarning) for w in ws)
+                        p = pipe.predict_proba(X_valid)[:, 1]
+                        auc_lr = roc_auc_score(y_valid, p)
+                        if auc_lr > best_lr_auc:
+                            best_lr_auc = auc_lr
+                            best_lr_pipe = pipe
+                            best_conv = not conv_warn
+                if best_lr_pipe is not None:
+                    # Calibration on the entire pipeline
+                    best_cal = None
+                    best_brier = 1e9
+                    for m in cal_methods:
+                        cal = _calibrate(best_lr_pipe, X_train, y_train, X_valid, m)
+                        p = cal.predict_proba(X_valid)[:, 1]
+                        brier = brier_score_loss(y_valid, p)
+                        if brier < best_brier:
+                            best_brier = brier
+                            best_cal = cal
+                    if best_cal is not None:
+                        p = best_cal.predict_proba(X_valid)[:, 1]
+                        lift10 = _lift_at_k(y_valid, p, 10)
+                        # Pull n_iter_ from underlying LR if available
+                        try:
+                            lr_inner = best_lr_pipe.named_steps.get('model')
+                            n_iter_val = getattr(lr_inner, 'n_iter_', None)
+                            if isinstance(n_iter_val, (list, np.ndarray)):
+                                n_iter_val = [int(x) for x in np.ravel(n_iter_val).tolist()]
+                        except Exception:
+                            n_iter_val = None
+                        results.append({
+                            "cutoff": cutoff,
+                            "model": "logreg",
+                            "auc": float(best_lr_auc),
+                            "lift10": float(lift10),
+                            "brier": float(best_brier),
+                            "calibration": best_cal.method,
+                            "converged": bool(best_conv),
+                            "n_iter": n_iter_val,
+                        })
 
-        # LGBM challenger
-        if 'lgbm' in model_names:
-            # scale_pos_weight
-            pos = int(np.sum(y_train))
-            neg = int(len(y_train) - pos)
-            spw = (neg / max(1, pos))
-            use_spw = bool(getattr(cfg.modeling, 'use_scale_pos_weight', True))
-            spw_cap = float(getattr(cfg.modeling, 'scale_pos_weight_cap', 10.0))
-            grid = cfg.modeling.lgbm_grid
-            best_lgbm = None
-            best_auc = -1
-            for num_leaves in grid.get('num_leaves', [31]):
-                for min_data_in_leaf in grid.get('min_data_in_leaf', [50]):
-                    for learning_rate in grid.get('learning_rate', [0.05]):
-                        for feature_fraction in grid.get('feature_fraction', [0.9]):
-                            for bagging_fraction in grid.get('bagging_fraction', [0.9]):
-                                params = dict(
-                                    random_state=cfg.modeling.seed,
-                                    deterministic=True,
-                                    n_jobs=1,
-                                    n_estimators=400,
-                                    learning_rate=learning_rate,
-                                    num_leaves=num_leaves,
-                                    min_data_in_leaf=min_data_in_leaf,
-                                    feature_fraction=feature_fraction,
-                                    bagging_fraction=bagging_fraction,
-                                )
-                                if use_spw:
-                                    params['scale_pos_weight'] = min(spw, spw_cap)
-                                lgbm = LGBMClassifier(**params)
-                                lgbm.fit(X_train, y_train, eval_set=[(X_valid, y_valid)], eval_metric='auc')
-                                p = lgbm.predict_proba(X_valid)[:,1]
-                                auc_lgbm = roc_auc_score(y_valid, p)
-                                # Overfit guard: compare train vs valid AUC; if large gap, try stronger regularization once
-                                try:
-                                    p_tr = lgbm.predict_proba(X_train)[:,1]
-                                    auc_tr = roc_auc_score(y_train, p_tr)
-                                    gap = float(auc_tr - auc_lgbm)
-                                except Exception:
-                                    gap = 0.0
-                                if gap > 0.05:
-                                    reg_params = dict(
+            # LGBM challenger
+            if 'lgbm' in model_names:
+                # scale_pos_weight
+                pos = int(np.sum(y_train))
+                neg = int(len(y_train) - pos)
+                spw = (neg / max(1, pos))
+                use_spw = bool(getattr(cfg.modeling, 'use_scale_pos_weight', True))
+                spw_cap = float(getattr(cfg.modeling, 'scale_pos_weight_cap', 10.0))
+                grid = cfg.modeling.lgbm_grid
+                best_lgbm = None
+                best_auc = -1
+                for num_leaves in grid.get('num_leaves', [31]):
+                    for min_data_in_leaf in grid.get('min_data_in_leaf', [50]):
+                        for learning_rate in grid.get('learning_rate', [0.05]):
+                            for feature_fraction in grid.get('feature_fraction', [0.9]):
+                                for bagging_fraction in grid.get('bagging_fraction', [0.9]):
+                                    params = dict(
                                         random_state=cfg.modeling.seed,
                                         deterministic=True,
                                         n_jobs=1,
                                         n_estimators=400,
                                         learning_rate=learning_rate,
-                                        num_leaves=max(15, int(num_leaves * 0.8)),
-                                        min_data_in_leaf=int(min_data_in_leaf * 2),
-                                        feature_fraction=max(0.5, feature_fraction * 0.9),
-                                        bagging_fraction=max(0.5, bagging_fraction * 0.9),
+                                        num_leaves=num_leaves,
+                                        min_data_in_leaf=min_data_in_leaf,
+                                        feature_fraction=feature_fraction,
+                                        bagging_fraction=bagging_fraction,
                                     )
                                     if use_spw:
-                                        reg_params['scale_pos_weight'] = min(spw, spw_cap)
-                                    reg_clf = LGBMClassifier(**reg_params)
-                                    reg_clf.fit(X_train, y_train, eval_set=[(X_valid, y_valid)], eval_metric='auc')
-                                    p_reg = reg_clf.predict_proba(X_valid)[:,1]
-                                    auc_reg = roc_auc_score(y_valid, p_reg)
-                                    if auc_reg >= auc_lgbm - 0.002:  # accept similar or better valid AUC with stronger regularization
-                                        lgbm = reg_clf
-                                        p = p_reg
-                                        auc_lgbm = auc_reg
-                                        logger.info(f"Overfit guard applied: gap={gap:.3f} -> using regularized params for LGBM")
-                                if auc_lgbm > best_auc:
-                                    best_auc = auc_lgbm
-                                    best_lgbm = lgbm
-            if best_lgbm is not None:
-                # Calibration
-                best_cal = None
-                best_brier = 1e9
-                for m in cal_methods:
-                    cal = _calibrate(best_lgbm, X_train, y_train, X_valid, m)
-                    p = cal.predict_proba(X_valid)[:,1]
-                    brier = brier_score_loss(y_valid, p)
-                    if brier < best_brier:
-                        best_brier = brier
-                        best_cal = cal
-                p = best_cal.predict_proba(X_valid)[:,1]
-                lift10 = _lift_at_k(y_valid, p, 10)
-                results.append({"cutoff": cutoff, "model": "lgbm", "auc": float(best_auc), "lift10": float(lift10), "brier": float(best_brier), "calibration": best_cal.method})
+                                        params['scale_pos_weight'] = min(spw, spw_cap)
+                                    lgbm = LGBMClassifier(**params)
+                                    lgbm.fit(X_train, y_train, eval_set=[(X_valid, y_valid)], eval_metric='auc')
+                                    p = lgbm.predict_proba(X_valid)[:,1]
+                                    auc_lgbm = roc_auc_score(y_valid, p)
+                                    # Overfit guard: compare train vs valid AUC; if large gap, try stronger regularization once
+                                    try:
+                                        p_tr = lgbm.predict_proba(X_train)[:,1]
+                                        auc_tr = roc_auc_score(y_train, p_tr)
+                                        gap = float(auc_tr - auc_lgbm)
+                                    except Exception:
+                                        gap = 0.0
+                                    if gap > 0.05:
+                                        reg_params = dict(
+                                            random_state=cfg.modeling.seed,
+                                            deterministic=True,
+                                            n_jobs=1,
+                                            n_estimators=400,
+                                            learning_rate=learning_rate,
+                                            num_leaves=max(15, int(num_leaves * 0.8)),
+                                            min_data_in_leaf=int(min_data_in_leaf * 2),
+                                            feature_fraction=max(0.5, feature_fraction * 0.9),
+                                            bagging_fraction=max(0.5, bagging_fraction * 0.9),
+                                        )
+                                        if use_spw:
+                                            reg_params['scale_pos_weight'] = min(spw, spw_cap)
+                                        reg_clf = LGBMClassifier(**reg_params)
+                                        reg_clf.fit(X_train, y_train, eval_set=[(X_valid, y_valid)], eval_metric='auc')
+                                        p_reg = reg_clf.predict_proba(X_valid)[:,1]
+                                        auc_reg = roc_auc_score(y_valid, p_reg)
+                                        if auc_reg >= auc_lgbm - 0.002:  # accept similar or better valid AUC with stronger regularization
+                                            lgbm = reg_clf
+                                            p = p_reg
+                                            auc_lgbm = auc_reg
+                                            logger.info(f"Overfit guard applied: gap={gap:.3f} -> using regularized params for LGBM")
+                                    if auc_lgbm > best_auc:
+                                        best_auc = auc_lgbm
+                                        best_lgbm = lgbm
+                if best_lgbm is not None:
+                    # Calibration
+                    best_cal = None
+                    best_brier = 1e9
+                    for m in cal_methods:
+                        cal = _calibrate(best_lgbm, X_train, y_train, X_valid, m)
+                        p = cal.predict_proba(X_valid)[:,1]
+                        brier = brier_score_loss(y_valid, p)
+                        if brier < best_brier:
+                            best_brier = brier
+                            best_cal = cal
+                    if best_cal is not None:
+                        p = best_cal.predict_proba(X_valid)[:,1]
+                        lift10 = _lift_at_k(y_valid, p, 10)
+                        results.append({
+                            "cutoff": cutoff,
+                            "model": "lgbm",
+                            "auc": float(best_auc),
+                            "lift10": float(lift10),
+                            "brier": float(best_brier),
+                            "calibration": best_cal.method,
+                        })
 
     # Aggregate and select winner by lift@10 then cal-Brier
     if not results:
