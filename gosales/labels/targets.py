@@ -63,12 +63,13 @@ def build_labels_for_division(
     window_df = facts[(facts['order_date'] > cutoff_dt) & (facts['order_date'] <= win_end)].copy()
     # Normalize division string comparisons to avoid whitespace/case issues
     window_df['product_division'] = window_df['product_division'].astype(str).str.strip()
+    norm_division = normalize_division(params.division)
     # Determine if caller passed a custom model (e.g., 'Printers'); if so, match by SKU set
-    sku_targets = tuple(get_model_targets(normalize_division(params.division)))
+    sku_targets = tuple(get_model_targets(norm_division))
     if sku_targets:
         window_target = window_df[window_df['product_sku'].astype(str).isin(sku_targets)].copy()
     else:
-        window_target = window_df[window_df['product_division'] == normalize_division(params.division)].copy()
+        window_target = window_df[window_df['product_division'] == norm_division].copy()
     # Optional denylist SKUs exclusion (e.g., trials/POC)
     try:
         cfg_obj = cfg.load_config()
@@ -108,7 +109,14 @@ def build_labels_for_division(
                 new_end = cutoff_dt + relativedelta(months=widened)
                 window_df_w = facts[(facts['order_date'] > cutoff_dt) & (facts['order_date'] <= new_end)].copy()
                 window_df_w['product_division'] = window_df_w['product_division'].astype(str).str.strip()
-                window_target_w = window_df_w[window_df_w['product_division'] == normalize_division(params.division)].copy()
+                if sku_targets:
+                    window_target_w = window_df_w[
+                        window_df_w['product_sku'].astype(str).isin(sku_targets)
+                    ].copy()
+                else:
+                    window_target_w = window_df_w[
+                        window_df_w['product_division'] == norm_division
+                    ].copy()
                 labels = _compute_labels(window_target_w)
                 pos = int(labels['label'].sum()) if not labels.empty else 0
             # Update window_end if widened
@@ -135,7 +143,7 @@ def build_labels_for_division(
         )
     else:
         had_div_df = (
-            feature_df[feature_df['product_division'] == normalize_division(params.division)][['customer_id']]
+            feature_df[feature_df['product_division'] == norm_division][['customer_id']]
             .dropna()
             .drop_duplicates()
             .assign(had_div=1)
