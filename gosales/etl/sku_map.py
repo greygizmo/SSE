@@ -322,11 +322,14 @@ def get_model_targets(model: str) -> Tuple[str, ...]:
     """
     m = get_sku_mapping()
 
-    if model == "SWX_Seats":
+    model_key = (model or "").strip()
+    model_norm = model_key.casefold()
+
+    if model_norm == "swx_seats":
         return tuple(x for x in ("SWX_Core", "SWX_Pro_Prem") if x in m)
-    if model == "PDM_Seats":
+    if model_norm == "pdm_seats":
         return tuple(x for x in ("PDM", "EPDM_CAD_Editor_Seats") if x in m)
-    if model == "Printers":
+    if model_norm == "printers":
         # Include series/brands used in current and legacy naming that still roll up in data.
         # Consumables and Post_Processing are predictors, not positives, so they are intentionally excluded.
         printer_keys = (
@@ -342,21 +345,21 @@ def get_model_targets(model: str) -> Tuple[str, ...]:
             "_1200_Elite_Fortus250",
         )
         return tuple(x for x in printer_keys if x in m)
-    if model == "Services":
+    if model_norm == "services":
         return tuple(x for x in ("Services",) if x in m)
-    if model == "Success_Plan":
+    if model_norm == "success_plan":
         return tuple(x for x in ("Success_Plan",) if x in m)
-    if model == "Training":
+    if model_norm == "training":
         return tuple(x for x in ("Training",) if x in m)
-    if model == "Simulation":
+    if model_norm == "simulation":
         return tuple(x for x in ("Simulation", "SW_Plastics") if x in m)
-    if model == "Scanning":
+    if model_norm == "scanning":
         return tuple(x for x in ("Creaform", "Artec") if x in m)
-    if model == "CAMWorks":
+    if model_norm == "camworks":
         return tuple(x for x in ("CAMWorks_Seats",) if x in m)
-    if model == "SW_Electrical":
+    if model_norm == "sw_electrical":
         return tuple(x for x in ("SW_Electrical",) if x in m)
-    if model == "SW_Inspection":
+    if model_norm == "sw_inspection":
         return tuple(x for x in ("SW_Inspection",) if x in m)
     if model == "Post_Processing":
         return tuple(x for x in ("Post_Processing",) if x in m)

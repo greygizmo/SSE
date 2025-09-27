@@ -64,7 +64,7 @@ def discover_available_models(models_dir: Path | None = None) -> dict[str, Path]
     for p in root.glob("*_model"):
         name = p.name
         is_cold = name.endswith("_cold_model")
-        div = name.replace("_model", "")
+        div = normalize_division(name.replace("_model", ""))
         meta_path = p / "metadata.json"
         try:
             if meta_path.exists():
@@ -544,7 +544,12 @@ def generate_scoring_outputs(
         from gosales.etl.sku_map import get_supported_models, division_set as _division_set
         exclude = {"Hardware", "Maintenance"}
         targets = sorted({d for d in _division_set() if d not in exclude} | set(get_supported_models()))
-        available_models = {k: v for k, v in available_models.items() if k in targets}
+        normalized_targets = {normalize_division(d) for d in targets}
+        available_models = {
+            name: path
+            for name, path in available_models.items()
+            if normalize_division(name) in normalized_targets
+        }
         if not available_models:
             logger.warning("No supported models found for scoring after pruning legacy models.")
     except Exception as e:
@@ -616,11 +621,22 @@ def generate_scoring_outputs(
         # Whitespace-only wiring for divisions without models (e.g., Post_Processing)
         try:
             from gosales.etl.sku_map import division_set as _division_set
-            need_pp = ("Post_Processing" in _division_set()) and ("Post_Processing" not in available_models)
+            known_divisions = {normalize_division(d) for d in _division_set()}
+            available_keys = {normalize_division(name) for name in available_models}
+            need_pp = (
+                normalize_division("Post_Processing") in known_divisions
+                and normalize_division("Post_Processing") not in available_keys
+            )
             if need_pp:
                 ws_df = generate_whitespace_opportunities(engine)
                 if not ws_df.is_empty():
-                    ws_pp = ws_df.filter(pl.col("whitespace_division") == "Post_Processing")
+                    ws_pp = ws_df.filter(
+                        pl.col("whitespace_division")
+                        .cast(pl.Utf8)
+                        .str.strip_chars()
+                        .str.to_lowercase()
+                        == normalize_division("Post_Processing")
+                    )
                     if not ws_pp.is_empty():
                         cols = [c for c in ["customer_id","whitespace_division","whitespace_score","customer_name"] if c in ws_pp.columns]
                         ws_min = ws_pp.select(cols)
