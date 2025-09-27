@@ -43,9 +43,15 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
     target_skus = tuple(get_model_targets(norm_division_name))
     use_custom_targets = len(target_skus) > 0
     # Define label filter once for reuse in buyers and feature recency columns
+    division_col = (
+        pl.col("product_division")
+        .cast(pl.Utf8)
+        .str.strip_chars()
+        .str.to_lowercase()
+    )
     label_filter = (
         pl.col("product_sku").is_in(list(target_skus)) if use_custom_targets
-        else pl.col("product_division") == norm_division_name
+        else division_col == norm_division_name
     )
     if cutoff_date:
         logger.info(f"Using cutoff date: {cutoff_date} (features from data <= cutoff)")
@@ -147,7 +153,12 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
         if use_custom_targets:
             mask = prediction_data['product_sku'].astype(str).isin(target_skus)
         else:
-            pred_div = prediction_data['product_division'].astype(str).str.strip()
+            pred_div = (
+                prediction_data['product_division']
+                .astype(str)
+                .str.strip()
+                .str.casefold()
+            )
             mask = pred_div == norm_division_name
         prediction_buyers_df = prediction_data.loc[mask, 'customer_id'].astype(str).unique()
         division_buyers_pd = pd.DataFrame({'customer_id': prediction_buyers_df, 'bought_in_division': 1})
@@ -455,7 +466,11 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
         # Division recency (days since last division order)
         rec_div_list = []
         for d in known_divisions:
-            sub = fd.loc[fd['product_division'].astype(str).str.strip() == normalize_division(d), ['customer_id', 'order_date']]
+            target_norm = normalize_division(d)
+            sub = fd.loc[
+                fd['product_division'].astype(str).str.strip().str.casefold() == target_norm,
+                ['customer_id', 'order_date']
+            ]
             last_d = sub.groupby('customer_id')['order_date'].max().reset_index()
             last_d[f'days_since_last_{d.lower()}'] = (cutoff_dt - last_d['order_date']).dt.days
             rec_div_list.append(last_d[['customer_id', f'days_since_last_{d.lower()}']])
@@ -489,7 +504,11 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
                 sku_df[ratio_col] = sku_df[ratio_col].fillna(0.0)
 
         # Past Solidworks buyer flag (historical)
-        past_swx = fd.loc[fd['product_division'].astype(str).str.strip() == 'Solidworks', ['customer_id']].drop_duplicates()
+        sw_norm = normalize_division('Solidworks')
+        past_swx = fd.loc[
+            fd['product_division'].astype(str).str.strip().str.casefold() == sw_norm,
+            ['customer_id']
+        ].drop_duplicates()
         past_swx['ever_bought_solidworks'] = 1
 
         # Merge all extra frames to features_pd
