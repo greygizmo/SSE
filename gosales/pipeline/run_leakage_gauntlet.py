@@ -20,6 +20,7 @@ import sys
 from typing import Dict
 
 import click
+import numpy as np
 import pandas as pd
 
 from gosales.utils.config import load_config
@@ -96,8 +97,14 @@ def run_feature_date_audit(ctx: LGContext, window_months: int) -> Dict[str, str]
     cfg = load_config()
     mask_tail = int(getattr(getattr(cfg, 'validation', object()), 'gauntlet_mask_tail_days', 0) or 0)
     fm = create_feature_matrix(engine, ctx.division, ctx.cutoff, window_months, mask_tail_days=mask_tail)
-    cols = [c for c in fm.columns if c not in ("customer_id", "bought_in_division")]
-    # Compute max observable event date at/before cutoff
+    if isinstance(fm, pd.DataFrame):
+        fm_df = fm.copy()
+    elif hasattr(fm, "to_pandas"):
+        fm_df = fm.to_pandas()
+    else:
+        fm_df = pd.DataFrame(fm)
+    cols = [c for c in fm_df.columns if c not in ("customer_id", "bought_in_division")]
+    # Compute max observable event date at/before cutoff for lifetime-style features
     df = pd.read_sql_query(
         "SELECT MAX(order_date) AS max_order_date FROM fact_transactions WHERE order_date <= :cutoff",
         engine,
@@ -108,23 +115,88 @@ def run_feature_date_audit(ctx: LGContext, window_months: int) -> Dict[str, str]
     except Exception:
         max_order_date = None
     cutoff_dt = pd.to_datetime(ctx.cutoff)
+    effective_end = cutoff_dt - pd.to_timedelta(max(mask_tail, 0), unit="D")
+
+    def _infer_latest_event(col_name: str, series: pd.Series) -> pd.Timestamp | None:
+        lowered = str(col_name).lower()
+        # 1. Direct datetime-like columns
+        dt_series = None
+        try:
+            if pd.api.types.is_datetime64_any_dtype(series):
+                dt_series = pd.to_datetime(series, errors="coerce")
+            elif series.dtype == object:
+                dt_series = pd.to_datetime(series, errors="coerce")
+        except Exception:
+            dt_series = None
+        if dt_series is not None and not dt_series.empty and dt_series.notna().any():
+            latest_dt = dt_series.max()
+            if pd.notna(latest_dt):
+                return pd.to_datetime(latest_dt)
+        # 2. Recency expressed as days since cutoff
+        if "days_since" in lowered or "recency_days" in lowered:
+            numeric = pd.to_numeric(series, errors="coerce")
+            numeric = numeric.replace([np.inf, -np.inf], np.nan).dropna()
+            if not numeric.empty:
+                min_days = numeric.min()
+                if pd.notna(min_days):
+                    try:
+                        min_days = float(min_days)
+                        return cutoff_dt - pd.to_timedelta(min_days, unit="D")
+                    except Exception:
+                        pass
+        # 3. Fields ending in _date or _dt might be string dates
+        if lowered.endswith("_date") or lowered.endswith("_dt") or "_date_" in lowered:
+            dt_series = pd.to_datetime(series, errors="coerce")
+            if dt_series.notna().any():
+                latest_dt = dt_series.max()
+                if pd.notna(latest_dt):
+                    return pd.to_datetime(latest_dt)
+        # 4. Offset window features (e.g., __3m_off60d)
+        m_off = re.search(r"_off(\d+)d", lowered)
+        if m_off:
+            try:
+                offset_days = int(m_off.group(1))
+                return cutoff_dt - pd.to_timedelta(offset_days, unit="D")
+            except Exception:
+                pass
+        # 5. Rolling window features (e.g., __3m)
+        m_window = re.search(r"__(\d+)m", lowered)
+        if m_window:
+            try:
+                return effective_end
+            except Exception:
+                pass
+        # 6. Lifetime aggregations
+        if lowered.endswith("__life") or "__life__" in lowered or lowered.endswith("_life"):
+            return max_order_date
+        return None
+
     rows = []
+    latest_values: list[pd.Timestamp] = []
     for name in cols:
-        latest = max_order_date
-        status = "OK"
-        if latest is not None and latest > cutoff_dt:
+        series = fm_df[name]
+        latest = _infer_latest_event(name, series)
+        if isinstance(latest, pd.Timestamp) and pd.notna(latest):
+            latest_values.append(latest)
+        status = "UNKNOWN"
+        if latest is None or pd.isna(latest):
+            status = "UNKNOWN"
+        elif latest > cutoff_dt:
             status = "LEAK"
+        else:
+            status = "OK"
         rows.append({
             "feature": str(name),
-            "latest_event_date": (latest.date().isoformat() if pd.notna(latest) else None),
+            "latest_event_date": (latest.date().isoformat() if isinstance(latest, pd.Timestamp) and pd.notna(latest) else None),
             "cutoff": ctx.cutoff,
             "status": status,
         })
     audit_csv = ctx.out_dir / f"feature_date_audit_{ctx.division}_{ctx.cutoff}.csv"
     pd.DataFrame(rows).to_csv(audit_csv, index=False)
+    overall_latest = max(latest_values) if latest_values else None
     summary = {
         "status": ("FAIL" if any(r["status"] == "LEAK" for r in rows) else "PASS"),
-        "max_event_date": (max_order_date.date().isoformat() if isinstance(max_order_date, pd.Timestamp) and pd.notna(max_order_date) else None),
+        "max_event_date": (overall_latest.date().isoformat() if isinstance(overall_latest, pd.Timestamp) and pd.notna(overall_latest) else None),
         "cutoff": ctx.cutoff,
         "feature_count": len(rows),
     }
