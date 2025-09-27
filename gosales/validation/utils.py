@@ -11,7 +11,11 @@ def bootstrap_ci(metric_fn: Callable[[pd.DataFrame], float], df: pd.DataFrame, n
     stats = []
     for _ in range(n):
         sample_ids = rng.choice(customers, size=len(customers), replace=True)
-        sample = df[df['customer_id'].isin(sample_ids)]
+        sampled_counts = pd.Series(sample_ids).value_counts()
+        selected = df[df['customer_id'].isin(sampled_counts.index)].copy()
+        # Repeat each customer's rows according to how many times they were sampled
+        repeat_counts = selected['customer_id'].map(sampled_counts)
+        sample = selected.loc[selected.index.repeat(repeat_counts)].reset_index(drop=True)
         stats.append(metric_fn(sample))
     lo, hi = np.percentile(stats, [2.5, 97.5])
     return float(lo), float(hi)
