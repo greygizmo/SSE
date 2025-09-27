@@ -40,3 +40,22 @@ def test_discover_available_models_preserves_casing(tmp_path):
     available = discover_available_models(models_root)
     assert "Multi Word" in available
     assert available["Multi Word"] == model_dir
+
+
+def test_model_without_metadata_survives_pruning(tmp_path):
+    setup_score_customers_import()
+    from gosales.pipeline.score_customers import (
+        discover_available_models,
+        _filter_models_by_targets,
+    )
+
+    models_root = tmp_path
+    model_dir = models_root / "SW_Inspection_model"
+    model_dir.mkdir()
+
+    available = discover_available_models(models_root)
+    assert "SW_Inspection" in available
+
+    filtered = _filter_models_by_targets(available, {"SW Inspection"})
+    assert "SW_Inspection" in filtered
+    assert filtered["SW_Inspection"] == model_dir

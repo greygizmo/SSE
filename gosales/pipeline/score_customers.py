@@ -7,6 +7,7 @@ import pandas as pd
 import mlflow
 import mlflow.sklearn
 import json
+from collections.abc import Iterable
 from pathlib import Path
 import joblib
 
@@ -85,6 +86,31 @@ def discover_available_models(models_dir: Path | None = None) -> dict[str, Path]
         if d not in available:
             available[d] = path
     return available
+
+
+def _normalize_model_key(value: str | None) -> str:
+    """Normalize model keys and targets for comparison during pruning."""
+
+    base = normalize_division(value)
+    base = base.replace("_", " ")
+    # Collapse any multiple spaces and compare in lowercase for stability
+    return " ".join(base.lower().split())
+
+
+def _filter_models_by_targets(
+    available_models: dict[str, Path], targets: Iterable[str]
+) -> dict[str, Path]:
+    """Filter discovered models to only those that match supported targets."""
+
+    normalized_targets = {_normalize_model_key(t) for t in targets if t}
+    if not normalized_targets:
+        return dict(available_models)
+
+    filtered: dict[str, Path] = {}
+    for key, path in available_models.items():
+        if _normalize_model_key(key) in normalized_targets:
+            filtered[key] = path
+    return filtered
  
 def _sanitize_features(X: pd.DataFrame) -> pd.DataFrame:
     """Ensure numeric float dtype; replace infs/NaNs with 0.0 for scoring."""
@@ -544,7 +570,7 @@ def generate_scoring_outputs(
         from gosales.etl.sku_map import get_supported_models, division_set as _division_set
         exclude = {"Hardware", "Maintenance"}
         targets = sorted({d for d in _division_set() if d not in exclude} | set(get_supported_models()))
-        available_models = {k: v for k, v in available_models.items() if k in targets}
+        available_models = _filter_models_by_targets(available_models, targets)
         if not available_models:
             logger.warning("No supported models found for scoring after pruning legacy models.")
     except Exception as e:
