@@ -124,9 +124,9 @@ def score(cutoff: str | None = None, top_k: int | None = None) -> pd.DataFrame:
             logger.info("Skipping delete for %s: %s", SCORES_TABLE, exc)
     # Ensure table exists with superset schema before append
     try:
-        result_pl.head(0).write_database(SCORES_TABLE, curated, if_table_exists="replace")
+        result_pl.head(0).write_database(SCORES_TABLE, curated, if_table_exists="fail")
     except Exception as exc:
-        logger.info('Ensured table schema: %s', exc)
+        logger.debug("Table %s already exists or could not be created: %s", SCORES_TABLE, exc)
     result_pl.write_database(SCORES_TABLE, curated, if_table_exists="append")
 
     out_dir = OUTPUTS_DIR / "scores"
