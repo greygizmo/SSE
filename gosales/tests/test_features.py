@@ -33,6 +33,16 @@ def test_feature_window_and_target(tmp_path):
     assert int(pdf.loc[pdf["customer_id"] == 2, "bought_in_division"].iloc[0]) == 0
 
 
+def test_feature_matrix_without_cutoff(tmp_path):
+    eng = create_engine(f"sqlite:///{tmp_path}/test_features_no_cutoff.db")
+    _seed(eng)
+
+    feature_frame = create_feature_matrix(eng, "Solidworks", cutoff_date=None, prediction_window_months=1)
+
+    assert not feature_frame.is_empty()
+    assert feature_frame.height > 0
+
+
 def test_feature_cli_checksum(tmp_path, monkeypatch):
     eng = create_engine(f"sqlite:///{tmp_path}/test_features_cli.db")
     _seed(eng)

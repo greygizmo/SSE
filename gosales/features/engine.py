@@ -70,6 +70,7 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
             )
             feature_data = _read_sql(feature_sql, {"cutoff": cutoff_date})
             feature_data["order_date"] = pd.to_datetime(feature_data["order_date"])
+            transactions_pd = feature_data.copy()
 
             from dateutil.relativedelta import relativedelta
 
@@ -117,6 +118,7 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
             )
             feature_data = _read_sql(feature_sql)
             feature_data["order_date"] = pd.to_datetime(feature_data["order_date"])
+            transactions_pd = feature_data.copy()
             prediction_data = feature_data.copy()
 
         transactions = pl.from_pandas(feature_data)
