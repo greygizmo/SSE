@@ -39,8 +39,10 @@ def _lift_at_k(y_true: np.ndarray, y_score: np.ndarray, k_percent: int) -> float
     k = max(1, int(n * (k_percent / 100.0)))
     idx = np.argsort(-y_score, kind="stable")[:k]
     top_rate = float(np.mean(y_true[idx]))
-    base = float(np.mean(y_true)) if np.mean(y_true) > 0 else 1e-9
-    return top_rate / base
+    base_rate = float(np.mean(y_true))
+    if np.isclose(base_rate, 0.0):
+        return float("nan")
+    return top_rate / base_rate
 
 
 def validate_holdout(icp_scores_csv: str | Path, *, year_tag: str | None = None, gates: Dict[str, float] | None = None) -> Path:
