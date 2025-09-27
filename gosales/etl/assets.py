@@ -11,6 +11,7 @@ from gosales.sql.queries import moneyball_assets_select, items_category_limited_
 from gosales.utils.config import load_config
 from gosales.utils.logger import get_logger
 from gosales.utils.identifiers import normalize_identifier_series
+from gosales.utils.normalize import normalize_division
 
 logger = get_logger(__name__)
 
@@ -97,13 +98,17 @@ def _map_customers_to_ids(mb: pd.DataFrame) -> pd.DataFrame:
 
     mapped = mb.copy()
 
-    # 1) Preferred mapping: align on NetSuite entityid (matches Moneyball customer_name)
+    # 1) Preferred mapping: align on NetSuite company name (entityid or ns_companyname)
     try:
         ns_cur = get_curated_connection()
-        ns_df = pd.read_sql("SELECT internalid, entityid FROM dim_ns_customer", ns_cur)
-        ns_df = ns_df.dropna(subset=['internalid', 'entityid']).copy()
-        ns_df['entityid_norm'] = _norm(ns_df['entityid'])
-        ns_map = ns_df.drop_duplicates('entityid_norm').set_index('entityid_norm')['internalid']
+        # Try entityid first; fallback to ns_companyname
+        try:
+            ns_df = pd.read_sql("SELECT internalid, entityid AS company_name FROM dim_ns_customer", ns_cur)
+        except Exception:
+            ns_df = pd.read_sql("SELECT internalid, ns_companyname AS company_name FROM dim_ns_customer", ns_cur)
+        ns_df = ns_df.dropna(subset=['internalid', 'company_name']).copy()
+        ns_df['company_name_norm'] = _norm(ns_df['company_name'])
+        ns_map = ns_df.drop_duplicates('company_name_norm').set_index('company_name_norm')['internalid']
         mapped['customer_id'] = mapped['customer_name_norm'].map(ns_map)
     except Exception as exc:
         logger.warning(f"dim_ns_customer lookup failed, falling back to legacy mapping: {exc}")
@@ -194,6 +199,104 @@ def build_fact_assets(write: bool = True) -> pd.DataFrame:
     coverage = float((~joined['item_rollup'].isna()).mean()) if len(joined) else 0.0
     # Use ASCII arrow to avoid console encoding issues on Windows shells
     logger.info(f"Moneyball->Item rollup mapping coverage: {coverage:.2%} ({joined['item_rollup'].notna().sum()} of {len(joined)})")
+
+    # --- Authoritative internalid-first join with fallback on normalized name ---
+    try:
+        # Config flag for debug columns (safe default if absent)
+        try:
+            emit_debug = bool(getattr(getattr(load_config(), 'etl', object()), 'assets', object()).emit_debug_columns)  # type: ignore[attr-defined]
+        except Exception:
+            emit_debug = False
+
+        items_c = items.copy()
+        # Simpler, robust map: first non-null row per internalid
+        items_map = (
+            items_c.dropna(subset=['internalid'])
+            .sort_values(['internalid'])
+            .drop_duplicates(subset=['internalid'], keep='first')
+            [['internalid', 'Item_Rollup', 'itemid', 'name']]
+            .rename(columns={'Item_Rollup': 'item_rollup'})
+        )
+
+        joined2 = mb.merge(
+            items_map[['internalid', 'item_rollup', 'itemid', 'name']].rename(columns={'itemid': 'itemid_items', 'name': 'name_items'}),
+            on='internalid', how='left', suffixes=('', '_items')
+        )
+        # Guard: ensure item_rollup column exists post-merge to avoid KeyError in coverage computation
+        if 'item_rollup' not in joined2.columns:
+            joined2['item_rollup'] = np.nan
+        joined2['join_method'] = np.where(joined2['item_rollup'].notna(), 'internalid', 'unmatched')
+        joined2['internalid_items'] = joined2['internalid']
+
+        unresolved_mask = joined2['item_rollup'].isna()
+        if unresolved_mask.any():
+            fallback_pool = joined2[unresolved_mask].copy()
+            fallback = fallback_pool.merge(
+                items[['itemid', 'itemid_norm', 'internalid', 'Item_Rollup', 'name']].rename(columns={'Item_Rollup': 'item_rollup', 'internalid': 'internalid_items', 'name': 'name_items'}),
+                left_on='product_norm', right_on='itemid_norm', how='left'
+            )
+            for col in ['item_rollup', 'itemid_items', 'name_items', 'internalid_items']:
+                joined2.loc[unresolved_mask, col] = fallback[col].values
+            joined2.loc[unresolved_mask & joined2['item_rollup'].notna(), 'join_method'] = 'name_fallback'
+
+        n2 = int(len(joined2))
+        mapped2 = int(joined2['item_rollup'].notna().sum())
+        by_internalid2 = int((joined2['join_method'] == 'internalid').sum())
+        by_name2 = int((joined2['join_method'] == 'name_fallback').sum())
+        cov2 = float(mapped2 / n2) if n2 else 0.0
+        logger.info(f"[assets] internalid-first coverage: {cov2:.2%} (mapped={mapped2} of {n2}; internalid={by_internalid2}, name_fallback={by_name2})")
+
+        # Optional QA outputs
+        try:
+            import os, json
+            out_dir = 'gosales/outputs'
+            os.makedirs(out_dir, exist_ok=True)
+            with open(f"{out_dir}/assets_join_metrics.json", 'w', encoding='utf-8') as f:
+                json.dump({
+                    'rows_total': n2,
+                    'rows_mapped': mapped2,
+                    'coverage_pct': round(cov2 * 100, 2),
+                    'mapped_by_internalid': by_internalid2,
+                    'mapped_by_name_fallback': by_name2,
+                }, f, indent=2)
+            unmatched = joined2[joined2['item_rollup'].isna()].copy()
+            if not unmatched.empty:
+                cols = [c for c in ['customer_name', 'product', 'internalid', 'product_norm', 'itemid_items', 'name_items'] if c in unmatched.columns]
+                unmatched[cols].head(1000).to_csv(f"{out_dir}/assets_unmatched.csv", index=False)
+            try:
+                conflict_counts = (
+                    items.groupby('internalid')['Item_Rollup']
+                    .nunique(dropna=True)
+                    .reset_index(name='rollup_nunique')
+                )
+                conflicts = conflict_counts[conflict_counts['rollup_nunique'] > 1]
+                if not conflicts.empty:
+                    conflicts.to_csv(f"{out_dir}/assets_join_conflicts.csv", index=False)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+        # Replace original join result with authoritative version
+        joined = joined2
+        # Align canonical column names expected downstream
+        try:
+            if 'itemid_items' in joined.columns and 'itemid' not in joined.columns:
+                joined['itemid'] = joined['itemid_items']
+            if 'name_items' in joined.columns and 'name' not in joined.columns:
+                joined['name'] = joined['name_items']
+        except Exception:
+            pass
+        # If not emitting debug, drop temp debug fields so schema stays minimal
+        if not emit_debug:
+            for col in ['join_method', 'internalid_items', 'itemid_items', 'name_items']:
+                if col in joined.columns:
+                    try:
+                        joined.drop(columns=[col], inplace=True)
+                    except Exception:
+                        pass
+    except Exception as _exc:
+        logger.warning(f"Authoritative assets join failed, using name-based fallback only: {_exc}")
 
     # Map to customer_id via dim_customer
     joined = _map_customers_to_ids(joined)
@@ -336,6 +439,85 @@ def features_at_cutoff(fact: pd.DataFrame, cutoff_date: str | datetime) -> Tuple
         per = per.merge(totals, on='customer_id', how='left')
         for c in ['assets_on_subs_total', 'assets_off_subs_total', 'assets_subs_share_total']:
             per[c] = per[c].fillna(0.0)
+    except Exception:
+        pass
+
+    # Last expiration date (global, any rollup) for reinclusion policies and days since last expiration
+    try:
+        last_exp = (
+            f[(f['expiration_date'].notna()) & (f['expiration_date'] < cutoff)]
+            .groupby('customer_id')['expiration_date']
+            .max()
+            .rename('assets_last_expiration_date')
+            .reset_index()
+        )
+        per = per.merge(last_exp, on='customer_id', how='left')
+        if 'assets_last_expiration_date' in per.columns:
+            per['assets_days_since_last_expiration'] = (cutoff - per['assets_last_expiration_date']).dt.days
+            per['assets_days_since_last_expiration'] = per['assets_days_since_last_expiration'].fillna(1e9).astype(int)
+        else:
+            per['assets_days_since_last_expiration'] = 1e9
+    except Exception:
+        per['assets_days_since_last_expiration'] = 1e9
+
+    # Per-division days since last expiration: map item_rollup -> division and aggregate
+    try:
+        import re
+        def _norm_key(s: str) -> str:
+            s = str(s or '').lower()
+            s = re.sub(r"[^0-9a-z]+", "_", s)
+            s = re.sub(r"_+", "_", s).strip('_')
+            return s
+        # Build rollup->division map using heuristics (lightweight copy of engine logic)
+        def _heuristic_div(roll_norm: str) -> str | None:
+            r = roll_norm
+            if any(x in r for x in ("swx", "solidworks", "sw_core", "swx_core")):
+                return normalize_division("Solidworks")
+            if any(x in r for x in ("epdm", "pdm", "cad_editor")):
+                return normalize_division("PDM")
+            if "simulation" in r or "sim" in r:
+                return normalize_division("Simulation")
+            if "training" in r:
+                return normalize_division("Training")
+            if "services" in r or "service" in r:
+                return normalize_division("Services")
+            if "success" in r and "plan" in r:
+                return normalize_division("Success Plan")
+            if r.startswith("scan") or "scann" in r:
+                return normalize_division("Scanning")
+            if "electrical" in r or "schematic" in r:
+                return normalize_division("SW Electrical")
+            if "camworks" in r or r.startswith("cam"):
+                return normalize_division("CAMWorks")
+            # Hardware/Printers and ecosystem cues
+            if any(x in r for x in ("fdm", "saf", "sla", "p3", "polyjet", "metals", "formlabs", "printer", "consumable", "spare", "repair", "am_", "3dp", "post_processing", "am_software")):
+                return normalize_division("Hardware")
+            return None
+
+        df_exp = f[(f['expiration_date'].notna()) & (f['expiration_date'] < cutoff)].copy()
+        if not df_exp.empty and 'item_rollup' in df_exp.columns:
+            df_exp['roll_norm'] = df_exp['item_rollup'].astype(str).map(_norm_key)
+            df_exp['div_norm'] = df_exp['roll_norm'].map(_heuristic_div)
+            df_exp = df_exp.dropna(subset=['div_norm'])
+            if not df_exp.empty:
+                last_by_div = (
+                    df_exp.groupby(['customer_id','div_norm'])['expiration_date']
+                    .max()
+                    .reset_index()
+                )
+                last_by_div['days_since'] = (cutoff - last_by_div['expiration_date']).dt.days
+                # Pivot to wide per-division days since
+                piv = last_by_div.pivot(index='customer_id', columns='div_norm', values='days_since').reset_index()
+                # Coerce names to 'assets_days_since_last_expiration_div_<division>'
+                piv.columns = [
+                    'customer_id' if c == 'customer_id' else f"{str(c)}" for c in piv.columns
+                ]
+                # Rename columns to match merge-prefixing in feature engine (assets_<key>_...)
+                # We'll store this frame into extra_frames using key 'days_since_last_expiration_div'
+                # The feature engine will prefix with 'assets_days_since_last_expiration_div_'
+                # Ensure customer_id is string
+                piv['customer_id'] = piv['customer_id'].astype(str)
+                extra_frames['days_since_last_expiration_div'] = piv
     except Exception:
         pass
 

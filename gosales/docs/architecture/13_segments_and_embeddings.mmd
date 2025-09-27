@@ -1,0 +1,49 @@
+%% Segments & Embeddings Overview
+
+```mermaid
+graph TB
+  subgraph "Segments"
+    Warm["Warm\nrfm__all__tx_n__12m > 0"]
+    Cold["Cold\nNo recent tx + owns assets"]
+    Prospect["Prospect\nNo tx, no assets"]
+  end
+
+  subgraph "Ownership & Eligibility"
+    OwnsDiv["owns_assets_div_<division>"]
+    Former["former_owner_div_<division>"]
+    DaysExp["assets_days_since_last_expiration_div_<division>"]
+    Policy["Eligibility\nexclude_if_active_assets\nreinclude_if_assets_expired_days"]
+  end
+
+  subgraph "Embeddings"
+    ALS["ALS Embeddings\n(tx-based)"]
+    I2V["Assets-based i2v\n(SVD on assets_rollup_*)"]
+  end
+
+  Warm --> ALS
+  Cold --> I2V
+  Prospect --> I2V
+
+  OwnsDiv --> Policy
+  Former --> DaysExp --> Policy
+
+  subgraph "Outputs"
+    WSAll["whitespace.csv"]
+    WSWarm["whitespace_warm.csv"]
+    WSC["whitespace_cold.csv"]
+    WSP["whitespace_prospect.csv"]
+    SelAll["whitespace_selected.csv"]
+    SelW["whitespace_selected_warm.csv"]
+    SelC["whitespace_selected_cold.csv"]
+    SelP["whitespace_selected_prospect.csv"]
+  end
+
+  Policy --> WSAll
+  Policy --> WSWarm
+  Policy --> WSC
+  Policy --> WSP
+  WSAll --> SelAll
+  WSWarm --> SelW
+  WSC --> SelC
+  WSP --> SelP
+```

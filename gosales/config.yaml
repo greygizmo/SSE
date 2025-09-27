@@ -36,9 +36,11 @@ etl:
   currency: "USD"
   fail_on_contract_breach: true
   allow_unknown_columns: false
-  enable_industry_fuzzy: true
+  enable_industry_fuzzy: false
   fuzzy_min_unmatched: 50
   fuzzy_skip_if_coverage_ge: 0.95
+  fuzzy_max_unmatched: 20000
+  fuzzy_cache_path: gosales/outputs/industry_fuzzy_matches.csv
   # Path to CSV when industry_enrichment source is 'csv'
   industry_enrichment_csv: gosales/data/database_samples/TR - Industry Enrichment.csv
   # Exact DB column headers for identifiers
@@ -47,6 +49,11 @@ etl:
     order_date: Rec_Date
     division: division
     customer_name: New_Business
+  # Expand dim_customer roster: include NetSuite + Assets owners
+  dim_customer:
+    sources: [sales_log, ns, assets]
+  assets:
+    emit_debug_columns: true
 logging:
   level: INFO
   jsonl: true
@@ -62,6 +69,14 @@ features:
   use_als_embeddings: true
   als_lookback_months: 12
   use_item2vec: false
+  # Optional: run ALS over assets rollups (guarded sizes)
+  use_assets_als: false
+  assets_als:
+    max_rows: 20000
+    max_cols: 200
+    factors: 16
+    iters: 4
+    reg: 0.1
   use_text_tags: false
   use_assets: true
   # Leakage guards
@@ -109,8 +124,15 @@ whitespace:
     exclude_if_recent_contact_days: 21
     exclude_if_open_deal: true
     require_region_match: true
+    exclude_if_active_assets: true
+    reinclude_if_assets_expired_days: 365
   capacity_mode: top_percent          # top_percent | per_rep | hybrid
   accounts_per_rep: 25
+  # Segment-aware allocation for capacity selection (warm/cold/prospect)
+  segment_allocation:
+    warm: 0.7
+    cold: 0.3
+    prospect: 0.0
   ev_cap_percentile: 0.95
   als_coverage_threshold: 0.30
   bias_division_max_share_topN: 0.6

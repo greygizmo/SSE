@@ -331,7 +331,7 @@ def build_star_schema(engine, config_path: str | Path | None = None, rebuild: bo
     # Start with basic customer data from sales_log
     # Keep both the legacy CustomerId and the ERP internal Id (ns_id) for robust joining
     # Build per-customer record; keep exact and normalised customer name for joining with enrichment
-    dim_customer_base = (
+    dc_sales = (
         sales_log.lazy()
         .select(["Customer", "CustomerId"])
         .rename({
@@ -352,9 +352,103 @@ def build_star_schema(engine, config_path: str | Path | None = None, rebuild: bo
                 .str.extract(r"^\s*(\d+)")
                 .cast(pl.Int64, strict=False)
                 .alias("customer_prefix_id"),
+            pl.lit(1).alias("source_sales_log"),
+            pl.lit(0).alias("source_ns"),
+            pl.lit(0).alias("source_assets"),
         ])
         .filter(pl.col("customer_id").is_not_null())
     )
+
+    # Optional: union in NetSuite roster and Assets owners to expand inference roster
+    try:
+        sources_cfg = getattr(getattr(getattr(cfg, 'etl', object()), 'dim_customer', object()), 'sources', None)
+        if not sources_cfg:
+            # Default precedence: ns > sales_log > assets
+            sources = ["sales_log", "ns", "assets"]
+        else:
+            sources = [str(s).strip().lower() for s in sources_cfg]
+    except Exception:
+        sources = ["sales_log", "ns", "assets"]
+
+    frames: list[pl.LazyFrame] = []
+    rank_map = {name: idx for idx, name in enumerate([s for s in sources if s in {"ns","sales_log","assets"}], start=0)}
+
+    # Sales base always present
+    frames.append(
+        dc_sales.with_columns([
+            pl.lit(rank_map.get("sales_log", 1)).alias("source_rank"),
+            pl.lit("sales_log").alias("source")
+        ])
+    )
+
+    if "ns" in sources:
+        try:
+            try:
+                q = "SELECT internalid AS customer_id, entityid AS customer_name FROM dim_ns_customer"
+                ns_pd = pd.read_sql(q, curated_engine)
+            except Exception:
+                q = "SELECT internalid AS customer_id, ns_companyname AS customer_name FROM dim_ns_customer"
+                ns_pd = pd.read_sql(q, curated_engine)
+            if not ns_pd.empty:
+                ns_pd["customer_id"] = normalize_identifier_series(ns_pd["customer_id"]).astype(str)
+                ns_pd["customer_name"] = ns_pd["customer_name"].astype(str).str.strip()
+                ns_pd["customer_name_norm"] = ns_pd["customer_name"].str.lower().str.replace(r"\s+"," ", regex=True)
+                ns_pd["customer_prefix_id"] = ns_pd["customer_name"].str.extract(r"^\s*(\d+)").astype("Int64")
+                ns_pl = pl.from_pandas(ns_pd)[["customer_id","customer_name","customer_name_norm","customer_prefix_id"]]
+                ns_pl = ns_pl.lazy().with_columns([
+                    pl.lit(0).alias("source_sales_log"),
+                    pl.lit(1).alias("source_ns"),
+                    pl.lit(0).alias("source_assets"),
+                    pl.lit(rank_map.get("ns", 0)).alias("source_rank"),
+                    pl.lit("ns").alias("source"),
+                ])
+                frames.append(ns_pl)
+        except Exception as e:
+            logger.warning(f"dim_ns_customer unavailable for roster union: {e}")
+
+    if "assets" in sources:
+        try:
+            fa_pd = pd.read_sql("SELECT DISTINCT customer_id, customer_name FROM fact_assets", curated_engine)
+            if not fa_pd.empty:
+                fa_pd["customer_id"] = normalize_identifier_series(fa_pd["customer_id"]).astype(str)
+                fa_pd["customer_name"] = fa_pd["customer_name"].astype(str).str.strip()
+                fa_pd["customer_name_norm"] = fa_pd["customer_name"].str.lower().str.replace(r"\s+"," ", regex=True)
+                fa_pd["customer_prefix_id"] = fa_pd["customer_name"].str.extract(r"^\s*(\d+)").astype("Int64")
+                fa_pl = pl.from_pandas(fa_pd)[["customer_id","customer_name","customer_name_norm","customer_prefix_id"]]
+                fa_pl = fa_pl.lazy().with_columns([
+                    pl.lit(0).alias("source_sales_log"),
+                    pl.lit(0).alias("source_ns"),
+                    pl.lit(1).alias("source_assets"),
+                    pl.lit(rank_map.get("assets", 2)).alias("source_rank"),
+                    pl.lit("assets").alias("source"),
+                ])
+                frames.append(fa_pl)
+        except Exception as e:
+            logger.warning(f"fact_assets unavailable for roster union: {e}")
+
+    # Union frames and deduplicate by customer_id with precedence
+    if frames:
+        dim_customer_base = pl.concat(frames, how="vertical_relaxed").with_columns([
+            pl.col("customer_id").cast(pl.Utf8)
+        ])
+        # Keep best source per customer_id
+        dim_customer_base = (
+            dim_customer_base
+            .sort(["customer_id","source_rank"])  # lower rank first (ns over sales over assets)
+            .group_by("customer_id")
+            .agg([
+                pl.col("customer_name").first().alias("customer_name"),
+                pl.col("customer_name_norm").first().alias("customer_name_norm"),
+                pl.col("customer_prefix_id").first().alias("customer_prefix_id"),
+                pl.col("source_sales_log").max().alias("source_sales_log"),
+                pl.col("source_ns").max().alias("source_ns"),
+                pl.col("source_assets").max().alias("source_assets"),
+                pl.col("source").first().alias("source"),
+                pl.col("source_rank").first().alias("source_rank"),
+            ])
+        ).lazy()
+    else:
+        dim_customer_base = dc_sales
 
     # Preserve raw sales_log data for Branch/Rep features
     # This ensures we have the original Branch and Rep information available
@@ -464,74 +558,102 @@ def build_star_schema(engine, config_path: str | Path | None = None, rebuild: bo
         
         # C) Optional fuzzy-match fallback for remaining unmatched names (configurable)
         try:
-            if FUZZY_AVAILABLE:
-                unmatched = dim_customer.filter(pl.col("industry").is_null())
-                total = int(len(dim_customer)) if dim_customer is not None else 0
-                with_ind = int(dim_customer.filter(pl.col('industry').is_not_null()).height)
-                cov = (with_ind / total) if total else 0.0
-                do_fuzzy = bool(getattr(getattr(cfg, 'etl', object()), 'enable_industry_fuzzy', True))
-                min_unmatched = int(getattr(getattr(cfg, 'etl', object()), 'fuzzy_min_unmatched', 50))
-                skip_cov_ge = float(getattr(getattr(cfg, 'etl', object()), 'fuzzy_skip_if_coverage_ge', 0.95))
-                if not do_fuzzy:
-                    logger.info("Industry fuzzy matching disabled via config; skipping fuzzy fallback.")
-                elif cov >= skip_cov_ge:
-                    logger.info(f"Industry coverage {cov:.2%} >= {skip_cov_ge:.0%} threshold; skipping fuzzy fallback.")
-                elif len(unmatched) < min_unmatched:
-                    logger.info(f"Only {len(unmatched)} unmatched (< {min_unmatched}); skipping fuzzy fallback.")
-                else:
-                    logger.info(f"Attempting fuzzy match for {len(unmatched)} customers without industry data...")
-                    # Collect eager frames to pandas
-                    unmatched_pd = unmatched.select(["customer_id", "customer_name_norm"]).to_pandas()
-                    choices_pd = industry_clean.select(["customer_name_norm"]).unique().collect().to_pandas()
-                    choices = choices_pd["customer_name_norm"].dropna().tolist()
+            unmatched = dim_customer.filter(pl.col("industry").is_null())
+            total = int(len(dim_customer)) if dim_customer is not None else 0
+            with_ind = int(dim_customer.filter(pl.col('industry').is_not_null()).height)
+            cov = (with_ind / total) if total else 0.0
+            do_fuzzy = bool(getattr(getattr(cfg, 'etl', object()), 'enable_industry_fuzzy', False))
+            min_unmatched = int(getattr(getattr(cfg, 'etl', object()), 'fuzzy_min_unmatched', 50))
+            skip_cov_ge = float(getattr(getattr(cfg, 'etl', object()), 'fuzzy_skip_if_coverage_ge', 0.95))
+            max_unmatched = int(getattr(getattr(cfg, 'etl', object()), 'fuzzy_max_unmatched', 20000))
 
-                    # Two-pass threshold: strict then slightly relaxed
-                    def run_fuzzy(names: pd.Series, threshold: int) -> pd.DataFrame:
-                        local_matches = []
-                        for name in names.fillna(""):
-                            if not name:
-                                local_matches.append((name, None, 0))
-                                continue
-                            match = process.extractOne(name, choices, scorer=fuzz.token_sort_ratio)
-                            if match and match[1] >= threshold:
-                                local_matches.append((name, match[0], match[1]))
-                            else:
-                                local_matches.append((name, None, 0))
-                        return pd.DataFrame(local_matches, columns=["customer_name_norm", "matched_name_norm", "score"])\
-                            .dropna(subset=["matched_name_norm"]) 
-
-                    match_df = run_fuzzy(unmatched_pd["customer_name_norm"], 97)
-                    # For names still unmatched, try threshold 94
-                    if len(match_df) < len(unmatched_pd):
-                        remaining = unmatched_pd.merge(match_df[["customer_name_norm"]], on="customer_name_norm", how="left", indicator=True)
-                        remaining = remaining[remaining['_merge'] == 'left_only']
-                        if not remaining.empty:
-                            match_df_relaxed = run_fuzzy(remaining["customer_name_norm"], 94)
-                            match_df = pd.concat([match_df, match_df_relaxed], ignore_index=True)
-
-                    if not match_df.empty:
-                        # Join back to enrichment to fetch attributes
-                        enrich_pd = industry_clean.select(["customer_name_norm", "industry", "industry_sub", "web_address", "cleaned_customer_name", "industry_reasoning"]).unique().collect().to_pandas()
-                        fuzz_join = match_df.merge(enrich_pd, left_on="matched_name_norm", right_on="customer_name_norm", how="left")
-                        fuzz_join = fuzz_join[["customer_name_norm_x", "matched_name_norm", "score", "industry", "industry_sub", "web_address", "cleaned_customer_name", "industry_reasoning"]].rename(columns={"customer_name_norm_x": "customer_name_norm"})
-
-                        # Persist fuzzy pairs for audit
-                        try:
-                            OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
-                            fuzz_join.to_csv(OUTPUTS_DIR / 'industry_fuzzy_matches.csv', index=False)
-                        except Exception:
-                            pass
-
-                        # Merge into dim_customer
+            # Apply cached matches first to shrink problem size
+            try:
+                cache_path = getattr(getattr(cfg, 'etl', object()), 'fuzzy_cache_path', None) or (OUTPUTS_DIR / 'industry_fuzzy_matches.csv')
+                import os
+                if cache_path and os.path.exists(cache_path):
+                    cache_pd = pd.read_csv(cache_path)
+                    if not cache_pd.empty and 'customer_name_norm' in cache_pd.columns:
                         dim_pd = dim_customer.to_pandas()
-                        dim_pd = dim_pd.merge(fuzz_join.drop(columns=["matched_name_norm", "score"]), on="customer_name_norm", how="left", suffixes=("", "_fuzzy"))
-                        for col in ["industry", "industry_sub", "web_address", "cleaned_customer_name", "industry_reasoning"]:
-                            dim_pd[col] = dim_pd[col].where(dim_pd[col].notna(), dim_pd[f"{col}_fuzzy"])  # fill nulls with fuzzy
-                            fcol = f"{col}_fuzzy"
-                            if fcol in dim_pd.columns:
-                                dim_pd.drop(columns=[fcol], inplace=True)
+                        before = dim_pd['industry'].notna().sum()
+                        dim_pd = dim_pd.merge(
+                            cache_pd[['customer_name_norm','industry','industry_sub','web_address','cleaned_customer_name','industry_reasoning']].drop_duplicates('customer_name_norm'),
+                            on='customer_name_norm', how='left', suffixes=('', '_cache')
+                        )
+                        for col in ['industry','industry_sub','web_address','cleaned_customer_name','industry_reasoning']:
+                            dim_pd[col] = dim_pd[col].where(dim_pd[col].notna(), dim_pd.get(f"{col}_cache"))
+                            c = f"{col}_cache"
+                            if c in dim_pd.columns:
+                                dim_pd.drop(columns=[c], inplace=True)
                         dim_customer = pl.from_pandas(dim_pd)
-                        logger.info("Fuzzy matching applied to fill remaining industry data.")
+                        after = dim_pd['industry'].notna().sum()
+                        logger.info(f"Applied industry cache: +{after-before} customers filled")
+                        unmatched = dim_customer.filter(pl.col('industry').is_null())
+            except Exception as _e:
+                logger.warning(f"Industry cache join failed: {_e}")
+
+            if not do_fuzzy:
+                logger.info("Industry fuzzy matching disabled via config; skipping fuzzy fallback.")
+            elif cov >= skip_cov_ge:
+                logger.info(f"Industry coverage {cov:.2%} >= {skip_cov_ge:.0%} threshold; skipping fuzzy fallback.")
+            elif len(unmatched) < min_unmatched:
+                logger.info(f"Only {len(unmatched)} unmatched (< {min_unmatched}); skipping fuzzy fallback.")
+            elif len(unmatched) > max_unmatched:
+                logger.info(f"Skipping fuzzy: unmatched {len(unmatched)} exceeds fuzzy_max_unmatched={max_unmatched}")
+            elif FUZZY_AVAILABLE:
+                logger.info(f"Attempting fuzzy match for {len(unmatched)} customers without industry data...")
+                # Collect eager frames to pandas
+                unmatched_pd = unmatched.select(["customer_id", "customer_name_norm"]).to_pandas()
+                choices_pd = industry_clean.select(["customer_name_norm"]).unique().collect().to_pandas()
+                choices = choices_pd["customer_name_norm"].dropna().tolist()
+
+                # Two-pass threshold: strict then slightly relaxed
+                def run_fuzzy(names: pd.Series, threshold: int) -> pd.DataFrame:
+                    local_matches = []
+                    for name in names.fillna(""):
+                        if not name:
+                            local_matches.append((name, None, 0))
+                            continue
+                        match = process.extractOne(name, choices, scorer=fuzz.token_sort_ratio)
+                        if match and match[1] >= threshold:
+                            local_matches.append((name, match[0], match[1]))
+                        else:
+                            local_matches.append((name, None, 0))
+                    return pd.DataFrame(local_matches, columns=["customer_name_norm", "matched_name_norm", "score"])\
+                        .dropna(subset=["matched_name_norm"]) 
+
+                match_df = run_fuzzy(unmatched_pd["customer_name_norm"], 97)
+                # For names still unmatched, try threshold 94
+                if len(match_df) < len(unmatched_pd):
+                    remaining = unmatched_pd.merge(match_df[["customer_name_norm"]], on="customer_name_norm", how="left", indicator=True)
+                    remaining = remaining[remaining['_merge'] == 'left_only']
+                    if not remaining.empty:
+                        match_df_relaxed = run_fuzzy(remaining["customer_name_norm"], 94)
+                        match_df = pd.concat([match_df, match_df_relaxed], ignore_index=True)
+
+                if not match_df.empty:
+                    # Join back to enrichment to fetch attributes
+                    enrich_pd = industry_clean.select(["customer_name_norm", "industry", "industry_sub", "web_address", "cleaned_customer_name", "industry_reasoning"]).unique().collect().to_pandas()
+                    fuzz_join = match_df.merge(enrich_pd, left_on="matched_name_norm", right_on="customer_name_norm", how="left")
+                    fuzz_join = fuzz_join[["customer_name_norm_x", "matched_name_norm", "score", "industry", "industry_sub", "web_address", "cleaned_customer_name", "industry_reasoning"]].rename(columns={"customer_name_norm_x": "customer_name_norm"})
+
+                    # Persist fuzzy pairs for audit and as cache
+                    try:
+                        OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+                        fuzz_join.to_csv(OUTPUTS_DIR / 'industry_fuzzy_matches.csv', index=False)
+                    except Exception:
+                        pass
+
+                    # Merge into dim_customer
+                    dim_pd = dim_customer.to_pandas()
+                    dim_pd = dim_pd.merge(fuzz_join.drop(columns=["matched_name_norm", "score"]), on="customer_name_norm", how="left", suffixes=("", "_fuzzy"))
+                    for col in ["industry", "industry_sub", "web_address", "cleaned_customer_name", "industry_reasoning"]:
+                        dim_pd[col] = dim_pd[col].where(dim_pd[col].notna(), dim_pd[f"{col}_fuzzy"])  # fill nulls with fuzzy
+                        fcol = f"{col}_fuzzy"
+                        if fcol in dim_pd.columns:
+                            dim_pd.drop(columns=[fcol], inplace=True)
+                    dim_customer = pl.from_pandas(dim_pd)
+                    logger.info("Fuzzy matching applied to fill remaining industry data.")
             else:
                 logger.info("rapidfuzz not available; skipping fuzzy fallback.")
         except Exception as e:

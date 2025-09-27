@@ -1213,6 +1213,69 @@ elif tab == "Whitespace":
             st.caption(f"Updated: {_fmt_mtime(wthr)}")
             st.caption("Top‑percent / per‑rep / hybrid thresholds for list sizing & diversification.")
             st.dataframe(_read_csv(wthr), use_container_width=True)
+        # Capacity-selected lists (global and by segment)
+        try:
+            st.subheader("Capacity-Selected Lists")
+            sel_global = OUTPUTS_DIR / (f"whitespace_selected_{sel_cut}.csv")
+            if sel_global.exists():
+                sg_df = _read_csv(sel_global)
+                st.caption(f"Selected (global): {sel_global.name} · Updated: {_fmt_mtime(sel_global)}")
+                st.dataframe(sg_df.head(200), use_container_width=True)
+                st.download_button("Download selected (global)", data=sg_df.to_csv(index=False), file_name=sel_global.name)
+            seg_names = ["warm","cold","prospect"]
+            seg_tabs = st.tabs([f"{s.title()}" for s in seg_names])
+            for (sname, stab) in zip(seg_names, seg_tabs):
+                with stab:
+                    p = OUTPUTS_DIR / (f"whitespace_selected_{sname}_{sel_cut}.csv")
+                    if p.exists():
+                        sdf = _read_csv(p)
+                        st.caption(f"Selected ({sname}): {p.name} · Updated: {_fmt_mtime(p)}")
+                        st.dataframe(sdf.head(200), use_container_width=True)
+                        st.download_button(f"Download selected ({sname})", data=sdf.to_csv(index=False), file_name=p.name)
+                    else:
+                        st.info(f"No capacity-selected file for segment: {sname}")
+        except Exception as _e:
+            st.warning(f"Selected lists preview unavailable: {_e}")
+
+        # Segment allocation tuner (preview only; recompute selection in UI)
+        try:
+            st.subheader("Segment Allocation Preview (UI)")
+            df_ranked = _read_csv(ws)
+            if 'segment' in df_ranked.columns:
+                c1, c2, c3, c4 = st.columns([2,2,2,2])
+                with c1:
+                    warm_pct = st.slider("Warm %", min_value=0, max_value=100, value=70, step=5)
+                with c2:
+                    cold_pct = st.slider("Cold %", min_value=0, max_value=100, value=30, step=5)
+                with c3:
+                    pros_pct = st.slider("Prospect %", min_value=0, max_value=100, value=0, step=5)
+                with c4:
+                    cap_pct = st.slider("Capacity (Top %)", min_value=1, max_value=50, value=10, step=1)
+                # Normalize
+                ssum = max(1, warm_pct + cold_pct + pros_pct)
+                warm_r = warm_pct/ssum; cold_r = cold_pct/ssum; pros_r = pros_pct/ssum
+                ksel = max(1, int(len(df_ranked) * (cap_pct/100.0)))
+                sort_by = [c for c in ['score','p_icp','EV_norm'] if c in df_ranked.columns]
+                def top_seg(name, n):
+                    if n <= 0:
+                        return df_ranked.head(0)
+                    sub = df_ranked[df_ranked['segment'].astype(str).str.lower() == name]
+                    return sub.sort_values(by=sort_by, ascending=False, na_position='last').head(n)
+                warm_n = int(round(ksel * warm_r)); cold_n = int(round(ksel * cold_r)); pros_n = max(0, ksel - warm_n - cold_n)
+                parts = [top_seg('warm', warm_n), top_seg('cold', cold_n), top_seg('prospect', pros_n)]
+                preview = pd.concat(parts, ignore_index=True)
+                if len(preview) < ksel:
+                    rem = ksel - len(preview)
+                    rem_pool = df_ranked.merge(preview[['customer_id','division_name']], on=['customer_id','division_name'], how='left', indicator=True)
+                    rem_pool = rem_pool[rem_pool['_merge']=='left_only'].drop(columns=['_merge'])
+                    preview = pd.concat([preview, rem_pool.sort_values(by=sort_by, ascending=False, na_position='last').head(rem)], ignore_index=True)
+                st.dataframe(preview.head(200), use_container_width=True)
+                st.download_button("Download UI-selected preview", data=preview.to_csv(index=False), file_name=f"whitespace_selected_ui_{sel_cut}.csv")
+            else:
+                st.caption("Segment column not present in whitespace; rerun scoring to include segment labels.")
+        except Exception as _e:
+            st.warning(f"Segment allocation preview unavailable: {_e}")
+
         # Logs preview
         wlog = OUTPUTS_DIR / f"whitespace_log_{sel_cut}.jsonl"
         if wlog.exists():

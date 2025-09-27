@@ -7,7 +7,7 @@ from gosales.utils.logger import get_logger
 from gosales.utils import config as cfg
 from gosales.utils.paths import OUTPUTS_DIR
 from gosales.features.als_embed import customer_als_embeddings
-from gosales.etl.sku_map import division_set, get_model_targets
+from gosales.etl.sku_map import division_set, get_model_targets, get_sku_mapping
 from gosales.utils.normalize import normalize_division
 from gosales.etl.assets import build_fact_assets  # for on-demand ensure
 from gosales.sql.queries import select_all
@@ -718,11 +718,168 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
                     if features_pd[c].dtype.kind in 'fi':
                         features_pd[c] = features_pd[c].fillna(0.0)
 
+                # Per-division ownership flags from assets at cutoff (active subs)
+                try:
+                    import re
+                    # Build LUT from SKU mapping keys -> division
+                    def _norm_key(s: str) -> str:
+                        s = str(s or '').lower()
+                        s = re.sub(r"[^0-9a-z]+", "_", s)
+                        s = re.sub(r"_+", "_", s).strip('_')
+                        return s
+                    sku_map = get_sku_mapping() or {}
+                    lut = {_norm_key(k): normalize_division(v.get('division')) for k, v in sku_map.items() if isinstance(v, dict) and 'division' in v}
+                    # Heuristic fallback rules when rollup not in sku_map keys
+                    def _heuristic_div(roll_norm: str) -> str | None:
+                        r = roll_norm
+                        # Solidworks core
+                        if any(x in r for x in ("swx", "solidworks", "sw_core", "swx_core")):
+                            return normalize_division("Solidworks")
+                        # PDM/EPDM
+                        if any(x in r for x in ("epdm", "pdm", "cad_editor")):
+                            return normalize_division("PDM")
+                        # Simulation
+                        if "simulation" in r or "sim" in r:
+                            return normalize_division("Simulation")
+                        # CAM/CAMWorks
+                        if "camworks" in r or r.startswith("cam"):
+                            return normalize_division("CAMWorks")
+                        # Electrical
+                        if "electrical" in r or "schematic" in r:
+                            return normalize_division("SW Electrical")
+                        if any(x in r for x in ("training",)):
+                            return normalize_division("Training")
+                        if any(x in r for x in ("services",)):
+                            return normalize_division("Services")
+                        if any(x in r for x in ("success", "plan")):
+                            return normalize_division("Success Plan")
+                        if r.startswith("scan") or "scann" in r:
+                            return normalize_division("Scanning")
+                        # Printers/hardware ecosystem indicators
+                        if any(x in r for x in ("fdm", "saf", "sla", "p3", "polyjet", "metals", "formlabs", "printer", "consumable", "spare", "repair", "am_", "3dp", "post_processing")):
+                            return normalize_division("Hardware")
+                        return None
+
+                    # Collect assets_on_subs_* and assets_off_subs_* columns
+                    on_cols = [c for c in features_pd.columns if c.startswith('assets_on_subs_')]
+                    off_cols = [c for c in features_pd.columns if c.startswith('assets_off_subs_')]
+                    add_cols: dict[str, pd.Series] = {}
+                    if on_cols:
+                        # Map each rollup column to a division
+                        div_to_cols: dict[str, list[str]] = {}
+                        for c in on_cols:
+                            roll_norm = c.replace('assets_on_subs_', '')
+                            div = lut.get(roll_norm)
+                            if not div:
+                                div = _heuristic_div(roll_norm)
+                            if div:
+                                div_to_cols.setdefault(div, []).append(c)
+                        # Create boolean flags per division
+                        for div, cols in div_to_cols.items():
+                            if not cols:
+                                continue
+                            s = features_pd[cols].sum(axis=1)
+                            colname = f"owns_assets_div_{normalize_division(div).lower()}"
+                            add_cols[colname] = (pd.to_numeric(s, errors='coerce').fillna(0.0) > 0).astype('Int8')
+                    # Former owner flags: any off_subs in division and no on_subs
+                    if off_cols:
+                        div_to_off: dict[str, list[str]] = {}
+                        for c in off_cols:
+                            roll_norm = c.replace('assets_off_subs_', '')
+                            div = lut.get(roll_norm) or _heuristic_div(roll_norm)
+                            if div:
+                                div_to_off.setdefault(div, []).append(c)
+                        # re-use on division to compare
+                        div_to_on: dict[str, list[str]] = {}
+                        for c in on_cols:
+                            roll_norm = c.replace('assets_on_subs_', '')
+                            div = lut.get(roll_norm) or _heuristic_div(roll_norm)
+                            if div:
+                                div_to_on.setdefault(div, []).append(c)
+                        for div, off_list in div_to_off.items():
+                            off_sum = features_pd[off_list].sum(axis=1)
+                            on_sum = features_pd[div_to_on.get(div, [])].sum(axis=1) if div in div_to_on else 0
+                            fname = f"former_owner_div_{normalize_division(div).lower()}"
+                            add_cols[fname] = (
+                                (pd.to_numeric(off_sum, errors='coerce').fillna(0.0) > 0)
+                                & (pd.to_numeric(on_sum, errors='coerce').fillna(0.0) == 0)
+                            ).astype('Int8')
+                    if add_cols:
+                        features_pd = pd.concat([features_pd, pd.DataFrame(add_cols, index=features_pd.index)], axis=1)
+                except Exception as _e:
+                    logger.warning(f"Per-division asset flags failed: {_e}")
+
                 try:
                     added = [c for c in features_pd.columns if str(c).startswith('assets_')]
                     logger.info("Asset features added: %d", len(added))
                 except Exception:
                     pass
+                # Assets-based embedding fallback (i2v) for zero-ALS cohorts
+                try:
+                    from sklearn.decomposition import TruncatedSVD
+                    # If ALS coverage is low or ALS columns missing, derive item2vec-like components from assets_rollup_*
+                    als_cols_all = [c for c in features_pd.columns if str(c).startswith('als_f')]
+                    als_cov = 0.0
+                    if als_cols_all:
+                        try:
+                            als_cov = (features_pd[als_cols_all].abs().sum(axis=1) > 0).mean()
+                        except Exception:
+                            als_cov = 0.0
+                    use_i2v = bool(getattr(cfgmod.features, 'use_item2vec', False))
+                    try:
+                        als_thr = float(getattr(getattr(cfgmod, 'whitespace', object()), 'als_coverage_threshold', 0.30))
+                    except Exception:
+                        als_thr = 0.30
+                    roll_cols = [c for c in features_pd.columns if str(c).startswith('assets_rollup_')]
+                    if roll_cols and (use_i2v or als_cov < als_thr):
+                        R = features_pd[roll_cols].apply(pd.to_numeric, errors='coerce').fillna(0.0).values
+                        ncomp = min(16, max(2, min(R.shape[0], R.shape[1]) - 1))
+                        if ncomp >= 2:
+                            svd = TruncatedSVD(n_components=ncomp, random_state=42)
+                            Z = svd.fit_transform(R)
+                            i2v = pd.DataFrame(Z, index=features_pd.index, columns=[f'i2v_f{i}' for i in range(ncomp)])
+                            # Create i2v columns once; they are supplemental features for cold rows
+                            for c in i2v.columns:
+                                if c not in features_pd.columns:
+                                    features_pd[c] = i2v[c].astype(float)
+                except Exception as _e:
+                    logger.warning(f"Assets-based i2v fallback failed: {_e}")
+
+                # Optional Assets-ALS factorization (guarded for size)
+                try:
+                    use_assets_als = bool(getattr(cfgmod.features, 'use_assets_als', False))
+                    roll_cols = [c for c in features_pd.columns if str(c).startswith('assets_rollup_')]
+                    max_rows = int(getattr(getattr(cfgmod.features, 'assets_als', object()), 'max_rows', 20000)) if hasattr(cfgmod.features, 'assets_als') else 20000
+                    max_cols = int(getattr(getattr(cfgmod.features, 'assets_als', object()), 'max_cols', 200)) if hasattr(cfgmod.features, 'assets_als') else 200
+                    factors = int(getattr(getattr(cfgmod.features, 'assets_als', object()), 'factors', 16)) if hasattr(cfgmod.features, 'assets_als') else 16
+                    iters = int(getattr(getattr(cfgmod.features, 'assets_als', object()), 'iters', 4)) if hasattr(cfgmod.features, 'assets_als') else 4
+                    reg = float(getattr(getattr(cfgmod.features, 'assets_als', object()), 'reg', 0.1)) if hasattr(cfgmod.features, 'assets_als') else 0.1
+                    if use_assets_als and roll_cols:
+                        m, n = features_pd.shape[0], len(roll_cols)
+                        if m <= max_rows and n <= max_cols and m > 2 and n > 2:
+                            import numpy as _np
+                            R = features_pd[roll_cols].apply(pd.to_numeric, errors='coerce').fillna(0.0).to_numpy(dtype=_np.float32)
+                            f = min(factors, max(2, min(m, n) - 1))
+                            rng = _np.random.default_rng(42)
+                            X = rng.standard_normal((m, f), dtype=_np.float32) * 0.01
+                            Y = rng.standard_normal((n, f), dtype=_np.float32) * 0.01
+                            I = _np.eye(f, dtype=_np.float32)
+                            # ALS iterations with normal equations
+                            for _ in range(iters):
+                                # Update X (users)
+                                YtY = Y.T @ Y + reg * I
+                                Yt = Y.T
+                                X = _np.linalg.solve(YtY, (Yt @ R.T)).T
+                                # Update Y (items)
+                                XtX = X.T @ X + reg * I
+                                Xt = X.T
+                                Y = _np.linalg.solve(XtX, (Xt @ R)).T
+                            als_cols = {f'als_assets_f{i}': X[:, i] for i in range(f)}
+                            features_pd = pd.concat([features_pd, pd.DataFrame(als_cols, index=features_pd.index)], axis=1)
+                        else:
+                            logger.info("Assets-ALS skipped due to matrix size (rows=%d, cols=%d)", m, n)
+                except Exception as _e:
+                    logger.warning(f"Assets-ALS factorization failed: {_e}")
     except Exception as e:
         logger.warning(f"Asset features failed: {e}")
 

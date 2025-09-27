@@ -15,6 +15,10 @@ from gosales.utils.grades import (
 )
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.preprocessing import normalize
+try:
+    from gosales.utils.normalize import normalize_division as _norm_division
+except Exception:
+    _norm_division = lambda s: str(s).strip()
 
 
 logger = get_logger(__name__)
@@ -56,6 +60,11 @@ def _compute_affinity_lift(df: pd.DataFrame, col: str = "mb_lift_max") -> pd.Ser
 
 # Store centroid path for reuse across runs
 ALS_CENTROID_PATH = OUTPUTS_DIR / "als_owner_centroid.npy"
+ASSETS_ALS_CENTROID_PATH = OUTPUTS_DIR / "assets_als_owner_centroid.npy"
+
+def _assets_als_centroid_path_for_div(div: str) -> Path:
+    key = str(div or "").strip().lower().replace(" ", "_").replace("/", "_")
+    return OUTPUTS_DIR / f"assets_als_owner_centroid_{key}.npy"
 
 
 def _apply_eligibility_and_centroid(df: pd.DataFrame) -> Tuple[pd.DataFrame, np.ndarray | None]:
@@ -85,6 +94,21 @@ def _apply_eligibility_and_centroid(df: pd.DataFrame) -> Tuple[pd.DataFrame, np.
             centroid = np.load(ALS_CENTROID_PATH)
         except Exception:
             centroid = None
+
+    # Compute and persist assets-ALS centroid similarly (if columns present)
+    try:
+        aals_cols = [c for c in df.columns if c.startswith("als_assets_f")]
+        if aals_cols and "owned_division_pre_cutoff" in df.columns:
+            a_owners = df[df["owned_division_pre_cutoff"].astype(bool)]
+            if not a_owners.empty:
+                a_centroid = a_owners[aals_cols].astype(float).mean(axis=0).to_numpy(dtype=float)
+                try:
+                    ASSETS_ALS_CENTROID_PATH.parent.mkdir(parents=True, exist_ok=True)
+                    np.save(ASSETS_ALS_CENTROID_PATH, a_centroid)
+                except Exception:
+                    pass
+    except Exception:
+        pass
 
     if "owned_division_pre_cutoff" in df.columns:
         df = df[~df["owned_division_pre_cutoff"].astype(bool)].copy()
@@ -236,11 +260,57 @@ def _apply_eligibility(df: pd.DataFrame, cfg) -> tuple[pd.DataFrame, dict]:
         "region_mismatch_excluded": 0,
     }
     if elig:
+        owned_drop_total = 0
+        # Transaction-based ownership exclusion (last-12m proxy)
         if getattr(elig, "exclude_if_owned_ever", False) and "owned_division_pre_cutoff" in df.columns:
-            owned_mask = df["owned_division_pre_cutoff"].astype(bool)
-            cond = owned_mask & mask
-            counts["owned_excluded"] = int(cond.sum())
-            mask &= ~cond
+            owned_mask_tx = df["owned_division_pre_cutoff"].astype(bool)
+            cond_tx = owned_mask_tx & mask
+            owned_drop_total += int(cond_tx.sum())
+            mask &= ~cond_tx
+        # Optional: exclude if active assets indicate ownership in the same division
+        try:
+            if getattr(elig, "exclude_if_active_assets", False) and "division_name" in df.columns:
+                # For each division, look for a matching per-division assets flag column
+                divs = sorted(set(df['division_name'].astype(str).dropna().unique()))
+                dropped_here = 0
+                for d in divs:
+                    col = f"owns_assets_div_{_norm_division(d).lower()}"
+                    if col in df.columns:
+                        m = (df['division_name'].astype(str) == d) & df[col].astype(bool) & mask
+                        dropped_here += int(m.sum())
+                        mask &= ~m
+                owned_drop_total += dropped_here
+        except Exception:
+            pass
+        # Optional reinclusion policy: allow former owners back if assets have been expired long enough
+        try:
+            days_thr = int(getattr(elig, "reinclude_if_assets_expired_days", 0) or 0)
+        except Exception:
+            days_thr = 0
+        if days_thr > 0 and "division_name" in df.columns:
+            try:
+                divs = sorted(set(df['division_name'].astype(str).dropna().unique()))
+                readd = pd.Series(False, index=df.index)
+                for d in divs:
+                    col = f"former_owner_div_{_norm_division(d).lower()}"
+                    if col in df.columns:
+                        # Prefer per-division days-since if available
+                        dcol = f"assets_days_since_last_expiration_div_{_norm_division(d).lower()}"
+                        if dcol in df.columns:
+                            days = pd.to_numeric(df[dcol], errors='coerce').fillna(0)
+                        else:
+                            days = pd.to_numeric(df.get('assets_days_since_last_expiration', 0), errors='coerce').fillna(0)
+                        cand = ((df['division_name'].astype(str) == d) & df[col].astype(bool) & (days >= days_thr))
+                        readd |= cand
+                to_reinclude = readd & (~mask)
+                if to_reinclude.any():
+                    # Re-include these rows
+                    mask |= to_reinclude
+                    # Adjust owned_excluded count to reflect reinclusion
+                    owned_drop_total -= int(to_reinclude.sum())
+            except Exception:
+                pass
+        counts["owned_excluded"] = int(max(0, owned_drop_total))
         if getattr(elig, "exclude_if_recent_contact_days", 0) and "days_since_last_contact" in df.columns:
             rc = pd.to_numeric(df["days_since_last_contact"], errors="coerce").fillna(1e9) <= int(
                 getattr(elig, "exclude_if_recent_contact_days", 0)
@@ -337,6 +407,81 @@ def _compute_item2vec_norm(df: pd.DataFrame, owner_centroid: np.ndarray | None =
     # Percentile normalize
     return _percentile_normalize(pd.Series(sim, index=df.index))
 
+def _compute_assets_als_norm(df: pd.DataFrame, owner_centroid: np.ndarray | None = None) -> pd.Series:
+    """Compute assets-ALS similarity with per-division centroids when possible.
+
+    - If a cached centroid exists for the division (assets_als_owner_centroid_<division>.npy), use it.
+    - Else, compute from rows with owns_assets_div_<division> == True when available; else from owned_division_pre_cutoff; else global mean.
+    - Falls back to global cached centroid (ASSETS_ALS_CENTROID_PATH) when division-specific unavailable.
+    """
+    cols = [c for c in df.columns if c.startswith("als_assets_f")]
+    if not cols:
+        return pd.Series(np.zeros(len(df)), index=df.index, dtype=float)
+    if df.empty:
+        return pd.Series(np.zeros(len(df)), index=df.index, dtype=float)
+    # If no division column, do a global computation
+    if 'division_name' not in df.columns:
+        mat = df[cols].astype(float)
+        if mat.empty:
+            return pd.Series(np.zeros(len(df)), index=df.index, dtype=float)
+        try:
+            if owner_centroid is not None:
+                centroid_vec = np.asarray(owner_centroid, dtype=float)
+            elif ASSETS_ALS_CENTROID_PATH.exists():
+                centroid_vec = np.load(ASSETS_ALS_CENTROID_PATH)
+            else:
+                centroid_vec = mat.mean(axis=0).to_numpy(dtype=float)
+            sims = cosine_similarity(mat, centroid_vec.reshape(1, -1)).ravel()
+            return _percentile_normalize(pd.Series(sims, index=df.index))
+        except Exception:
+            return pd.Series(np.zeros(len(df)), index=df.index, dtype=float)
+
+    out = pd.Series(np.zeros(len(df)), index=df.index, dtype=float)
+    for div, g in df.groupby('division_name', dropna=False):
+        idx = g.index
+        sub = g[cols].astype(float)
+        if sub.empty:
+            continue
+        # Try division-specific cached centroid
+        path = _assets_als_centroid_path_for_div(div)
+        centroid_vec = None
+        if owner_centroid is not None:
+            centroid_vec = np.asarray(owner_centroid, dtype=float)
+        else:
+            if path.exists():
+                try:
+                    centroid_vec = np.load(path)
+                except Exception:
+                    centroid_vec = None
+            if centroid_vec is None:
+                # Compute from owns_assets_div_<div> when available
+                owns_col = f"owns_assets_div_{str(div).strip().lower()}"
+                try:
+                    if owns_col in g.columns and g[owns_col].astype(bool).any():
+                        centroid_vec = g.loc[g[owns_col].astype(bool), cols].astype(float).mean(axis=0).to_numpy(dtype=float)
+                        try:
+                            path.parent.mkdir(parents=True, exist_ok=True)
+                            np.save(path, centroid_vec)
+                        except Exception:
+                            pass
+                except Exception:
+                    centroid_vec = None
+            if centroid_vec is None:
+                # Fallback to transaction-based owned centroid or global mean
+                try:
+                    if 'owned_division_pre_cutoff' in g.columns and g['owned_division_pre_cutoff'].astype(bool).any():
+                        centroid_vec = g.loc[g['owned_division_pre_cutoff'].astype(bool), cols].astype(float).mean(axis=0).to_numpy(dtype=float)
+                    else:
+                        centroid_vec = sub.mean(axis=0).to_numpy(dtype=float)
+                except Exception:
+                    centroid_vec = sub.mean(axis=0).to_numpy(dtype=float)
+        try:
+            sims = cosine_similarity(sub, centroid_vec.reshape(1, -1)).ravel()
+            out.loc[idx] = _percentile_normalize(pd.Series(sims, index=idx))
+        except Exception:
+            out.loc[idx] = 0.0
+    return out
+
 
 def _explain(row: pd.Series) -> str:
     # Short reason, emphasize strongest 1-2 drivers, keep compliant
@@ -398,7 +543,7 @@ def rank_whitespace(inputs: RankInputs, *, weights: Iterable[float] = (0.60, 0.2
     # Affinity lift and ALS similarity
     df['lift_norm'] = _compute_affinity_lift(df)
     df['als_norm'] = _compute_als_norm(df, owner_centroid=als_centroid)
-    # ALS coverage enforcement and optional item2vec backfill
+    # ALS coverage enforcement and optional assets-ALS / item2vec backfill
     try:
         from gosales.utils.config import load_config
         _cfg = load_config()
@@ -411,12 +556,24 @@ def rank_whitespace(inputs: RankInputs, *, weights: Iterable[float] = (0.60, 0.2
         cov_als = (pd.to_numeric(df['als_norm'], errors='coerce').fillna(0.0) > 0).mean()
     except Exception:
         cov_als = 0.0
-    if use_i2v and cov_als < als_thr:
-        # Compute i2v similarity and use where ALS is missing/zero
-        i2v_norm = _compute_item2vec_norm(df, owner_centroid=None)
+    # Prefer assets-ALS fallback when available, else item2vec
+    assets_als_present = any(c.startswith('als_assets_f') for c in df.columns)
+    if cov_als < als_thr:
         mask_zero_als = pd.to_numeric(df['als_norm'], errors='coerce').fillna(0.0) <= 0
-        if mask_zero_als.any():
-            df.loc[mask_zero_als, 'als_norm'] = i2v_norm[mask_zero_als]
+        if assets_als_present:
+            try:
+                aals = _compute_assets_als_norm(df, owner_centroid=None)
+                if mask_zero_als.any():
+                    df.loc[mask_zero_als, 'als_norm'] = aals[mask_zero_als]
+            except Exception:
+                pass
+        # If still zero, try i2v
+        i2v_present = any(c.startswith('i2v_f') for c in df.columns)
+        if (use_i2v or i2v_present):
+            i2v_norm = _compute_item2vec_norm(df, owner_centroid=None)
+            mask_zero_als = pd.to_numeric(df['als_norm'], errors='coerce').fillna(0.0) <= 0
+            if mask_zero_als.any():
+                df.loc[mask_zero_als, 'als_norm'] = i2v_norm[mask_zero_als]
     # EV proxy with cap and normalization
     try:
         from gosales.utils.config import load_config
