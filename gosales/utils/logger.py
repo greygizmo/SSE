@@ -20,18 +20,22 @@ def get_logger(name: str, level: int = logging.INFO) -> logging.Logger:
     logger = logging.getLogger(name)
     logger.setLevel(level)
 
-    # Create a handler
-    handler = logging.StreamHandler(sys.stdout)
-
-    # Create a formatter
+    # Create or reuse a handler
     formatter = logging.Formatter(
         "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     )
 
-    # Set the formatter for the handler
-    handler.setFormatter(formatter)
+    handler = None
+    for existing_handler in logger.handlers:
+        if isinstance(existing_handler, logging.StreamHandler):
+            handler = existing_handler
+            break
 
-    # Add the handler to the logger
-    logger.addHandler(handler)
+    if handler is None:
+        handler = logging.StreamHandler(sys.stdout)
+        logger.addHandler(handler)
+
+    # Ensure the handler uses the expected formatter configuration
+    handler.setFormatter(formatter)
 
     return logger
