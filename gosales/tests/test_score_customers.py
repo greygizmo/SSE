@@ -3,11 +3,14 @@ from __future__ import annotations
 import json
 import pandas as pd
 import polars as pl
+import pytest
 from sqlalchemy import create_engine
 from sklearn.dummy import DummyClassifier
+from sklearn.tree import DecisionTreeClassifier
 import joblib
 
 from gosales.pipeline.score_customers import score_customers_for_division
+from gosales.models.shap_utils import compute_shap_reasons
 
 
 def test_score_customers_dedupes_names(tmp_path, monkeypatch):
@@ -65,3 +68,24 @@ def test_score_customers_dedupes_names(tmp_path, monkeypatch):
 
     assert len(pdf) == 2
     assert pdf["customer_id"].nunique() == 2
+
+
+def test_compute_shap_reasons_returns_non_empty_columns_when_shap():
+    pytest.importorskip("shap")
+
+    X = pd.DataFrame(
+        {
+            "f1": [0, 1, 0, 1],
+            "f2": [1, 0, 1, 0],
+        }
+    )
+    y = [0, 1, 0, 1]
+
+    model = DecisionTreeClassifier(random_state=0)
+    model.fit(X, y)
+
+    reasons = compute_shap_reasons(model, X, feature_cols=["f1", "f2"], top_k=2)
+
+    assert list(reasons.columns) == ["reason_1", "reason_2"]
+    assert not reasons.empty
+    assert all(reasons[col].notna().any() for col in reasons.columns)
