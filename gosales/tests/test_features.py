@@ -27,10 +27,32 @@ def test_feature_window_and_target(tmp_path):
     _seed(eng)
     fm = create_feature_matrix(eng, "Solidworks", cutoff_date="2024-01-31", prediction_window_months=1)
     pdf = fm.to_pandas()
+    pdf["customer_id"] = pdf["customer_id"].astype(str)
     # Customer 1 has Solidworks pre-cutoff and Services pre-cutoff; in Feb window, no Solidworks, so target=0
-    assert int(pdf.loc[pdf["customer_id"] == 1, "bought_in_division"].iloc[0]) == 0
+    assert int(pdf.loc[pdf["customer_id"] == "1", "bought_in_division"].iloc[0]) == 0
     # Customer 2 had only Simulation pre-cutoff; also 0
-    assert int(pdf.loc[pdf["customer_id"] == 2, "bought_in_division"].iloc[0]) == 0
+    assert int(pdf.loc[pdf["customer_id"] == "2", "bought_in_division"].iloc[0]) == 0
+
+
+def test_missingness_flags_capture_original_nulls(tmp_path):
+    eng = create_engine(f"sqlite:///{tmp_path}/test_missingness.db")
+    _seed(eng)
+    # Add a customer with no transactions so engineered columns are NaN before fillna
+    pd.DataFrame({"customer_id": [3]}).to_sql("dim_customer", eng, if_exists="append", index=False)
+
+    fm = create_feature_matrix(eng, "Solidworks", cutoff_date="2024-01-31", prediction_window_months=1)
+    pdf = fm.to_pandas()
+    pdf["customer_id"] = pdf["customer_id"].astype(str)
+
+    missing_cols = [c for c in pdf.columns if c.endswith("_missing")]
+    assert "total_transactions_all_time_missing" in missing_cols
+
+    cust3_flag = int(pdf.loc[pdf["customer_id"] == "3", "total_transactions_all_time_missing"].iloc[0])
+    cust1_flag = int(pdf.loc[pdf["customer_id"] == "1", "total_transactions_all_time_missing"].iloc[0])
+
+    # Customer without transactions should be flagged as missing prior to fillna; customer with history should not
+    assert cust3_flag == 1
+    assert cust1_flag == 0
 
 
 def test_feature_cli_checksum(tmp_path, monkeypatch):

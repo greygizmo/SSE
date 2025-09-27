@@ -1009,6 +1009,19 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
     date_columns = [col for col in feature_matrix_pd.columns if 'date' in col.lower()]
     feature_matrix_pd = feature_matrix_pd.drop(columns=date_columns)
     
+    # Capture missing mask before global fill so missingness flags can reflect original NaNs
+    missingness_cfg = None
+    try:
+        missingness_cfg = cfg.load_config().features
+    except Exception:
+        missingness_cfg = None
+
+    missing_mask = None
+    if getattr(missingness_cfg, "add_missingness_flags", False):
+        base_cols = [c for c in feature_matrix_pd.columns if c not in ("customer_id", "bought_in_division")]
+        if base_cols:
+            missing_mask = feature_matrix_pd[base_cols].isna()
+
     # Fill nulls and ensure proper data types
     feature_matrix_pd = feature_matrix_pd.fillna(0)
     # Map to naming scheme for key features
@@ -1212,12 +1225,18 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
         pass
     # Add missingness flags if configured (single concat to avoid fragmentation)
     try:
-        if cfg.load_config().features.add_missingness_flags:
+        if getattr(missingness_cfg, "add_missingness_flags", False):
             cols = [c for c in feature_matrix_pd.columns if c not in ('customer_id','bought_in_division')]
             if cols:
-                zeros = np.zeros((len(feature_matrix_pd), len(cols)), dtype=np.int8)
-                flags = pd.DataFrame(zeros, columns=[f"{c}_missing" for c in cols], index=feature_matrix_pd.index)
-                feature_matrix_pd = pd.concat([feature_matrix_pd, flags], axis=1)
+                flags = {}
+                for col in cols:
+                    if missing_mask is not None and col in missing_mask.columns:
+                        series_mask = missing_mask[col]
+                    else:
+                        series_mask = feature_matrix_pd[col].isna()
+                    flags[f"{col}_missing"] = series_mask.astype(np.int8)
+                flags_df = pd.DataFrame(flags, index=feature_matrix_pd.index)
+                feature_matrix_pd = pd.concat([feature_matrix_pd, flags_df], axis=1)
     except Exception:
         pass
     
