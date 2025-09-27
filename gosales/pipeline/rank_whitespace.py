@@ -62,36 +62,61 @@ def _compute_affinity_lift(df: pd.DataFrame, col: str = "mb_lift_max") -> pd.Ser
 ALS_CENTROID_PATH = OUTPUTS_DIR / "als_owner_centroid.npy"
 ASSETS_ALS_CENTROID_PATH = OUTPUTS_DIR / "assets_als_owner_centroid.npy"
 
+
+def _als_centroid_path_for_div(div: str | None) -> Path:
+    """Return the centroid cache path for the provided division (or global cache)."""
+
+    if not div:
+        return ALS_CENTROID_PATH
+    key = str(_norm_division(div)).strip().lower().replace(" ", "_").replace("/", "_")
+    if not key:
+        return ALS_CENTROID_PATH
+    return OUTPUTS_DIR / f"als_owner_centroid_{key}.npy"
+
+
 def _assets_als_centroid_path_for_div(div: str) -> Path:
     key = str(div or "").strip().lower().replace(" ", "_").replace("/", "_")
     return OUTPUTS_DIR / f"assets_als_owner_centroid_{key}.npy"
 
 
-def _apply_eligibility_and_centroid(df: pd.DataFrame) -> Tuple[pd.DataFrame, np.ndarray | None]:
-    """Filter out simple ineligible rows (owned pre-cutoff) while capturing ALS owner centroid.
+def _apply_eligibility_and_centroid(
+    df: pd.DataFrame,
+) -> Tuple[pd.DataFrame, np.ndarray | None, str | None]:
+    """Filter out simple ineligible rows while capturing per-division ALS owner centroids.
 
-    Returns the filtered dataframe and the centroid vector. If no owner embeddings
-    are present, attempts to load a previously computed centroid from disk.
+    Returns the filtered dataframe, the centroid vector (if any), and the
+    normalized division identifier used for centroid caching. If no owner
+    embeddings are present, attempts to load a previously computed centroid from
+    the division-specific cache on disk.
     """
     als_cols = [c for c in df.columns if c.startswith("als_f")]
     centroid: np.ndarray | None = None
+    div_identifier: str | None = None
+    if "division_name" in df.columns:
+        try:
+            unique_divisions = [d for d in df["division_name"].dropna().unique() if str(d).strip()]
+        except Exception:
+            unique_divisions = []
+        if len(unique_divisions) == 1:
+            div_identifier = str(unique_divisions[0])
+    centroid_path = _als_centroid_path_for_div(div_identifier)
     if als_cols and "owned_division_pre_cutoff" in df.columns:
         owners = df[df["owned_division_pre_cutoff"].astype(bool)]
         if not owners.empty:
             centroid = owners[als_cols].astype(float).mean(axis=0).to_numpy(dtype=float)
             try:
-                ALS_CENTROID_PATH.parent.mkdir(parents=True, exist_ok=True)
-                np.save(ALS_CENTROID_PATH, centroid)
+                centroid_path.parent.mkdir(parents=True, exist_ok=True)
+                np.save(centroid_path, centroid)
             except Exception:
                 pass
-        elif ALS_CENTROID_PATH.exists():
+        elif centroid_path.exists():
             try:
-                centroid = np.load(ALS_CENTROID_PATH)
+                centroid = np.load(centroid_path)
             except Exception:
                 centroid = None
-    elif ALS_CENTROID_PATH.exists():
+    elif centroid_path.exists():
         try:
-            centroid = np.load(ALS_CENTROID_PATH)
+            centroid = np.load(centroid_path)
         except Exception:
             centroid = None
 
@@ -113,43 +138,16 @@ def _apply_eligibility_and_centroid(df: pd.DataFrame) -> Tuple[pd.DataFrame, np.
     if "owned_division_pre_cutoff" in df.columns:
         df = df[~df["owned_division_pre_cutoff"].astype(bool)].copy()
 
-    return df, centroid
+    return df, centroid, div_identifier
 
 
-def _compute_als_norm(df: pd.DataFrame, cfg=None, owner_centroid: np.ndarray | None = None) -> pd.Series:
-    """Compute ALS similarity normalized to [0,1].
-
-    - If owner_centroid is provided, use it; else derive from owned-pre-cutoff when available.
-    """
-    als_cols = [c for c in df.columns if c.startswith("als_f")]
-    centroid: np.ndarray | None = None
-    if als_cols and "owned_division_pre_cutoff" in df.columns:
-        owners = df[df["owned_division_pre_cutoff"].astype(bool)]
-        if not owners.empty:
-            centroid = owners[als_cols].astype(float).mean(axis=0).to_numpy(dtype=float)
-            try:
-                ALS_CENTROID_PATH.parent.mkdir(parents=True, exist_ok=True)
-                np.save(ALS_CENTROID_PATH, centroid)
-            except Exception:
-                pass
-        elif ALS_CENTROID_PATH.exists():
-            try:
-                centroid = np.load(ALS_CENTROID_PATH)
-            except Exception:
-                centroid = None
-    elif ALS_CENTROID_PATH.exists():
-        try:
-            centroid = np.load(ALS_CENTROID_PATH)
-        except Exception:
-            centroid = None
-
-    if "owned_division_pre_cutoff" in df.columns:
-        df = df[~df["owned_division_pre_cutoff"].astype(bool)].copy()
-
-    return df, centroid
-
-
-def _compute_als_norm(df: pd.DataFrame, cfg=None, owner_centroid: np.ndarray | None = None) -> pd.Series:
+def _compute_als_norm(
+    df: pd.DataFrame,
+    cfg=None,
+    owner_centroid: np.ndarray | None = None,
+    *,
+    centroid_division: str | None = None,
+) -> pd.Series:
     """Compute ALS similarity normalized to [0,1].
 
     - If ``owner_centroid`` is provided, use it for similarity.
@@ -159,23 +157,36 @@ def _compute_als_norm(df: pd.DataFrame, cfg=None, owner_centroid: np.ndarray | N
     als_cols = [c for c in df.columns if c.startswith("als_f")]
     if not als_cols:
         return pd.Series(np.zeros(len(df)), index=df.index, dtype=float)
-    mat = df[als_cols].astype(float)
-    if mat.empty:
+    mat_df = df[als_cols].astype(float)
+    if mat_df.empty:
         return pd.Series(np.zeros(len(df)), index=df.index, dtype=float)
 
+    centroid_path = _als_centroid_path_for_div(centroid_division)
     if owner_centroid is not None:
         centroid_vec = np.asarray(owner_centroid, dtype=float)
     else:
-        if 'owned_division_pre_cutoff' in df.columns:
+        centroid_vec = None
+        if "owned_division_pre_cutoff" in df.columns:
             try:
-                base = mat[df['owned_division_pre_cutoff'].astype(bool)]
-                centroid_vec = (base.mean(axis=0) if not base.empty else mat.mean(axis=0)).to_numpy(dtype=float)
+                base = mat_df[df["owned_division_pre_cutoff"].astype(bool)]
+                if not base.empty:
+                    centroid_vec = base.mean(axis=0).to_numpy(dtype=float)
+                    try:
+                        centroid_path.parent.mkdir(parents=True, exist_ok=True)
+                        np.save(centroid_path, centroid_vec)
+                    except Exception:
+                        pass
             except Exception:
-                centroid_vec = mat.mean(axis=0).to_numpy(dtype=float)
-        else:
-            centroid_vec = mat.mean(axis=0).to_numpy(dtype=float)
+                centroid_vec = None
+        if centroid_vec is None and centroid_path.exists():
+            try:
+                centroid_vec = np.load(centroid_path)
+            except Exception:
+                centroid_vec = None
+        if centroid_vec is None:
+            centroid_vec = mat_df.mean(axis=0).to_numpy(dtype=float)
 
-    m = mat.to_numpy(dtype=float)
+    m = mat_df.to_numpy(dtype=float)
     # Normalize embeddings and centroid to unit length prior to similarity calc
     m_norm = normalize(m, axis=1)
     centroid_norm = normalize(centroid_vec.reshape(1, -1), axis=1)
@@ -534,7 +545,7 @@ def rank_whitespace(inputs: RankInputs, *, weights: Iterable[float] = (0.60, 0.2
     if df.empty:
         return df
     # Apply simple ownership eligibility and capture ALS centroid
-    df, als_centroid = _apply_eligibility_and_centroid(df)
+    df, als_centroid, centroid_division = _apply_eligibility_and_centroid(df)
     if df.empty:
         return df
     # Per-division normalization of p_icp to percentile
@@ -542,7 +553,9 @@ def rank_whitespace(inputs: RankInputs, *, weights: Iterable[float] = (0.60, 0.2
     df['p_icp_pct'] = df.groupby('division_name')['p_icp'].transform(_percentile_normalize)
     # Affinity lift and ALS similarity
     df['lift_norm'] = _compute_affinity_lift(df)
-    df['als_norm'] = _compute_als_norm(df, owner_centroid=als_centroid)
+    df['als_norm'] = _compute_als_norm(
+        df, owner_centroid=als_centroid, centroid_division=centroid_division
+    )
     # ALS coverage enforcement and optional assets-ALS / item2vec backfill
     try:
         from gosales.utils.config import load_config
