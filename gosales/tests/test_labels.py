@@ -48,6 +48,7 @@ def test_denylist_threshold(tmp_path, monkeypatch):
     params = LabelParams(division="Solidworks", cutoff="2024-06-30", window_months=6, mode="all", gp_min_threshold=10.0)
     df = build_labels_for_division(eng, params)
     pdf = df.to_pandas()
+    pdf["customer_id"] = pdf["customer_id"].astype(int)
     # Customer 1 had +20 GP in window but SKU is denied -> label must be 0
     assert int(pdf.loc[pdf["customer_id"] == 1, "label"].iloc[0]) == 0
 
@@ -58,6 +59,7 @@ def test_build_labels_modes(tmp_path):
     params = LabelParams(division="Solidworks", cutoff="2024-06-30", window_months=6, mode="expansion", gp_min_threshold=0.0)
     df = build_labels_for_division(eng, params)
     pdf = df.to_pandas()
+    pdf["customer_id"] = pdf["customer_id"].astype(int)
     # expansion should include cust 1 and 2 (have pre-cutoff history), not 3
     assert set(pdf["customer_id"]) == {1, 2}
     assert int(pdf.loc[pdf["customer_id"] == 1, "label"].iloc[0]) == 1
@@ -65,7 +67,9 @@ def test_build_labels_modes(tmp_path):
 
     params_all = LabelParams(division="Solidworks", cutoff="2024-06-30", window_months=6, mode="all", gp_min_threshold=0.0)
     df_all = build_labels_for_division(eng, params_all)
-    assert set(df_all.to_pandas()["customer_id"]) == {1, 2, 3}
+    pdf_all = df_all.to_pandas()
+    pdf_all["customer_id"] = pdf_all["customer_id"].astype(int)
+    assert set(pdf_all["customer_id"]) == {1, 2, 3}
 
 
 def test_censoring_flag(tmp_path):
@@ -77,4 +81,51 @@ def test_censoring_flag(tmp_path):
     assert "censored_flag" in pdf.columns
     assert int(pdf["censored_flag"].iloc[0]) in (0, 1)
 
+
+def test_auto_widen_respects_sku_targets(tmp_path):
+    eng = _make_engine(tmp_path)
+    fact = pd.DataFrame(
+        [
+            {
+                "customer_id": 1,
+                "order_date": "2023-12-15",
+                "product_division": "Printers",
+                "product_sku": "FDM",
+                "gross_profit": 5,
+            },
+            {
+                "customer_id": 1,
+                "order_date": "2024-04-15",
+                "product_division": "Printers",
+                "product_sku": "FDM",
+                "gross_profit": 50,
+            },
+            {
+                "customer_id": 2,
+                "order_date": "2024-03-10",
+                "product_division": "Printers",
+                "product_sku": "Consumables",
+                "gross_profit": 75,
+            },
+        ]
+    )
+    fact.to_sql("fact_transactions", eng, if_exists="replace", index=False)
+    dim = pd.DataFrame({"customer_id": [1, 2]})
+    dim.to_sql("dim_customer", eng, if_exists="replace", index=False)
+
+    params = LabelParams(
+        division="Printers",
+        cutoff="2024-01-31",
+        window_months=1,
+        mode="all",
+        gp_min_threshold=0.0,
+        min_positive_target=1,
+    )
+    df = build_labels_for_division(eng, params)
+    pdf = df.to_pandas().sort_values("customer_id").reset_index(drop=True)
+    pdf["customer_id"] = pdf["customer_id"].astype(int)
+
+    assert list(pdf["customer_id"]) == [1, 2]
+    assert int(pdf.loc[pdf["customer_id"] == 1, "label"].iloc[0]) == 1
+    assert int(pdf.loc[pdf["customer_id"] == 2, "label"].iloc[0]) == 0
 

@@ -236,6 +236,7 @@ Known divisions are sourced from `etl/sku_map.division_set()`; cross-division fe
 
 #### Troubleshooting
 - If a division has very low prevalence, widen the window or aggregate sub-divisions; inspect `labels_summary.csv` and `labels_positive_<division>.csv` for prevalence.
+- Auto-widening respects SKU-targeted models (e.g., Printers) so only the intended sale SKUs count toward positives even when the window extends.
 - If simple training fails with numeric issues (inf/NaN), use the robust trainer `gosales/models/train.py` which sanitizes features and searches hyperparameters across cutoffs.
 
 
