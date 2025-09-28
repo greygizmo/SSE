@@ -597,7 +597,7 @@ def score_customers_for_division(
                 except Exception:
                     pass
             X = X.reindex(columns=train_cols, fill_value=0.0)
-        X = X.astype(np.float32, copy=False)
+        X = _sanitize_features(X, dtype=np.float32)
         probabilities = _score_p_icp(model, X, dtype=np.float32)
 
         feature_matrix_pd = feature_matrix.to_pandas()
@@ -607,7 +607,7 @@ def score_customers_for_division(
             cold_features = feature_matrix.drop(["customer_id", "bought_in_division"]).to_pandas()
             if cold_train_cols:
                 cold_features = cold_features.reindex(columns=cold_train_cols, fill_value=0.0)
-            cold_features = cold_features.astype(np.float32, copy=False)
+            cold_features = _sanitize_features(cold_features, dtype=np.float32)
             cold_scores = _score_p_icp(cold_model, cold_features, dtype=np.float32)
             probabilities = np.asarray(probabilities, dtype=float)
             probabilities[cold_mask.values] = np.asarray(cold_scores)[cold_mask.values]
