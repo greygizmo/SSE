@@ -1,3 +1,5 @@
+"""Run ad-hoc SQL sanity checks against the curated warehouse."""
+
 from __future__ import annotations
 
 import pandas as pd

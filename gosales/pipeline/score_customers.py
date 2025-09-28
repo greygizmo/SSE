@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
-"""
-Customer scoring pipeline that generates ICP scores and whitespace analysis for specific divisions.
+"""Generate customer propensity scores, whitespace lifts, and explanations.
+
+This is the heart of the scoring release: it loads trained models, builds fresh
+feature matrices, applies calibration, computes SHAP reasons, and assembles the
+deliverables consumed by revenue operations for each division.  Running it keeps
+our customer scorecards and whitespace reports current.
 """
 import polars as pl
 import pandas as pd
@@ -8,6 +12,7 @@ import mlflow
 import mlflow.sklearn
 import json
 import os
+import copy
 from collections.abc import Iterable
 from pathlib import Path
 import joblib
@@ -135,6 +140,188 @@ def _filter_models_by_targets(
             sample,
         )
     return filtered
+
+
+def _emit_capacity_and_logs(
+    ranked: pd.DataFrame,
+    selected: pd.DataFrame,
+    *,
+    cutoff_tag: str | None,
+) -> pd.DataFrame:
+    """Emit enriched capacity summary and division-level JSONL logs."""
+
+    metadata = ranked.attrs if isinstance(ranked, pd.DataFrame) else {}
+    elig_counts = metadata.get("eligibility_counts", {}) or {}
+    per_div_counts = {}
+    if isinstance(elig_counts, dict):
+        per_div_counts = copy.deepcopy(elig_counts.get("per_division", {}) or {})
+    coverage_meta = metadata.get("coverage", {}) or {}
+    weight_meta = metadata.get("weight_adjustments", {}) or {}
+
+    if not isinstance(per_div_counts, dict):
+        per_div_counts = {}
+    if not isinstance(coverage_meta, dict):
+        coverage_meta = {}
+    if not isinstance(weight_meta, dict):
+        weight_meta = {}
+
+    def _clean(obj):
+        if isinstance(obj, dict):
+            return {str(k): _clean(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [_clean(v) for v in obj]
+        if isinstance(obj, np.ndarray):
+            return [_clean(v) for v in obj.tolist()]
+        if isinstance(obj, (np.integer, np.floating)):
+            return obj.item()
+        if isinstance(obj, np.bool_):
+            return bool(obj)
+        if isinstance(obj, pd.Timestamp):
+            return obj.isoformat()
+        return obj
+
+    if isinstance(selected, pd.DataFrame) and len(selected) and "division_name" in selected.columns:
+        selected_counts = (
+            selected.assign(division_name=selected["division_name"].astype(str))
+            .groupby("division_name")
+            ["customer_id"]
+            .size()
+        )
+    else:
+        selected_counts = pd.Series(dtype=int)
+
+    total_selected = int(selected_counts.sum()) if len(selected_counts) else 0
+
+    divisions = set(str(d) for d in selected_counts.index.tolist())
+    divisions.update(str(d) for d in per_div_counts.keys())
+    divisions = sorted(divisions)
+
+    if divisions:
+        cap_df = pd.DataFrame({"division_name": divisions})
+        cap_df["selected_count"] = [int(selected_counts.get(div, 0)) for div in divisions]
+        cap_df["selected_share"] = [
+            (int(selected_counts.get(div, 0)) / float(total_selected)) if total_selected else 0.0
+            for div in divisions
+        ]
+
+        elig_keys = [
+            "start_rows",
+            "kept_rows",
+            "owned_excluded",
+            "recent_contact_excluded",
+            "open_deal_excluded",
+            "region_mismatch_excluded",
+        ]
+        for key in elig_keys:
+            cap_df[f"eligibility_{key}"] = [
+                int((per_div_counts.get(div, {}) or {}).get(key, 0)) for div in divisions
+            ]
+        cap_df["eligibility_total_excluded"] = [
+            int((per_div_counts.get(div, {}) or {}).get("start_rows", 0))
+            - int((per_div_counts.get(div, {}) or {}).get("kept_rows", 0))
+            for div in divisions
+        ]
+
+        if "segment" in getattr(selected, "columns", []):
+            seg_counts = (
+                selected.assign(
+                    division_name=selected["division_name"].astype(str),
+                    segment=selected["segment"].astype(str),
+                )
+                .groupby(["division_name", "segment"])
+                ["customer_id"]
+                .size()
+                .unstack(fill_value=0)
+            )
+            for seg in seg_counts.columns:
+                seg_key = str(seg).strip().lower().replace(" ", "_") or "unknown"
+                col = f"segment_{seg_key}_selected"
+                cap_df[col] = [int(seg_counts.loc[div, seg]) if div in seg_counts.index else 0 for div in divisions]
+    else:
+        cap_df = pd.DataFrame(
+            columns=[
+                "division_name",
+                "selected_count",
+                "selected_share",
+                "eligibility_start_rows",
+                "eligibility_kept_rows",
+                "eligibility_owned_excluded",
+                "eligibility_recent_contact_excluded",
+                "eligibility_open_deal_excluded",
+                "eligibility_region_mismatch_excluded",
+                "eligibility_total_excluded",
+            ]
+        )
+
+    OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+    cap_name = f"capacity_summary_{cutoff_tag}.csv" if cutoff_tag else "capacity_summary.csv"
+    cap_path = OUTPUTS_DIR / cap_name
+    cap_df.to_csv(cap_path, index=False)
+
+    log_name = f"whitespace_log_{cutoff_tag}.jsonl" if cutoff_tag else "whitespace_log.jsonl"
+    log_path = OUTPUTS_DIR / log_name
+
+    records = []
+    empty_elig = {
+        "start_rows": 0,
+        "kept_rows": 0,
+        "owned_excluded": 0,
+        "recent_contact_excluded": 0,
+        "open_deal_excluded": 0,
+        "region_mismatch_excluded": 0,
+    }
+
+    coverage_payload = _clean(copy.deepcopy(coverage_meta))
+
+    for _, row in cap_df.iterrows():
+        div = str(row.get("division_name", ""))
+        elig_payload = copy.deepcopy(per_div_counts.get(div, {}))
+        if not isinstance(elig_payload, dict):
+            elig_payload = {}
+        merged_elig = {**empty_elig, **{k: int(v) for k, v in elig_payload.items()}}
+
+        segments = {
+            col[len("segment_") : -len("_selected")]: int(row[col])
+            for col in cap_df.columns
+            if col.startswith("segment_") and col.endswith("_selected")
+        }
+
+        seg_entries = []
+        for entry in weight_meta.get("segments", []):
+            entry_key = entry.get("segment_key", {}) or {}
+            div_key = entry_key.get("division_name")
+            if div_key is None or str(div_key) == div:
+                seg_entries.append(copy.deepcopy(entry))
+
+        weights_payload = {
+            "base": _clean(copy.deepcopy(weight_meta.get("base", {}))),
+            "global": _clean(copy.deepcopy(weight_meta.get("global", {}))),
+            "segments": _clean(seg_entries),
+            "segment_columns": _clean(copy.deepcopy(weight_meta.get("segment_columns", []))),
+            "als_coverage_threshold": float(weight_meta.get("als_coverage_threshold", 0.0))
+            if "als_coverage_threshold" in weight_meta
+            else None,
+        }
+
+        record = {
+            "division_name": div,
+            "cutoff": cutoff_tag,
+            "eligibility": _clean(merged_elig),
+            "coverage": coverage_payload,
+            "weights": weights_payload,
+            "selection": {
+                "selected_count": int(row.get("selected_count", 0)),
+                "selected_share": float(row.get("selected_share", 0.0)),
+                "segments": _clean(segments),
+            },
+        }
+        records.append(record)
+
+    with open(log_path, "w", encoding="utf-8") as handle:
+        for rec in records:
+            handle.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+    return cap_df
  
 def _load_feature_order(model_dir: Path, meta: dict | None = None) -> list[str]:
     """Return the canonical feature order for a trained model."""
@@ -1165,20 +1352,24 @@ def generate_scoring_outputs(
                     except Exception:
                         pass
 
-                    # Capacity summary export (counts and shares per division)
+                    cap_df = None
                     try:
-                        if len(selected) > 0 and 'division_name' in selected.columns:
-                            cap = selected.groupby('division_name')['customer_id'].size().sort_values(ascending=False)
-                            cap_df = cap.rename('selected_count').reset_index()
-                            cap_df['selected_share'] = cap_df['selected_count'] / float(len(selected))
-                            cap_name = f"capacity_summary_{cutoff_tag}.csv" if cutoff_tag else "capacity_summary.csv"
-                            cap_df.to_csv(OUTPUTS_DIR / cap_name, index=False)
-                    except Exception:
-                        pass
+                        cap_df = _emit_capacity_and_logs(ranked, selected, cutoff_tag=cutoff_tag)
+                    except Exception as exc:
+                        logger.warning("Failed to emit capacity/log summaries: %s", exc)
 
-                    share_series = selected.groupby('division_name')['customer_id'].size().sort_values(ascending=False) if len(selected) > 0 and 'division_name' in selected.columns else pd.Series(dtype=int)
-                    total_sel = max(1, int(len(selected)))
-                    share_map = {str(k): float(v) / total_sel for k, v in share_series.items()} if len(selected) > 0 else {}
+                    if cap_df is not None and not cap_df.empty and 'division_name' in cap_df.columns:
+                        share_series = cap_df.set_index('division_name')['selected_count'].sort_values(ascending=False)
+                        total_sel = int(cap_df['selected_count'].sum()) or 0
+                    else:
+                        share_series = (
+                            selected.groupby('division_name')['customer_id'].size().sort_values(ascending=False)
+                            if len(selected) > 0 and 'division_name' in selected.columns
+                            else pd.Series(dtype=int)
+                        )
+                        total_sel = int(len(selected))
+                    total_sel = max(1, total_sel)
+                    share_map = {str(k): float(v) / total_sel for k, v in share_series.items()} if len(share_series) else {}
                     threshold = float(cfg.whitespace.bias_division_max_share_topN)
                     max_share = max(share_map.values()) if share_map else 0.0
                     warn = {

@@ -1,3 +1,10 @@
+"""Command-line entry point for generating model feature matrices.
+
+It wraps :func:`gosales.features.engine.create_feature_matrix` with CLI options
+for division, cutoff, and optional embedding sources, writing the resulting
+parquet/csv artifacts into the outputs directory for training and QA workflows.
+"""
+
 from __future__ import annotations
 
 import json
@@ -54,14 +61,36 @@ def main(division: str, cutoff: str, windows: str, config: str, with_eb: bool, w
             fm = create_feature_matrix(engine, division, cut, cfg.run.prediction_window_months)
             # Optional ALS embeddings
             if cfg.features.use_als_embeddings:
+                als_factors = 16
                 als_df = customer_als_embeddings(
                     engine,
                     cut,
-                    factors=16,
+                    factors=als_factors,
                     lookback_months=cfg.features.als_lookback_months,
                 )
-                if not als_df.is_empty():
-                    fm = fm.join(als_df, on='customer_id', how='left').fill_null(0)
+                if "customer_id" in als_df.columns and als_df.height > 0:
+                    fm_id_dtype = fm.schema.get("customer_id")
+                    try:
+                        als_id_dtype = als_df.schema.get("customer_id")
+                    except AttributeError:
+                        als_id_dtype = None
+                    if fm_id_dtype is not None and als_id_dtype is not None and fm_id_dtype != als_id_dtype:
+                        try:
+                            als_df = als_df.with_columns(
+                                pl.col("customer_id").cast(fm_id_dtype).alias("customer_id")
+                            )
+                        except Exception:
+                            pass
+                    fm = fm.join(als_df, on="customer_id", how="left")
+                als_cols = [f"als_f{i}" for i in range(als_factors)]
+                als_exprs = []
+                for col in als_cols:
+                    if col in fm.columns:
+                        als_exprs.append(pl.col(col).cast(pl.Float64).fill_null(0.0).alias(col))
+                    else:
+                        als_exprs.append(pl.lit(0.0, dtype=pl.Float64).alias(col))
+                if als_exprs:
+                    fm = fm.with_columns(als_exprs)
             if fm.is_empty():
                 logger.warning(f"Empty feature matrix for cutoff {cut}")
                 continue
@@ -69,6 +98,24 @@ def main(division: str, cutoff: str, windows: str, config: str, with_eb: bool, w
             base = f"{division.lower()}_{cut}"
             # Deterministic sort
             fm = fm.sort(["customer_id"])
+            if getattr(cfg.features, "use_market_basket", False):
+                try:
+                    lag_days = int(getattr(cfg.features, "affinity_lag_days", 60) or 60)
+                except Exception:
+                    lag_days = 60
+                mb_cols = [
+                    f"mb_lift_max_lag{lag_days}d",
+                    f"mb_lift_mean_lag{lag_days}d",
+                    f"affinity__div__lift_topk__12m_lag{lag_days}d",
+                ]
+                mb_exprs = []
+                for col in mb_cols:
+                    if col in fm.columns:
+                        mb_exprs.append(pl.col(col).cast(pl.Float64).fill_null(0.0).alias(col))
+                    else:
+                        mb_exprs.append(pl.lit(0.0, dtype=pl.Float64).alias(col))
+                if mb_exprs:
+                    fm = fm.with_columns(mb_exprs)
             # If ALS embeddings available and division centroid similarity needed for Phase 4, compute quick sim feature (optional)
             try:
                 if cfg.features.use_als_embeddings:

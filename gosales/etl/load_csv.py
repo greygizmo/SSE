@@ -1,3 +1,5 @@
+"""Convenience loader for pushing ad-hoc CSVs into the analytics database."""
+
 import pandas as pd
 from gosales.utils.db import get_db_connection
 from gosales.utils.paths import DATA_DIR

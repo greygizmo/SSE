@@ -1,12 +1,16 @@
+"""Measure how a frozen model performs as time marches forward.
+
+Prequential evaluation helps answer whether a model trained at cutoff T still
+performs well months later. This script ensures a model exists for the requested
+division/cutoff, then iterates month-by-month across a future window, rebuilding
+feature matrices and scoring them with the frozen model. For each month it
+records sample size, prevalence, AUC, Lift@K, and Brier score, ultimately writing
+JSON, CSV, and PNG curve visualizations to
+``gosales/outputs/prequential/<division>/<train_cutoff>/``. Results are used in
+SAFE reviews and deployment readiness conversations.
+"""
+
 from __future__ import annotations
-
-"""
-Prequential forward-month evaluation.
-
-Trains (or reuses) a model at a fixed training cutoff, then evaluates month-by-month
-forward cutoffs, computing AUC, Lift@K, and Brier. Writes JSON, CSV, and PNG curves
-under gosales/outputs/prequential/<division>/<train_cutoff>/.
-"""
 
 from pathlib import Path
 import json

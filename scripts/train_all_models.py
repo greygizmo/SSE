@@ -1,3 +1,13 @@
+"""Fire-and-forget wrapper that trains every division model.
+
+Analysts often need to retrain the complete catalog of division models for a new
+cutoff. Rather than invoking ``gosales.models.train`` manually for each
+division, this CLI enumerates the supported targets (plus Solidworks as the
+default baseline) and shells out to the training module with consistent
+arguments. Failures are logged but do not stop the loop so a single division
+does not block the rest.
+"""
+
 from __future__ import annotations
 
 import subprocess

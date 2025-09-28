@@ -1,3 +1,16 @@
+"""Export per-division feature importance tables for stakeholder review.
+
+Trained models under ``gosales/models`` expose either ``feature_importances_`` or
+coefficients depending on the estimator. This CLI iterates through each model
+directory, loads the estimator, resolves the human-readable feature names, and
+writes a CSV of the top-N features with lightweight flags that explain why a
+feature might be risky (e.g., adjacency, near-cutoff recency). The files land in
+``gosales/outputs`` so they can be attached to release notes or product specs.
+
+Flags in the output help non-ML reviewers understand whether a feature is
+leveraging adjacency or temporal signals that warrant additional SAFE review.
+"""
+
 from __future__ import annotations
 
 import json

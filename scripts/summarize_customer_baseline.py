@@ -1,3 +1,15 @@
+"""Collect feature importance and capture-at-k baselines for the business deck.
+
+Phase 5 deliverables require a simple set of reference tables that describe the
+baseline (pre-ML) customer metrics. This script grabs two sources:
+
+* ``feature_importance.csv`` under each division's model directory
+* ``capture_at_k.csv`` exported by the validation job
+
+It normalizes the data into ``gosales/outputs/baseline`` so that analytics and
+product stakeholders can plug the outputs directly into slides or Confluence.
+"""
+
 from __future__ import annotations
 
 import json

@@ -1,3 +1,11 @@
+"""Ingest and feature-engineer Moneyball asset data for model consumption.
+
+The module centralizes how we read curated asset tables, normalize customer and
+item identifiers, and aggregate tenure and purchase summaries used in customer
+propensity models.  Scripts and pipelines import these helpers whenever they
+need consistent asset-derived signals.
+"""
+
 from __future__ import annotations
 
 import pandas as pd

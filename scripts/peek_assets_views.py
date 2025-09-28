@@ -1,3 +1,10 @@
+"""Snapshot the top rows of key asset-related SQL views for debugging.
+
+This diagnostic script queries the Moneyball asset and rollup views directly in
+Azure SQL, writes the first thousand rows for each to CSV, and prints column
+metadata so analysts can sanity-check upstream schema changes.
+"""
+
 import pandas as pd
 from pathlib import Path
 

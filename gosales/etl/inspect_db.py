@@ -1,3 +1,5 @@
+"""Utility for snapshotting the current SQL schema into YAML documentation."""
+
 import yaml
 from sqlalchemy import inspect
 from gosales.utils.db import get_db_connection

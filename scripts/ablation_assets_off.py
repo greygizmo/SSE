@@ -1,3 +1,12 @@
+"""Run an assets-disabled model training ablation and summarize metric deltas.
+
+This CLI temporarily disables the feature flags that pull Moneyball asset features
+for a single division, retrains the standard gosales model configuration, and then
+compares the resulting evaluation metrics against the latest production baseline.
+It exists to give analysts a reproducible way to quantify how much the asset
+enrichment contributes before rolling out changes.
+"""
+
 from __future__ import annotations
 
 import json

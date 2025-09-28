@@ -1,3 +1,18 @@
+"""Summarize completed leakage gauntlet runs into a single markdown report.
+
+The leakage gauntlet writes JSON diagnostics for each division/cutoff run under
+``gosales/outputs/leakage/<division>/<cutoff>/``. This utility scans that
+directory tree, pulls the overall status for every run, and writes a
+chronologically named ``summary_<timestamp>.md`` that contains:
+
+* one bullet per division/cutoff pair with the recorded ``overall`` result
+* a link to the underlying JSON payload for quick drill-downs
+* highlighted values for the most critical checks (shift-14 and top-k ablation)
+
+The markdown summary is convenient for pasting into chat threads or storing in
+SharePoint while retaining the original JSON artifacts for reproducibility.
+"""
+
 from __future__ import annotations
 
 import json

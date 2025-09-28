@@ -4,7 +4,7 @@ graph TB
     Start(("Start Training")) --> InitSetup
 
     subgraph "Initialization"
-        InitSetup["Boot training env<br/>train_division_model.py"]
+        InitSetup["Boot training env<br/>gosales/models/train.py (robust)"]
         LoadConfig["Load division config + seeds"]
         InitMLflow["Initialize MLflow run"]
         DataAvailability["Verify feature matrix & labels"]

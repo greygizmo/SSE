@@ -1,3 +1,14 @@
+"""Rebuild asset-based feature extracts for a given cutoff date.
+
+ETL notebooks depend on CSV extracts of the customer-level features generated
+from ``fact_assets``. This command-line utility pulls the raw table, feeds it
+through ``gosales.etl.assets.features_at_cutoff``, sanitizes column names, and
+writes both the rollup and per-asset outputs back to ``gosales/outputs``.
+
+The script is intentionally tiny so analysts can regenerate features on demand
+without needing to invoke the entire training pipeline.
+"""
+
 import argparse
 import pandas as pd
 from gosales.utils.db import get_curated_connection

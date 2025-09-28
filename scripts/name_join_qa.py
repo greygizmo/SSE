@@ -1,3 +1,11 @@
+"""Audit Moneyball-to-NetSuite name joins to catch customer mapping issues.
+
+Moneyball assets arrive with free-form customer names that must align with
+NetSuite IDs.  This QA utility normalizes both sources, highlights ambiguous
+joins, and writes diagnostics that data engineers can review before promoting
+new join logic.
+"""
+
 from __future__ import annotations
 
 import json

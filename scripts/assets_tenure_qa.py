@@ -1,3 +1,17 @@
+"""Generate QA tables that describe asset tenure assumptions.
+
+SAFE policies often depend on effective asset tenures. This script reads
+``fact_assets`` from the curated warehouse, imputes effective purchase dates for
+records with missing values, and exports:
+
+* median tenure statistics per ``item_rollup`` with bad-date coverage metrics
+* a histogram of effective tenure days (for spotting multimodal distributions)
+* per-rollup bad-date reliance by calendar year
+
+The resulting CSVs live under ``gosales/outputs`` and provide the evidence needed
+to justify tenure thresholds or highlight data quality gaps to the business.
+"""
+
 import pandas as pd
 import numpy as np
 from pathlib import Path

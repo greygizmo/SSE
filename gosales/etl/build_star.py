@@ -1,3 +1,12 @@
+"""Transform raw NetSuite extracts into a curated star schema.
+
+The GoSales modeling stack relies on a tidy set of dimension and fact tables.
+This module owns the heavy lifting: pulling raw sales logs, cleaning identifiers
+and currencies, mapping SKUs to business divisions, and persisting parquet
+snapshots.  Orchestrators and ad-hoc scripts import these helpers when they need
+to rebuild or inspect the curated layer.
+"""
+
 import polars as pl
 import pandas as pd
 import json

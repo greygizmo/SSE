@@ -1,3 +1,11 @@
+"""Construct event-level datasets used for propensity modeling and QA.
+
+The functions here convert curated fact tables into model-ready event streams,
+including labeled conversion events and negative samples across multiple product
+divisions.  Pipelines call into this module when building training data sets or
+when analysts need event audits.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass

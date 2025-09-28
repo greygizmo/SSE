@@ -1,3 +1,5 @@
+"""Compute market-basket lift tables that power whitespace prioritization."""
+
 import polars as pl
 from mlxtend.frequent_patterns import apriori, association_rules
 from gosales.utils.db import get_db_connection

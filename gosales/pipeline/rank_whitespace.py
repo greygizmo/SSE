@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import copy
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Tuple
+from typing import Any, Dict, Iterable, List, Tuple
 
 import numpy as np
 import pandas as pd
@@ -43,7 +44,8 @@ def _compute_affinity_lift(df: pd.DataFrame, col: str = "mb_lift_max") -> pd.Ser
     """Compute normalized affinity lift (market-basket) from best available column.
 
     Prefers ``mb_lift_max``; if absent, falls back to any column starting with
-    ``mb_lift_max`` (e.g., ``mb_lift_max_lag60d``). Returns percentile-normalized values.
+    ``mb_lift_max`` (e.g., ``mb_lift_max_lag60d``). Returns percentile-normalized values
+    and annotates coverage metadata on the returned series via ``Series.attrs``.
     """
     src = None
     if col in df.columns:
@@ -53,9 +55,16 @@ def _compute_affinity_lift(df: pd.DataFrame, col: str = "mb_lift_max") -> pd.Ser
         if cands:
             src = cands[0]
     if src is None:
-        return pd.Series(np.zeros(len(df)), index=df.index, dtype=float)
+        out = pd.Series(np.zeros(len(df)), index=df.index, dtype=float)
+        out.attrs["coverage"] = 0.0
+        out.attrs["source_column"] = None
+        return out
     vals = pd.to_numeric(df[src], errors="coerce").fillna(0.0)
-    return _percentile_normalize(vals)
+    cov = float((vals > 0).mean()) if len(vals) else 0.0
+    norm = _percentile_normalize(vals)
+    norm.attrs["coverage"] = cov
+    norm.attrs["source_column"] = src
+    return norm
 
 
 # Store centroid path for reuse across runs
@@ -76,13 +85,44 @@ def _als_centroid_path_for_div(div: str) -> Path:
     return OUTPUTS_DIR / f"als_owner_centroid_{key}.npy"
 
 
-def _apply_eligibility_and_centroid(df: pd.DataFrame) -> Tuple[pd.DataFrame, np.ndarray | None]:
+def _apply_eligibility_and_centroid(
+    df: pd.DataFrame,
+) -> Tuple[pd.DataFrame, np.ndarray | None, Dict[str, Any]]:
     """Filter out simple ineligible rows (owned pre-cutoff) while capturing ALS owner centroid.
 
-    Returns the filtered dataframe and a global fallback centroid vector when no
-    per-division context is available. When a ``division_name`` column is present,
-    computes and persists division-specific centroids to avoid cross-division leakage.
+    Returns the filtered dataframe, a global fallback centroid vector when no
+    per-division context is available, and structured eligibility counts (overall
+    plus per-division) describing how many rows were dropped.
     """
+    counts: Dict[str, Dict[str, int]] = {
+        "overall": {
+            "start_rows": int(len(df)),
+            "owned_excluded": 0,
+            "recent_contact_excluded": 0,
+            "open_deal_excluded": 0,
+            "region_mismatch_excluded": 0,
+            "kept_rows": 0,
+        },
+        "per_division": {},
+    }
+    if "division_name" in df.columns:
+        start_by_div = (
+            df.groupby("division_name")["division_name"].size().to_dict()
+        )
+        counts["per_division"] = {
+            str(div): {
+                "start_rows": int(val),
+                "owned_excluded": 0,
+                "recent_contact_excluded": 0,
+                "open_deal_excluded": 0,
+                "region_mismatch_excluded": 0,
+                "kept_rows": 0,
+            }
+            for div, val in start_by_div.items()
+        }
+    else:
+        counts["per_division"] = {}
+
     als_cols = [c for c in df.columns if c.startswith("als_f")]
     centroid: np.ndarray | None = None
 
@@ -153,9 +193,43 @@ def _apply_eligibility_and_centroid(df: pd.DataFrame) -> Tuple[pd.DataFrame, np.
         pass
 
     if "owned_division_pre_cutoff" in df.columns:
-        df = df[~df["owned_division_pre_cutoff"].astype(bool)].copy()
+        owned_mask = df["owned_division_pre_cutoff"].astype(bool)
+        drop_total = int(owned_mask.sum())
+        counts["overall"]["owned_excluded"] = drop_total
+        if "division_name" in df.columns and drop_total > 0:
+            owned_by_div = (
+                df.loc[owned_mask, "division_name"].astype(str).value_counts().to_dict()
+            )
+            for div, val in owned_by_div.items():
+                key = str(div)
+                if key not in counts["per_division"]:
+                    counts["per_division"][key] = {
+                        "start_rows": 0,
+                        "owned_excluded": 0,
+                        "recent_contact_excluded": 0,
+                        "open_deal_excluded": 0,
+                        "region_mismatch_excluded": 0,
+                        "kept_rows": 0,
+                    }
+                counts["per_division"][key]["owned_excluded"] += int(val)
+        df = df[~owned_mask].copy()
 
-    return df, centroid
+    counts["overall"]["kept_rows"] = int(len(df))
+    if "division_name" in df.columns:
+        kept_by_div = df.groupby("division_name")["division_name"].size().to_dict()
+        for div, val in kept_by_div.items():
+            key = str(div)
+            if key not in counts["per_division"]:
+                counts["per_division"][key] = {
+                    "start_rows": 0,
+                    "owned_excluded": 0,
+                    "recent_contact_excluded": 0,
+                    "open_deal_excluded": 0,
+                    "region_mismatch_excluded": 0,
+                    "kept_rows": 0,
+                }
+            counts["per_division"][key]["kept_rows"] = int(val)
+    return df, centroid, counts
 
 
 def _compute_als_norm(
@@ -494,6 +568,14 @@ def _scale_weights_by_coverage(
     f_als = factor(cov_als)
     adjustments["aff_weight_factor"] = f_lift
     adjustments["als_weight_factor"] = f_als
+    adjustments["coverage"] = {"affinity": float(cov_lift), "als": float(cov_als)}
+    adjustments["weight_factors"] = {"affinity": float(f_lift), "als": float(f_als)}
+    adjustments["base_weights"] = {
+        "p_icp_pct": float(w[0]),
+        "lift_norm": float(w[1]),
+        "als_norm": float(w[2]),
+        "EV_norm": float(w[3]),
+    }
     w_scaled = [w[0], w[1] * f_lift, w[2] * f_als, w[3]]
     s = sum(w_scaled)
     if s > 0:
@@ -512,6 +594,12 @@ def _scale_weights_by_coverage(
             logger.warning(
                 "Weight scaling resulted in zero weights; falling back to uniform weights"
             )
+    adjustments["normalized_weights"] = {
+        "p_icp_pct": float(w_div[0]),
+        "lift_norm": float(w_div[1]),
+        "als_norm": float(w_div[2]),
+        "EV_norm": float(w_div[3]),
+    }
     return w_div, adjustments
 
 
@@ -660,14 +748,18 @@ def rank_whitespace(inputs: RankInputs, *, weights: Iterable[float] = (0.60, 0.2
     if df.empty:
         return df
     # Apply simple ownership eligibility and capture ALS centroid
-    df, als_centroid = _apply_eligibility_and_centroid(df)
+    df, als_centroid, elig_counts = _apply_eligibility_and_centroid(df)
+    df.attrs["eligibility_counts"] = copy.deepcopy(elig_counts)
     if df.empty:
         return df
     # Per-division normalization of p_icp to percentile
     df['p_icp'] = pd.to_numeric(df['icp_score'], errors='coerce').fillna(0.0)
     df['p_icp_pct'] = df.groupby('division_name')['p_icp'].transform(_percentile_normalize)
     # Affinity lift and ALS similarity
-    df['lift_norm'] = _compute_affinity_lift(df)
+    lift_norm_series = _compute_affinity_lift(df)
+    lift_cov = float(lift_norm_series.attrs.get("coverage", 0.0))
+    lift_src = lift_norm_series.attrs.get("source_column")
+    df['lift_norm'] = lift_norm_series
     als_norm, als_signal_strength = _compute_als_norm(df, owner_centroid=als_centroid)
     df['als_norm'] = als_norm
     df['_als_signal_strength'] = als_signal_strength
@@ -686,6 +778,9 @@ def rank_whitespace(inputs: RankInputs, *, weights: Iterable[float] = (0.60, 0.2
         ).mean()
     except Exception:
         cov_als = 0.0
+    coverage_meta = {"als": float(cov_als), "affinity": float(lift_cov)}
+    if lift_src:
+        coverage_meta["affinity_source_column"] = lift_src
     # Prefer assets-ALS fallback when available, else item2vec
     assets_cols = [c for c in df.columns if c.startswith('als_assets_f')]
     assets_als_present = bool(assets_cols)
@@ -726,6 +821,11 @@ def rank_whitespace(inputs: RankInputs, *, weights: Iterable[float] = (0.60, 0.2
                 ) & mask_zero_als
             if mask_i2v.any():
                 df.loc[mask_i2v, 'als_norm'] = i2v_norm[mask_i2v]
+        pos_mask = pd.to_numeric(df['_als_signal_strength'], errors='coerce').fillna(0.0) > 0
+        if pos_mask.any():
+            pos_vals = pd.to_numeric(df.loc[pos_mask, 'als_norm'], errors='coerce').fillna(0.0)
+            if pos_vals.max() <= 0:
+                df.loc[pos_mask, 'als_norm'] = 1.0
     # EV proxy with cap and normalization
     try:
         from gosales.utils.config import load_config
@@ -769,13 +869,41 @@ def rank_whitespace(inputs: RankInputs, *, weights: Iterable[float] = (0.60, 0.2
                 pass
 
     seg_cols = [c for c in seg_cols_cfg if c in df.columns]
+    global_w_adj, global_adj = _scale_weights_by_coverage(
+        list(weights),
+        df['als_norm'],
+        df['lift_norm'],
+        threshold=als_cov_thr,
+        als_signal=df['_als_signal_strength'],
+    )
+    weight_log: Dict[str, Any] = {
+        "base": copy.deepcopy(global_adj.get("base_weights", {})),
+        "global": copy.deepcopy(global_adj),
+        "segments": [],
+        "segment_columns": [str(c) for c in seg_cols],
+        "als_coverage_threshold": float(als_cov_thr),
+    }
+
     if seg_cols:
         df['score'] = 0.0
+
+        def _normalize_key_value(value: Any) -> Any:
+            if pd.isna(value):
+                return None
+            if isinstance(value, (np.generic,)):
+                return value.item()
+            return value
+
         for keys, g in df.groupby(seg_cols, dropna=False):
             idx = g.index
-            if len(g) < seg_min_rows:
-                # Fall back to global weights
-                w_adj, _ = _scale_weights_by_coverage(
+            seg_size = int(len(g))
+            key_tuple = keys if isinstance(keys, tuple) else (keys,)
+            key_map = {
+                str(col): _normalize_key_value(val)
+                for col, val in zip(seg_cols, key_tuple)
+            }
+            if seg_size < seg_min_rows:
+                w_adj, adj = _scale_weights_by_coverage(
                     list(weights),
                     df.loc[idx, 'als_norm'],
                     df.loc[idx, 'lift_norm'],
@@ -783,7 +911,7 @@ def rank_whitespace(inputs: RankInputs, *, weights: Iterable[float] = (0.60, 0.2
                     als_signal=df.loc[idx, '_als_signal_strength'],
                 )
             else:
-                w_adj, _ = _scale_weights_by_coverage(
+                w_adj, adj = _scale_weights_by_coverage(
                     list(weights),
                     g['als_norm'],
                     g['lift_norm'],
@@ -797,21 +925,24 @@ def rank_whitespace(inputs: RankInputs, *, weights: Iterable[float] = (0.60, 0.2
                 w_adj[3] * g['EV_norm']
             ).astype(float)
             df.loc[idx, 'score'] = sc
+            seg_entry = copy.deepcopy(adj)
+            seg_entry['segment_key'] = key_map
+            seg_entry['segment_size'] = seg_size
+            seg_entry['uses_global_weights'] = bool(seg_size < seg_min_rows)
+            weight_log['segments'].append(seg_entry)
     else:
-        w_adj, _ = _scale_weights_by_coverage(
-            list(weights),
-            df['als_norm'],
-            df['lift_norm'],
-            threshold=als_cov_thr,
-            als_signal=df['_als_signal_strength'],
-        )
         champion_score = (
-            w_adj[0] * df['p_icp_pct'] +
-            w_adj[1] * df['lift_norm'] +
-            w_adj[2] * df['als_norm'] +
-            w_adj[3] * df['EV_norm']
+            global_w_adj[0] * df['p_icp_pct'] +
+            global_w_adj[1] * df['lift_norm'] +
+            global_w_adj[2] * df['als_norm'] +
+            global_w_adj[3] * df['EV_norm']
         ).astype(float)
         df['score'] = champion_score
+
+    weight_log['global']['context'] = 'global'
+    weight_log['global']['segment_size'] = int(len(df))
+    df.attrs['coverage'] = copy.deepcopy(coverage_meta)
+    df.attrs['weight_adjustments'] = copy.deepcopy(weight_log)
 
     # Optional challenger: simple logistic meta-learner over normalized components
     try:

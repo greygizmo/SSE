@@ -1,4 +1,17 @@
+"""Aggregate per-division model metrics into a single CSV for reporting.
+
+Model training jobs emit ``metrics_<division>.json`` files containing the final
+evaluation statistics for each target. This script sweeps the ``gosales/outputs``
+directory, extracts the key headline metrics (AUC, PR-AUC, lift at K values,
+Brier score, calibration MAE), and writes an alphabetized ``metrics_summary.csv``.
+
+The consolidated view is handy for status updates and dashboards where analysts
+need to compare how the latest training run performed across multiple divisions
+without inspecting each JSON by hand.
+"""
+
 import json
+
 from pathlib import Path
 import pandas as pd
 from gosales.utils.paths import OUTPUTS_DIR

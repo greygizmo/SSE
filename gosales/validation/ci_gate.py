@@ -1,3 +1,10 @@
+"""CI gate that fails builds when validation or schema checks regress.
+
+This module aggregates schema diffs, validation metrics, and leakage reports to
+produce a single PASS/FAIL verdict that our pipelines use before publishing
+artifacts.
+"""
+
 from __future__ import annotations
 
 import json

@@ -1,3 +1,10 @@
+"""CLI wrapper for building supervised learning labels across cutoffs.
+
+This script feeds configuration into :mod:`gosales.labels.targets`, writes the
+resulting parquet/CSV artifacts, and emits prevalence summaries so modelers know
+what class balance to expect before training.
+"""
+
 from __future__ import annotations
 
 import json

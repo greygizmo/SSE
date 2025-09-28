@@ -1,3 +1,10 @@
+"""Holdout validation harness to benchmark trained models before release.
+
+The script materializes holdout feature frames, scores them with stored models,
+computes a battery of classification metrics, and writes artifacts consumed by
+reports and monitoring workflows.
+"""
+
 from __future__ import annotations
 
 import json

@@ -25,6 +25,29 @@ def test_scale_weights_by_coverage_scales_and_normalizes():
     assert adj.get('aff_weight_factor', 1.0) < 1.0
 
 
+def test_rank_whitespace_emits_metadata():
+    df = pd.DataFrame(
+        {
+            "division_name": ["A", "A", "B"],
+            "customer_id": ["c1", "c2", "c3"],
+            "icp_score": [0.2, 0.5, 0.4],
+            "owned_division_pre_cutoff": [False, True, False],
+            "mb_lift_max": [0.1, 0.0, 0.6],
+            "als_f0": [0.0, 0.0, 0.2],
+            "als_f1": [0.0, 0.0, 0.1],
+        }
+    )
+    inputs = RankInputs(scores=df)
+    res = rank_whitespace(inputs)
+    meta = res.attrs.get("weight_adjustments")
+    assert meta and "global" in meta
+    coverage = res.attrs.get("coverage")
+    assert coverage and "als" in coverage and "affinity" in coverage
+    elig = res.attrs.get("eligibility_counts")
+    assert elig and elig["overall"]["start_rows"] == len(df)
+    assert "A" in elig.get("per_division", {})
+
+
 def test_als_norm_fallback_centroid_prefers_owned_centroid():
     # Build a tiny embedding space where owned centroid is near (1,1)
     df = pd.DataFrame({

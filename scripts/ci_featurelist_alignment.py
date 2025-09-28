@@ -1,3 +1,13 @@
+"""Verify that exported feature catalogs stay aligned with the trained models.
+
+Training jobs persist ``feature_list.json`` alongside the model so scoring and
+validation pipelines can reproduce the exact feature order. This CI-oriented
+script compares those saved lists with the feature catalog or parquet emitted by
+feature generation for the corresponding division and cutoff. It writes a
+machine-readable JSON report and returns a non-zero exit code if any division has
+missing features, preventing silently drifting schemas from landing in the repo.
+"""
+
 from __future__ import annotations
 
 import json

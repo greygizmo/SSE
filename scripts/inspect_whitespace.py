@@ -1,3 +1,19 @@
+"""Quickly inspect whitespace scoring output for manual QA.
+
+The whitespace scoring flow exports a consolidated CSV that contains per-customer
+scores, probabilities, and qualitative reasons. This helper script reads that
+CSV (defaulting to the most recent dated file in ``gosales/outputs``) and prints
+human-readable summaries so a sales analyst can sanity check the results without
+opening a spreadsheet:
+
+* overall row count and the list of available divisions in the drop
+* the top 20 customers globally by score
+* the top 10 customers for each strategic division of interest
+
+The output provides a high-signal view of how the ranking behaves and whether
+expected context columns made it through the scoring pipeline.
+"""
+
 import pandas as pd
 from pathlib import Path
 

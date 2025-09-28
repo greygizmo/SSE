@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Tuple
+
 import pandas as pd
 import polars as pl
 
@@ -61,13 +62,23 @@ def customer_als_embeddings(
     activity by effectively discarding stale interactions.
     """
 
+    als_columns = [f"als_f{d}" for d in range(factors)]
+
+    def _empty_embeddings() -> pl.DataFrame:
+        data: dict[str, pl.Series] = {
+            "customer_id": pl.Series(name="customer_id", values=[], dtype=pl.Int64),
+        }
+        for col in als_columns:
+            data[col] = pl.Series(name=col, values=[], dtype=pl.Float64)
+        return pl.DataFrame(data)
+
     # Build interactions from feature period only
     tx = pd.read_sql(
         "SELECT customer_id, order_date, product_sku, quantity FROM fact_transactions",
         engine,
     )
     if tx.empty:
-        return pl.DataFrame()
+        return _empty_embeddings()
     tx['order_date'] = pd.to_datetime(tx['order_date'], errors='coerce')
     cutoff_dt = pd.to_datetime(cutoff)
     if lookback_months is not None:
@@ -76,14 +87,14 @@ def customer_als_embeddings(
     else:
         tx = tx[(tx['order_date'] <= cutoff_dt)].copy()
     if tx.empty:
-        return pl.DataFrame()
+        return _empty_embeddings()
     # Weights: total quantity (fallback to 1 if missing)
     tx['quantity'] = pd.to_numeric(tx['quantity'], errors='coerce').fillna(1.0)
     tx['customer_id'] = tx['customer_id'].astype('string')
     tx['product_sku'] = tx['product_sku'].astype('string')
     grp = tx.groupby(['customer_id','product_sku'])['quantity'].sum().rename('weight').reset_index()
     if grp.empty:
-        return pl.DataFrame()
+        return _empty_embeddings()
     mat, user_index, _ = _build_user_item(grp, 'customer_id', 'product_sku', 'weight')
 
     # Try implicit ALS first; if unavailable, fallback to TruncatedSVD
@@ -91,8 +102,8 @@ def customer_als_embeddings(
     if U is None:
         U = _svd_fallback(mat, factors=factors)
     if U is None or U.empty:
-        return pl.DataFrame()
-    U.columns = [f'als_f{d}' for d in range(U.shape[1])]
+        return _empty_embeddings()
+    U.columns = als_columns[: U.shape[1]]
     # user_index categories align to original string IDs
     U['customer_id'] = user_index.astype('string').values
     # Prefer numeric customer_id when safely convertible (keeps tests and downstream contracts happy)

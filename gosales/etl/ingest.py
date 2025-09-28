@@ -1,3 +1,10 @@
+"""Managed ingestion of vendor-provided CSV exports into the GoSales lakehouse.
+
+This module tracks checksums, handles encoding edge cases, and organizes raw
+files into the expected directory layout so downstream ETL jobs can consume
+stable inputs with provenance metadata.
+"""
+
 from __future__ import annotations
 
 import hashlib

@@ -1,3 +1,11 @@
+"""Core feature-engineering routines shared across training pipelines.
+
+The engine builds time-aware customer matrices, joining transactional, asset,
+and embedding signals into a single frame suitable for binary classification.
+It is the authoritative implementation of feature logic consumed by CLI
+wrappers and notebooks alike.
+"""
+
 import polars as pl
 import pandas as pd
 import numpy as np

@@ -1,3 +1,10 @@
+"""Normalize the NetSuite customer dimension for downstream analytics.
+
+This module extracts the sprawling NetSuite customer export, standardizes
+identifiers, enforces data-quality contracts, and materializes a curated
+``dim_ns_customer`` table that modeling, QA, and reporting layers share.
+"""
+
 from __future__ import annotations
 
 from typing import Iterable

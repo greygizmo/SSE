@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-"""
-Create a minimal dummy cold-start model for a division and write model.pkl.
+"""Author a placeholder cold-start model artifact for divisions lacking history.
 
-Usage:
-  python scripts/create_dummy_cold_model.py --division Solidworks \
-      --output gosales/models/solidworks_cold_model/model.pkl
+Some downstream services expect a ``model.pkl`` and metadata.json even when a
+division has not yet been trained.  This utility writes a scikit-learn dummy
+classifier to disk using predictable defaults so that deployments and CI can run
+end-to-end while we collect real data.  Example usage::
+
+    python scripts/create_dummy_cold_model.py --division Solidworks \
+        --output gosales/models/solidworks_cold_model/model.pkl
 """
 import argparse
 import json

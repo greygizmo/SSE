@@ -1,3 +1,10 @@
+"""Train the Solidworks prospects model using bespoke label/feature builders.
+
+The Solidworks prospecting flow has specialized labeling and feature logic.
+This module stitches those components together, fits the LightGBM classifier,
+and serializes calibrated artifacts plus evaluation metrics.
+"""
+
 from __future__ import annotations
 
 import json

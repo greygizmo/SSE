@@ -1,3 +1,18 @@
+"""CI guardrail that checks fact_assets hygiene ahead of feature generation.
+
+The assets-based features rely on clean purchase dates and rollup mappings. This
+script is intended to run in continuous integration. It executes a handful of
+data-quality checks against ``fact_assets`` in the curated warehouse:
+
+* proportion of rows with a valid ``item_rollup`` value
+* share of purchase dates that are missing or obviously wrong
+* reasonableness of the inferred effective tenure (median days since purchase)
+
+Results are written to ``gosales/outputs/ci_assets_sanity_<cutoff>.json`` and
+the process exits with a non-zero code if any threshold is violated so CI can
+flag the run. Thresholds and the cutoff date can be overridden via CLI options.
+"""
+
 from __future__ import annotations
 
 import sys

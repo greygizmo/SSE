@@ -1,16 +1,13 @@
+"""Comprehensive leakage audit orchestrator for GoSales pipelines.
+
+The gauntlet bundles static code scans, temporal feature audits, and optional
+simulation checks (shift windows, ablations) to ensure models never peek into
+the future.  Results are written under ``gosales/outputs/leakage/<division>``
+and summarized in ``leakage_report_<division>_<cutoff>.json`` for release
+reviews.
+"""
+
 from __future__ import annotations
-
-"""
-Leakage Gauntlet runner (reliable implementation).
-
-Phases:
- 1) Static scan for time-now calls inside ETL/features (guards against implicit leakage)
- 2) Feature-date audit vs cutoff (ensures no post-cutoff events feed features)
- 3) Optional dynamic checks (shift-14, shift grid, top-k ablation, reproducibility) – best-effort, non-gating
-
-Artifacts are written under gosales/outputs/leakage/<division>/<cutoff>/ and an
-overall report is emitted as leakage_report_<division>_<cutoff>.json.
-"""
 
 from dataclasses import dataclass
 from pathlib import Path

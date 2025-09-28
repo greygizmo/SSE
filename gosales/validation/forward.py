@@ -1,4 +1,27 @@
+"""Forward validation of production scores against future actuals.
+
+After deployment we compare predicted ranks to realized conversions to monitor
+calibration, lift, and drift.  This module reads score drops, joins sales
+actuals, and produces metrics plus monitoring plots for the RevOps team.
+"""
+
 from __future__ import annotations
+
+"""End-to-end holdout validation workflow for a single division.
+
+Phase 5 requires a consistent report that ties together model scores, realized
+buyers, and operational readiness signals. This CLI loads the frozen production
+model, rebuilds the feature matrix for a specified cutoff, optionally joins
+holdout transactions, and then computes:
+
+* headline metrics (AUC, PR-AUC, Brier, calibration MAE with bootstrap CIs)
+* gains tables, calibration bins, and capacity planning scenarios
+* drift indicators comparing validation features to training baselines
+
+It writes a rich set of CSV/JSON artifacts under
+``gosales/outputs/validation/<division>/<cutoff>/`` and registers them with the
+ops run manifest so downstream dashboards and CI checks can pick them up.
+"""
 
 from pathlib import Path
 

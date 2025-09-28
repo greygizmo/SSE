@@ -1,3 +1,10 @@
+"""Score Solidworks prospect accounts and publish prospecting deliverables.
+
+This script mirrors the customer scorer but targets the net-new Solidworks
+prospect flow, loading the bespoke model artifacts, assembling features, and
+writing both database tables and CSV exports with calibrated scores.
+"""
+
 from __future__ import annotations
 
 import argparse

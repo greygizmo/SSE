@@ -1,13 +1,20 @@
+"""Run high-signal leakage diagnostics on a division's feature matrix.
+
+SAFE reviews require evidence that models are not overfitting to adjacency or
+temporal leaks. This utility builds a feature matrix at the requested cutoff
+(respecting the gauntlet mask), then performs two diagnostic passes:
+
+* Label permutation: measures how much performance degrades when labels are
+  randomly shuffled within recency buckets.
+* Importance stability: bootstraps the training data to see if top features
+  remain consistent across resamples.
+
+The script produces JSON summaries (and optional PNG plots) under
+``gosales/outputs/leakage/<division>/<cutoff>/`` so reviewers can quickly spot
+suspect divisions without digging through notebooks.
+"""
+
 from __future__ import annotations
-
-"""
-Quick leakage diagnostics: label permutation and importance stability.
-
-Outputs JSON summaries and optional PNG plots under:
-  gosales/outputs/leakage/<division>/<cutoff>/
-
-Use SAFE audit defaults: apply gauntlet tail mask to windowed features.
-"""
 
 from pathlib import Path
 import json

@@ -1,16 +1,23 @@
+"""Run the SAFE adjacency ablation experiment for a single division.
+
+This script trains multiple feature subsets at a historical cutoff and evaluates
+them on a holdout month to quantify how aggressive SAFE policies impact model
+quality. Four variants are compared:
+
+1. ``full`` – the untouched feature set
+2. ``no_recency_short`` – removes explicit recency and short window aggregates
+3. ``safe`` – mimics the full SAFE policy by excluding adjacency-heavy families
+4. ``safe_lite`` – a compromise that keeps embeddings but drops near-cutoff cues
+
+For each variant the script trains a light-weight model (logistic regression and
+LightGBM, picking whichever scores best on the holdout AUC) and records AUC,
+Lift@10, and Brier Score. Outputs land under
+``gosales/outputs/ablation/adjacency/<division>/<train>_<holdout>/`` and include a
+JSON summary plus a CSV table. These artifacts drive SAFE decision meetings and
+feed ``auto_safe_from_ablation`` which auto-updates the configuration.
+"""
+
 from __future__ import annotations
-
-"""
-Adjacency Ablation Triad
-
-Trains three variants at a training cutoff and evaluates on a far-month holdout:
-  1) full: all features
-  2) no_recency_short: drops recency/days_since_last and short windows (<=12m)
-  3) safe: applies SAFE policy (adjacency-heavy families removed)
-
-Uses GroupCV+purge for split selection when possible; primary comparison is on holdout.
-Writes JSON and CSV summary under gosales/outputs/ablation/adjacency/<division>/<train_cutoff>_<holdout_cutoff>/
-"""
 
 from pathlib import Path
 import json

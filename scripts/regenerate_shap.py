@@ -1,3 +1,16 @@
+"""Refresh SHAP artifacts for all trained divisions.
+
+Product and marketing teams rely on lightweight SHAP exports to explain why
+customers were prioritized. This script aligns freshly generated feature
+matrices to the model's training schema, samples a subset of customers, computes
+global mean-absolute SHAP values and per-customer scores, and stores everything
+under ``gosales/outputs``. A manifest JSON summarizes which artifacts were
+created per division.
+
+Running the command after a new training cut ensures we have interpretable
+artifacts that correspond to the latest production models.
+"""
+
 from __future__ import annotations
 
 import argparse

@@ -1,3 +1,11 @@
+"""End-to-end orchestration entry point for the GoSales scoring pipeline.
+
+Running this module bootstraps raw extracts into the curated warehouse, retrains
+models where necessary, scores customers, validates holdouts, and emits final
+deliverables.  It exists so operations teams have a single command that mirrors
+our production DAG.
+"""
+
 from gosales.utils.db import get_db_connection, validate_connection
 from gosales.etl.load_csv import load_csv_to_db
 from gosales.etl.build_star import build_star_schema

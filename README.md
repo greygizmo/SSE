@@ -18,6 +18,7 @@ A division-focused Ideal Customer Profile (ICP) & Whitespace engine. The pipelin
 - **Phase 2 — Features**
   - RFM windows (3/6/12/24m), trajectory (monthly slope/std), lifecycle (tenure, gaps, active months), seasonality, cross-division shares (EB-smoothed), diversity, returns
   - Optional toggles: market-basket affinity, ALS embeddings
+  - Asset features at cutoff: `assets_expiring_{30,60,90}d_<rollup>`, subscription shares (`assets_subs_share_<rollup>`), composition (`assets_on_subs_share_<rollup>`, `assets_off_subs_share_<rollup>`)
   - Artifacts: features parquet, feature catalog CSV, feature stats JSON (coverage, winsor caps, checksum)
   - Determinism and winsorization tests
 - **Phase 3 — Modeling**
@@ -29,7 +30,7 @@ A division-focused Ideal Customer Profile (ICP) & Whitespace engine. The pipelin
   - Calibration: adaptive CV per cutoff and at final fit. When per-class counts cannot support `cv>=2`, calibration is skipped and uncalibrated probabilities are used; diagnostics record `calibration='none'` with a reason. Isotonic is automatically downgraded to Platt when positives are sparse (see `modeling.sparse_isotonic_threshold_pos`).
   - Diagnostics: emits `diagnostics_<division>.json` with a `results_grid` containing one row per cutoff per model, including `auc`, `lift10`, `brier`, and calibration fields (`calibration`, `calibration_reason`). This confirms every cutoff contributed to aggregation and surfaces any calibration fallbacks.
   - Artifacts: `metrics.json`, `gains.csv`, `calibration.csv`, `thresholds.csv`, `model_card.json`, SHAP summaries (optional; guarded if SHAP not installed)
-  - Tuning guide: see `docs/calibration.md` for calibration behavior, diagnostics, and practical tuning tips.
+  - Tuning guide: see `gosales/docs/FEATURES_AND_CONFIG.md` (calibration behavior, diagnostics, and practical tuning tips).
   - Guardrails: degenerate classifier check, deterministic LGBM, early stopping, overfit-gap guard, capped `scale_pos_weight`
 
 - **Phase 4 — Whitespace Ranking / Next‑Best‑Action**
@@ -242,9 +243,64 @@ To add a division: extend `etl/sku_map.py` (or overrides CSV), rebuild the star 
 The orchestrator `pipeline/score_all.py` collects training targets as (divisions minus `{Hardware, Maintenance}`) union the supported logical models from `etl/sku_map.get_supported_models()`. You can also train a specific model directly (e.g., `--division Printers`).
 
 #### Troubleshooting and notes
-- If training fails in the simple trainer (`gosales/models/train_division_model.py`) due to infinities or extreme values, prefer the robust trainer `gosales/models/train.py`, which sanitizes features (NaN/inf handling, low‑variance and high‑correlation pruning) and performs hyper‑search across cutoffs.
+- If training encounters numeric issues (inf/NaN or unstable features), use the robust trainer `gosales/models/train.py`, which sanitizes features (NaN/inf handling, low‑variance and high‑correlation pruning) and performs hyper‑search across cutoffs.
 - If a division has too few positives (e.g., `FDM` at 0 positives in the default window), widen the window, aggregate sub‑divisions, or adjust the SKU map. Label audit artifacts in `gosales/outputs/labels_*` will show prevalence.
 - SHAP artifacts are optional; if `shap` is not installed, training proceeds without explainability exports.
+
+---
+
+### How to interpret whitespace metrics (for revenue teams)
+
+- Capture@K
+  - Meaning: Of all the wins the model expects in this period, what fraction are covered if you work just the top K% of the ranked list.
+  - Why it matters: Indicates how concentrated opportunity is. Higher is better for efficiency.
+  - Thumb rule: If `capture@10% = 0.65`, then working the top 10% could capture ~65% of expected wins.
+
+- Division shares in the selected list
+  - Meaning: Within your capacity slice (e.g., top 10% or per‑rep list), what fraction comes from each division.
+  - Why it matters: Prevents over‑concentration (e.g., 90% Solidworks). If a division exceeds the configured share threshold, the system warns and suggests hybrid capacity to diversify.
+
+- Stability (Jaccard) vs last run
+  - Meaning: Overlap between this run’s top‑N and the previous run’s top‑N (0–1).
+  - Why it matters: High (~0.7–0.9) = consistent targeting; low (~0.3) = shift due to seasonality, new data, or configuration change.
+  - Action: If stability drops unexpectedly, review data recency, config changes, and business events.
+
+- Coverage and weight adjustments
+  - What it shows: Coverage for ALS and market‑basket signals (what % of customers have these signals). Low coverage down‑weights that signal and renormalizes.
+  - Why it matters: Low coverage isn’t “bad”, it reflects current data sparsity. As coverage improves, those signals earn more weight.
+
+- Thresholds & capacity
+  - Top‑percent: Work the top X% across all divisions; thresholds file lists the score cut line and counts.
+  - Per‑rep: Each rep gets roughly the top N in their book (requires a `rep` column in features). Encourages fair distribution.
+  - Hybrid: Round‑robin across divisions up to capacity to ensure diversification.
+
+- Probability and value
+  - `p_icp`: Calibrated probability (0–1) of a positive outcome in the prediction window.
+  - `EV_norm`: Normalized expected‑value proxy (segment‑blended and capped at a high percentile to avoid whale effects).
+
+- Explanations (`nba_reason`)
+  - Short, human‑readable context such as “High p=0.78; strong affinity; high EV.” For deeper model insights, use Phase‑3 SHAP/coef artifacts.
+
+- Recommended operating mode
+  - Pilot: pick one capacity mode (e.g., top‑10% or per‑rep 25) and run 4–6 weeks. Track conversion vs a comparable control group.
+  - Review weekly: capture@K, division shares, stability, and rep feedback. Adjust capacity and weights if needed.
+
+- Cautions
+  - This is not a price quote or guarantee; it’s a ranked opportunity list.
+  - If gating (DNC/legal/open deals/region) removes many accounts, the selected list may shrink and division shares may shift—this is expected.
+  - Cooldowns reduce repeated surfacing of the same account that wasn’t actioned; adjust in config if needed.
+
+---
+
+### Utilities / Scripts
+
+- `scripts/metrics_summary.py`: aggregate `metrics_*.json` into a summary CSV
+- `scripts/ci_assets_sanity.py`: CI‑style gate for asset rollup coverage and tenure imputation sanity
+- `scripts/drift_snapshots.py`: aggregate prevalence and calibration MAE across validation runs
+- `scripts/name_join_qa.py`: Moneyball→dim_customer name‑join QA; writes coverage summary and top unmapped names
+- `scripts/ablation_assets_off.py`: Train with assets disabled and compare metrics vs baseline; writes ablation JSON
+- `scripts/build_features_for_models.py`: Build feature matrices for each trained model’s cutoff to align feature lists
+- `scripts/train_all_models.py`: Retrain all target models at a given cutoff (group‑CV, calibration)
 
 ---
 

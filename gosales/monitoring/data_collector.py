@@ -1,6 +1,9 @@
-"""
-Data collector for pipeline monitoring.
-Gathers real-time metrics and health data from pipeline execution.
+"""Collect runtime telemetry and context needed for pipeline monitoring.
+
+The monitoring stack persists snapshots of pipeline state, system health, and
+data-quality indicators.  This module provides a collector class that assembles
+those signals from the database, filesystem, and host machine so dashboards can
+render a holistic view of nightly runs.
 """
 import json
 import time

@@ -1,6 +1,15 @@
-﻿from __future__ import annotations
+"""Train GoSales propensity models and persist calibrated artifacts.
+
+This module powers the standard training entry point, wiring together feature
+generation, model selection, evaluation metrics, and artifact serialization so
+that CLI wrappers and pipelines can produce reproducible models.
+"""
+
+from __future__ import annotations
 
 import json
+import math
+from itertools import combinations
 from pathlib import Path
 from datetime import datetime, timezone
 from dataclasses import dataclass
@@ -48,6 +57,168 @@ def _lift_at_k(y_true: np.ndarray, y_score: np.ndarray, k_percent: int) -> float
 def _weighted_lift_at_k(y_true: np.ndarray, y_score: np.ndarray, weights: np.ndarray, k_percent: int) -> float:
     return compute_weighted_lift_at_k(y_true, y_score, weights, k_percent)
 
+
+def _infer_revenue_weights(df: pd.DataFrame) -> np.ndarray:
+    """Infer revenue-style weights for lift calculations.
+
+    Prefers recent gross profit aggregates with fallback to lifetime totals.
+    Returns an array aligned with ``df`` rows. Missing/invalid values become 0.0.
+    """
+
+    weights = np.ones(len(df), dtype=float)
+    candidates = ["rfm__all__gp_sum__12m", "total_gp_all_time"]
+    for col in candidates:
+        if col in df.columns:
+            vals = pd.to_numeric(df[col], errors="coerce").fillna(0.0).astype(float).values
+            if np.any(vals):
+                weights = vals
+                break
+    return weights
+
+
+def _is_backbone_feature(column: str, backbone_cols: set[str], backbone_prefixes: tuple[str, ...]) -> bool:
+    col = str(column)
+    if col in backbone_cols:
+        return True
+    return any(col.startswith(pref) for pref in backbone_prefixes if pref)
+
+
+def _collect_topn_ids(
+    probs: np.ndarray,
+    valid_index: pd.Index,
+    df: pd.DataFrame,
+    top_k_percents: list[int],
+) -> dict[int, list[str]]:
+    """Return top-N customer ids for each configured percentile."""
+
+    topn: dict[int, list[str]] = {}
+    if len(probs) == 0:
+        return topn
+    for k in top_k_percents:
+        try:
+            frac = max(1, int(math.ceil(len(probs) * float(k) / 100.0)))
+        except Exception:
+            frac = max(1, int(len(probs) * 0.10))
+        order = np.argsort(-probs)
+        sel = order[:frac]
+        ids = []
+        for pos in sel:
+            try:
+                row_idx = valid_index[pos]
+                ids.append(str(df.loc[row_idx, "customer_id"]))
+            except Exception:
+                continue
+        topn[int(k)] = sorted(dict.fromkeys(ids))
+    return topn
+
+
+def _json_safe(value):
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(v) for v in value]
+    if isinstance(value, (np.floating, float, int)):
+        val = float(value)
+        if math.isnan(val) or math.isinf(val):
+            return None
+        return val
+    return value
+
+
+def _aggregate_stability(
+    results: list[dict],
+    top_k_percents: list[int],
+    penalty_lambda: float,
+    cv_guard: float,
+) -> tuple[pd.DataFrame, str, dict[str, dict]]:
+    """Aggregate per-cutoff metrics and select champion via stability objective."""
+
+    if not results:
+        return pd.DataFrame(), "", {}
+
+    df = pd.DataFrame(results)
+    records = []
+    summary: dict[str, dict] = {}
+
+    for model, group in df.groupby("model"):
+        entry: dict[str, dict | float | bool] = {
+            "rev_lift": {},
+            "lift": {},
+        }
+        objective_mean = np.nan
+        objective_std = np.nan
+        for k in top_k_percents:
+            rev_col = f"rev_lift@{k}"
+            lift_col = f"lift@{k}"
+            rev_vals = pd.to_numeric(group.get(rev_col, pd.Series([], dtype=float)), errors="coerce")
+            lift_vals = pd.to_numeric(group.get(lift_col, pd.Series([], dtype=float)), errors="coerce")
+            rev_vals = rev_vals.replace({np.inf: np.nan, -np.inf: np.nan})
+            lift_vals = lift_vals.replace({np.inf: np.nan, -np.inf: np.nan})
+            rev_mean = float(np.nanmean(rev_vals.values)) if len(rev_vals) else np.nan
+            rev_std = float(np.nanstd(rev_vals.values, ddof=0)) if len(rev_vals) else np.nan
+            if rev_mean == 0 or np.isnan(rev_mean):
+                rev_cv = float("inf") if rev_std not in (0.0, 0) else np.nan
+            else:
+                rev_cv = float(abs(rev_std) / abs(rev_mean))
+            lift_mean = float(np.nanmean(lift_vals.values)) if len(lift_vals) else np.nan
+            lift_std = float(np.nanstd(lift_vals.values, ddof=0)) if len(lift_vals) else np.nan
+            if lift_mean == 0 or np.isnan(lift_mean):
+                lift_cv = float("inf") if lift_std not in (0.0, 0) else np.nan
+            else:
+                lift_cv = float(abs(lift_std) / abs(lift_mean))
+            entry["rev_lift"][int(k)] = {"mean": rev_mean, "std": rev_std, "cv": rev_cv}
+            entry["lift"][int(k)] = {"mean": lift_mean, "std": lift_std, "cv": lift_cv}
+            if int(k) == 10:
+                objective_mean = rev_mean
+                objective_std = rev_std
+
+        guard_fail = False
+        rev10 = entry["rev_lift"].get(10, {}) if isinstance(entry["rev_lift"], dict) else {}
+        rev10_cv = float(rev10.get("cv", float("inf"))) if rev10 else float("inf")
+        if cv_guard and math.isfinite(cv_guard):
+            guard_fail = bool(rev10_cv > cv_guard)
+        objective = float("-inf")
+        if not math.isnan(objective_mean):
+            std_term = float(objective_std) if not math.isnan(objective_std) else 0.0
+            objective = float(objective_mean - penalty_lambda * std_term)
+        summary[model] = {
+            **entry,
+            "objective": objective,
+            "objective_components": {
+                "mean_rev_lift10": objective_mean,
+                "std_rev_lift10": objective_std,
+                "lambda": penalty_lambda,
+            },
+            "cv_guard_threshold": cv_guard,
+            "cv_guard_fail": guard_fail,
+        }
+        record = {
+            "model": model,
+            "objective": objective,
+            "cv_guard_fail": guard_fail,
+        }
+        for k, stats in entry["rev_lift"].items():
+            record[f"rev_lift_mean@{k}"] = float(stats.get("mean")) if stats else None
+            record[f"rev_lift_std@{k}"] = float(stats.get("std")) if stats else None
+            record[f"rev_lift_cv@{k}"] = float(stats.get("cv")) if stats else None
+        for k, stats in entry["lift"].items():
+            record[f"lift_mean@{k}"] = float(stats.get("mean")) if stats else None
+            record[f"lift_std@{k}"] = float(stats.get("std")) if stats else None
+            record[f"lift_cv@{k}"] = float(stats.get("cv")) if stats else None
+        records.append(record)
+
+    agg_df = pd.DataFrame(records) if records else pd.DataFrame()
+    if not len(agg_df):
+        return agg_df, "", summary
+
+    ranked = agg_df.sort_values("objective", ascending=False)
+    guard_candidates = ranked[~ranked["cv_guard_fail"].astype(bool)]
+    if len(guard_candidates):
+        winner_row = guard_candidates.iloc[0]
+    else:
+        winner_row = ranked.iloc[0]
+    winner = str(winner_row["model"])
+    return agg_df, winner, summary
 
 def _train_test_split_time_aware(X: pd.DataFrame, y: pd.Series, seed: int) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
     # Prefer time-aware split using recency if feature present; else fall back to stratified split
@@ -273,6 +444,21 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
             auto_safe = True
     except Exception:
         pass
+
+    stability_cfg = getattr(getattr(cfg, 'modeling', object()), 'stability', object())
+    coverage_floor = float(getattr(stability_cfg, 'coverage_floor', 0.0) or 0.0)
+    min_positive_rate = float(getattr(stability_cfg, 'min_positive_rate', 0.0) or 0.0)
+    min_positive_count = int(getattr(stability_cfg, 'min_positive_count', 0) or 0)
+    penalty_lambda = float(getattr(stability_cfg, 'penalty_lambda', 0.0) or 0.0)
+    cv_guard_threshold = getattr(stability_cfg, 'cv_guard_max', None)
+    try:
+        cv_guard = float(cv_guard_threshold) if cv_guard_threshold is not None else float('inf')
+    except Exception:
+        cv_guard = float('inf')
+    sparse_family_prefixes = [str(s) for s in getattr(stability_cfg, 'sparse_family_prefixes', [])]
+    backbone_features = {str(s) for s in getattr(stability_cfg, 'backbone_features', [])}
+    backbone_prefixes = tuple(str(s) for s in getattr(stability_cfg, 'backbone_prefixes', []))
+
     cut_list = [c.strip() for c in cutoffs.split(",") if c.strip()]
     OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
@@ -319,6 +505,12 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
             return
         all_dropped_low_var: list[str] = []
         all_dropped_corr: list[tuple[str, str]] = []
+        prevalence_stats: list[dict[str, float]] = []
+        coverage_drops_by_cutoff: dict[str, list[str]] = {}
+        family_drops_by_cutoff: dict[str, list[str]] = {}
+        topn_registry: dict[tuple[str, str], dict[int, list[str]]] = {}
+        union_coverage_drop: set[str] = set()
+        union_sparse_drop: set[str] = set()
         # In SAFE (audit) mode, apply gauntlet tail-mask to windowed features
         gauntlet_mask_tail = 0
         try:
@@ -347,9 +539,52 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
                 logger.warning(f"Empty feature matrix for cutoff {cutoff}")
                 continue
             df = fm.to_pandas()
-            y = df['bought_in_division'].astype(int).values
-            X = df.drop(columns=['customer_id','bought_in_division'])
-            X = _sanitize_features(X)
+            if 'bought_in_division' not in df.columns:
+                logger.warning("Missing target column for cutoff %s", cutoff)
+                continue
+            y_series = df['bought_in_division'].astype(int)
+            y = y_series.values
+            total_rows = int(len(y))
+            pos_count = int(y_series.sum())
+            prevalence = float(pos_count / total_rows) if total_rows else 0.0
+            weights_series = pd.Series(_infer_revenue_weights(df), index=df.index)
+            X_raw = df.drop(columns=['customer_id', 'bought_in_division'])
+            coverage_series = X_raw.notna().mean()
+            coverage_drop_cols: list[str] = []
+            if coverage_floor > 0:
+                coverage_drop_cols = [
+                    c for c, cov in coverage_series.items()
+                    if (float(cov) < coverage_floor)
+                    and not _is_backbone_feature(c, backbone_features, backbone_prefixes)
+                ]
+                if coverage_drop_cols:
+                    X_raw = X_raw.drop(columns=coverage_drop_cols, errors='ignore')
+                    coverage_drops_by_cutoff[cutoff] = sorted(dict.fromkeys([str(c) for c in coverage_drop_cols]))
+                    union_coverage_drop.update(coverage_drop_cols)
+            drop_sparse = False
+            if total_rows:
+                drop_sparse = (prevalence < min_positive_rate) or (pos_count < min_positive_count)
+            sparse_drop_cols: list[str] = []
+            if drop_sparse and sparse_family_prefixes:
+                for col in list(X_raw.columns):
+                    if _is_backbone_feature(col, backbone_features, backbone_prefixes):
+                        continue
+                    col_str = str(col)
+                    if any(col_str.startswith(pref) for pref in sparse_family_prefixes):
+                        sparse_drop_cols.append(col)
+                if sparse_drop_cols:
+                    X_raw = X_raw.drop(columns=sparse_drop_cols, errors='ignore')
+                    family_drops_by_cutoff[cutoff] = sorted(dict.fromkeys([str(c) for c in sparse_drop_cols]))
+                    union_sparse_drop.update(sparse_drop_cols)
+            prevalence_stats.append({
+                "cutoff": cutoff,
+                "total": total_rows,
+                "positives": pos_count,
+                "prevalence": prevalence,
+                "coverage_floor_dropped": len(coverage_drop_cols),
+                "sparse_family_dropped": len(sparse_drop_cols),
+            })
+            X = _sanitize_features(X_raw)
             # SAFE policy: drop high-risk adjacency families
             if auto_safe:
                 try:
@@ -503,7 +738,28 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
                         best_brier = brier_score_loss(y_valid, p)
                     except Exception:
                         best_brier = None
-                lift10 = _lift_at_k(y_valid, p, 10)
+                weights_valid = weights_series.loc[X_valid.index].astype(float).values
+                lifts_dict: dict[str, float | None] = {}
+                rev_lifts_dict: dict[str, float | None] = {}
+                for k in getattr(cfg.modeling, 'top_k_percents', [10]):
+                    key = f"lift@{int(k)}"
+                    try:
+                        lifts_dict[key] = float(_lift_at_k(y_valid, p, int(k)))
+                    except Exception:
+                        lifts_dict[key] = None
+                    rev_key = f"rev_lift@{int(k)}"
+                    try:
+                        val = _weighted_lift_at_k(y_valid, p, weights_valid, int(k))
+                        rev_lifts_dict[rev_key] = float(val) if val == val else None
+                    except Exception:
+                        rev_lifts_dict[rev_key] = None
+                lift10 = lifts_dict.get('lift@10')
+                topn_registry[("logreg", cutoff)] = _collect_topn_ids(
+                    p,
+                    X_valid.index,
+                    df,
+                    [int(k) for k in getattr(cfg.modeling, 'top_k_percents', [10])],
+                )
                 # Pull n_iter_ from underlying LR if available
                 try:
                     lr_inner = best_lr_pipe.named_steps.get('model')
@@ -516,12 +772,16 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
                     "cutoff": cutoff,
                     "model": "logreg",
                     "auc": float(best_lr_auc),
-                    "lift10": float(lift10),
+                    "lift10": float(lift10) if lift10 is not None else None,
                     "brier": float(best_brier) if best_brier is not None else None,
                     "calibration": best_cal_method,
                     "calibration_reason": best_cal_reason,
                     "converged": bool(best_conv),
                     "n_iter": n_iter_val,
+                    "positives": pos_count,
+                    "prevalence": prevalence,
+                    **{k: v for k, v in lifts_dict.items()},
+                    **{k: v for k, v in rev_lifts_dict.items()},
                 })
 
         # LGBM challenger
@@ -626,29 +886,126 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
                         best_brier = brier_score_loss(y_valid, p)
                     except Exception:
                         best_brier = None
-                lift10 = _lift_at_k(y_valid, p, 10)
+                weights_valid = weights_series.loc[X_valid.index].astype(float).values
+                lifts_dict: dict[str, float | None] = {}
+                rev_lifts_dict: dict[str, float | None] = {}
+                for k in getattr(cfg.modeling, 'top_k_percents', [10]):
+                    key = f"lift@{int(k)}"
+                    try:
+                        lifts_dict[key] = float(_lift_at_k(y_valid, p, int(k)))
+                    except Exception:
+                        lifts_dict[key] = None
+                    rev_key = f"rev_lift@{int(k)}"
+                    try:
+                        val = _weighted_lift_at_k(y_valid, p, weights_valid, int(k))
+                        rev_lifts_dict[rev_key] = float(val) if val == val else None
+                    except Exception:
+                        rev_lifts_dict[rev_key] = None
+                lift10 = lifts_dict.get('lift@10')
+                topn_registry[("lgbm", cutoff)] = _collect_topn_ids(
+                    p,
+                    X_valid.index,
+                    df,
+                    [int(k) for k in getattr(cfg.modeling, 'top_k_percents', [10])],
+                )
                 results.append({
                     "cutoff": cutoff,
                     "model": "lgbm",
                     "auc": float(best_auc),
-                    "lift10": float(lift10),
+                    "lift10": float(lift10) if lift10 is not None else None,
                     "brier": float(best_brier) if best_brier is not None else None,
                     "calibration": best_cal_method,
                     "calibration_reason": best_cal_reason,
+                    "positives": pos_count,
+                    "prevalence": prevalence,
+                    **{k: v for k, v in lifts_dict.items()},
+                    **{k: v for k, v in rev_lifts_dict.items()},
                 })
 
-    # Aggregate and select winner by lift@10 then cal-Brier
+    # Aggregate and select winner by stability-adjusted revenue lift
     if not results:
         logger.warning("No training results produced")
         return
     res_df = pd.DataFrame(results)
-    agg = res_df.groupby('model').agg({"lift10":"mean", "brier":"mean", "auc":"mean"}).reset_index()
-    agg = agg.sort_values(['lift10', 'brier'], ascending=[False, True])
-    winner = agg.iloc[0]['model']
-    logger.info(f"Selected model: {winner} by mean lift@10 and brier across cutoffs")
+    agg, winner, stability_summary = _aggregate_stability(
+        results,
+        [int(k) for k in getattr(cfg.modeling, 'top_k_percents', [10])],
+        penalty_lambda,
+        cv_guard,
+    )
+    if not winner:
+        logger.warning("Failed to select champion: no winner from stability objective")
+        return
+    winner_summary = stability_summary.get(winner, {})
+    objective = winner_summary.get("objective")
+    components = winner_summary.get("objective_components", {})
+    rev10_stats = winner_summary.get("rev_lift", {}).get(10, {})
+    logger.info(
+        "Selected model %s via stability objective=%.4f (mean_rev_lift10=%.4f, std_rev_lift10=%.4f, cv=%.4f, guard_fail=%s)",
+        winner,
+        float(objective) if objective not in (None, "") else float("nan"),
+        float(components.get("mean_rev_lift10", float("nan"))) if components else float("nan"),
+        float(components.get("std_rev_lift10", float("nan"))) if components else float("nan"),
+        float(rev10_stats.get("cv", float("nan"))) if rev10_stats else float("nan"),
+        bool(winner_summary.get("cv_guard_fail")),
+    )
+
+    top_k_list = [int(k) for k in getattr(cfg.modeling, 'top_k_percents', [10])]
+    winner_rows = [r for r in results if str(r.get("model")) == str(winner)]
+    last_cut = cut_list[-1]
+    holdout_row = None
+    for r in winner_rows:
+        if str(r.get("cutoff")) == str(last_cut):
+            holdout_row = r
+            break
+    if holdout_row is None and winner_rows:
+        holdout_row = winner_rows[-1]
+    delta_holdout_rev = {}
+    if holdout_row:
+        for k in top_k_list:
+            rev_key = f"rev_lift@{k}"
+            holdout_val = holdout_row.get(rev_key)
+            mean_val = winner_summary.get("rev_lift", {}).get(k, {}).get("mean")
+            if holdout_val is None or mean_val is None or (isinstance(holdout_val, float) and math.isnan(holdout_val)):
+                delta_holdout_rev[f"@{k}"] = None
+            else:
+                try:
+                    delta_holdout_rev[f"@{k}"] = float(holdout_val) - float(mean_val)
+                except Exception:
+                    delta_holdout_rev[f"@{k}"] = None
+    jaccard_stats: dict[str, float | None] = {}
+    winner_topn = [topn_registry.get((winner, cutoff)) for cutoff in cut_list if (winner, cutoff) in topn_registry]
+    if len(winner_topn) >= 2:
+        for k in top_k_list:
+            sets = [set(t.get(int(k), [])) for t in winner_topn if t and int(k) in t]
+            vals = []
+            for i, j in combinations(range(len(sets)), 2):
+                a = sets[i]
+                b = sets[j]
+                union = len(a | b)
+                if union == 0:
+                    continue
+                vals.append(len(a & b) / union)
+            jaccard_stats[f"@{k}"] = float(np.mean(vals)) if vals else None
+    else:
+        for k in top_k_list:
+            jaccard_stats[f"@{k}"] = None
+
+    stability_export = {
+        "objective": _json_safe(objective),
+        "lambda": _json_safe(penalty_lambda),
+        "cv_guard": _json_safe(cv_guard),
+        "cv_guard_fail": bool(winner_summary.get("cv_guard_fail")),
+        "summary": _json_safe(agg.replace({np.nan: None}).to_dict(orient='records') if len(agg) else []),
+        "winner": winner,
+        "rev_lift": _json_safe(winner_summary.get("rev_lift", {})),
+        "lift": _json_safe(winner_summary.get("lift", {})),
+        "delta_holdout_rev_lift": _json_safe(delta_holdout_rev),
+        "jaccard_topn": _json_safe(jaccard_stats),
+        "cutoff_prevalence": _json_safe(prevalence_stats),
+    }
 
     # Train final on last cutoff for simplicity here
-    last_cut = cut_list[-1]
     fm_final = create_feature_matrix(
         engine,
         division,
@@ -659,8 +1016,22 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
     )
     df_final = fm_final.to_pandas()
     y_final = df_final['bought_in_division'].astype(int).values
-    X_final = df_final.drop(columns=['customer_id','bought_in_division'])
-    X_final = _sanitize_features(X_final)
+    X_final_raw = df_final.drop(columns=['customer_id', 'bought_in_division'])
+    final_coverage_series = X_final_raw.notna().mean()
+    final_coverage_drop = []
+    if coverage_floor > 0:
+        final_coverage_drop = [
+            c for c, cov in final_coverage_series.items()
+            if (float(cov) < coverage_floor)
+            and not _is_backbone_feature(c, backbone_features, backbone_prefixes)
+        ]
+        if final_coverage_drop:
+            X_final_raw = X_final_raw.drop(columns=final_coverage_drop, errors='ignore')
+    if union_coverage_drop:
+        X_final_raw = X_final_raw.drop(columns=[c for c in union_coverage_drop if c in X_final_raw.columns], errors='ignore')
+    if union_sparse_drop:
+        X_final_raw = X_final_raw.drop(columns=[c for c in union_sparse_drop if c in X_final_raw.columns], errors='ignore')
+    X_final = _sanitize_features(X_final_raw)
     if auto_safe:
         try:
             cols = []
@@ -688,6 +1059,22 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
             X_final = X_final[cols]
         except Exception:
             pass
+    if final_coverage_drop:
+        coverage_drops_by_cutoff[f"final_{last_cut}"] = sorted(dict.fromkeys([str(c) for c in final_coverage_drop]))
+    pos_final = int(np.sum(y_final))
+    total_final = int(len(y_final))
+    prevalence_final = float(pos_final / total_final) if total_final else 0.0
+    final_sparse_drop: list[str] = []
+    if total_final and ((prevalence_final < min_positive_rate) or (pos_final < min_positive_count)):
+        for col in list(X_final.columns):
+            if _is_backbone_feature(col, backbone_features, backbone_prefixes):
+                continue
+            col_str = str(col)
+            if any(col_str.startswith(pref) for pref in sparse_family_prefixes):
+                final_sparse_drop.append(col)
+        if final_sparse_drop:
+            X_final = X_final.drop(columns=final_sparse_drop, errors='ignore')
+            family_drops_by_cutoff[f"final_{last_cut}"] = sorted(dict.fromkeys([str(c) for c in final_sparse_drop]))
     # Minimal: refit winner without hyper search for brevity (could repeat best params)
     # Choose calibration method per-division based on volume (stability heuristic)
     # If positives >= sparse_isotonic_threshold_pos -> prefer isotonic; else Platt (sigmoid)
@@ -843,16 +1230,8 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
         pr_auc = auc(pr_rec, pr_prec) if pr_prec is not None else None
         brier = brier_score_loss(y_final, p_final) if p_final is not None else None
         lifts = {f"lift@{k}": _lift_at_k(y_final, p_final, k) for k in cfg.modeling.top_k_percents} if p_final is not None else {}
-        # Revenue-weighted lift using best available weight feature
-        weights = np.ones_like(y_final, dtype=float)
-        try:
-            if 'rfm__all__gp_sum__12m' in df_final.columns:
-                weights = pd.to_numeric(df_final['rfm__all__gp_sum__12m'], errors='coerce').fillna(0.0).values
-            elif 'total_gp_all_time' in df_final.columns:
-                weights = pd.to_numeric(df_final['total_gp_all_time'], errors='coerce').fillna(0.0).values
-        except Exception:
-            pass
-        weighted_lifts = {f"rev_lift@{k}": _weighted_lift_at_k(y_final, p_final, weights, k) for k in cfg.modeling.top_k_percents} if p_final is not None else {}
+        weights_final = _infer_revenue_weights(df_final)
+        weighted_lifts = {f"rev_lift@{k}": _weighted_lift_at_k(y_final, p_final, weights_final, k) for k in cfg.modeling.top_k_percents} if p_final is not None else {}
 
         # Gains (deciles)
         gains_df = pd.DataFrame({"y": y_final, "p": p_final})
@@ -966,21 +1345,28 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
 
         # Model card / metrics
         # Model card / metrics
+        agg_records = agg.replace({np.nan: None}).to_dict(orient='records') if len(agg) else []
+        stability_export["final_rev_lift"] = _json_safe({f"@{k}": weighted_lifts.get(f"rev_lift@{k}") for k in cfg.modeling.top_k_percents})
+        stability_export["final_lift"] = _json_safe({f"@{k}": lifts.get(f"lift@{k}") for k in cfg.modeling.top_k_percents})
+        stability_export["final_prevalence"] = _json_safe(prevalence_final)
+        stability_export["holdout_cutoff"] = str(last_cut)
+
         metrics = {
             "division": division,
             "cutoffs": cut_list,
             "selection": winner,
-            "aggregate": agg.to_dict(orient='records'),
+            "aggregate": agg_records,
             "final": {
                 "auc": float(auc_val) if auc_val is not None else None,
                 "pr_auc": float(pr_auc) if pr_auc is not None else None,
                 "brier": float(brier) if brier is not None else None,
                 "cal_mae": float(cal_mae) if cal_mae is not None else None,
-                **lifts,
-                **weighted_lifts,
+                **{k: _json_safe(v) for k, v in lifts.items()},
+                **{k: _json_safe(v) for k, v in weighted_lifts.items()},
             },
             "seed": cfg.modeling.seed,
             "window_months": int(window_months),
+            "stability": stability_export,
         }
         metrics_path = OUTPUTS_DIR / f"metrics_{division.lower()}.json"
         with open(metrics_path, "w", encoding="utf-8") as f:
@@ -1010,6 +1396,7 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
             },
             "calibration": {"method": cal_method_label, "mae_weighted": float(cal_mae) if cal_mae is not None else None},
             "topk": topk_rows,
+            "stability": stability_export,
             "artifacts": {
                 "model_pickle": str(out_dir / "model.pkl"),
                 "feature_list": str(out_dir / "feature_list.json"),
@@ -1035,6 +1422,10 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
             "dropped_low_variance_cols": list(dict.fromkeys(all_dropped_low_var)),
             "dropped_high_corr_pairs": all_dropped_corr,
             "results_grid": results,
+            "coverage_drops": {k: v for k, v in coverage_drops_by_cutoff.items()},
+            "sparse_family_drops": {k: v for k, v in family_drops_by_cutoff.items()},
+            "prevalence": prevalence_stats,
+            "stability": stability_export,
         }
         _emit_diagnostics(OUTPUTS_DIR, division, diag_ctx)
         # If any LR result shows non-convergence, log a warning

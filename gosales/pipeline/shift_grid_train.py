@@ -1,3 +1,11 @@
+"""Grid-search leakage robustness by shifting training cutoffs and purges.
+
+To validate that SAFE parameters generalize, this script trains models across a
+grid of cutoff and purge settings, compares holdout metrics, and records
+results.  It feeds decision-making on how aggressive we can be with temporal
+buffers.
+"""
+
 from __future__ import annotations
 
 import json

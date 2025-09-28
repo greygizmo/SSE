@@ -1,4 +1,15 @@
+"""Compile lightweight drift indicators from validation artifacts.
+
+Every validation run writes a ``metrics.json`` file and, when available, a
+``validation_frame.parquet`` with the scored holdout data. This script walks the
+``gosales/outputs/validation`` tree, extracts the calibration error and label
+prevalence for each division/cutoff pair, and saves a compact
+``drift_snapshots.csv``. The CSV helps quickly spot divisions whose validation
+prevalence or calibration suddenly changes between monthly runs.
+"""
+
 import json
+
 from pathlib import Path
 import pandas as pd
 from gosales.utils.paths import OUTPUTS_DIR

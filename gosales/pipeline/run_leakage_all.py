@@ -1,3 +1,5 @@
+"""Batch runner for the leakage gauntlet across all supported divisions."""
+
 from __future__ import annotations
 
 import json

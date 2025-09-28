@@ -1,16 +1,14 @@
+"""Synchronize SAFE configuration with the latest ablation evidence.
+
+SAFE decisions are made based on how the ``safe`` variant compares to the full
+feature set in ``adjacency_ablation`` runs. This command line helper scans those
+artifacts, looks for divisions where SAFE beats the baseline by at least the
+configured threshold, and updates ``config.yaml`` so the modeling pipeline knows
+to enable SAFE for that division by default. It saves analysts from manually
+editing YAML every time a new ablation run finishes.
+"""
+
 from __future__ import annotations
-
-"""
-Auto SAFE policy updater based on adjacency ablation artifacts.
-
-Scans gosales/outputs/ablation/adjacency/<division>/<train>_<holdout>/adjacency_ablation_*.json
-and if SAFE outperforms Full by >= threshold (default 0.005 AUC), ensures the
-division is included in config.modeling.safe_divisions. Writes the updated config.yaml.
-
-Usage:
-  python -m gosales.pipeline.auto_safe_from_ablation --threshold 0.005
-  python -m gosales.pipeline.auto_safe_from_ablation --division Solidworks --threshold 0.005
-"""
 
 from dataclasses import dataclass
 from pathlib import Path

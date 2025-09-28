@@ -1,3 +1,5 @@
+"""Validate the curated dim_ns_customer table for completeness and hygiene."""
+
 from __future__ import annotations
 
 import json

@@ -1,3 +1,12 @@
+"""Assemble the Top 100 cross-sell prospect list for revenue teams.
+
+Revenue operations use this script to combine model scores, whitespace lifts,
+and lookup tables into a single ranked export for CPE, Solidworks, and Printers
+teams.  It orchestrates joins against the SQLite aggregates created in the
+pipeline and applies consistent grading logic so that the business receives a
+polished deliverable without having to run notebooks.
+"""
+
 from __future__ import annotations
 
 import sqlite3

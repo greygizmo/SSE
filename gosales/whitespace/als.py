@@ -1,3 +1,5 @@
+"""Train ALS recommenders to surface whitespace opportunities per customer."""
+
 import polars as pl
 import implicit
 from scipy.sparse import coo_matrix, csr_matrix

@@ -1,3 +1,12 @@
+"""Rebuild feature matrices for trained models to keep feature lists current.
+
+When engineering tweaks adjust feature availability, we need a simple way to
+refresh the matrices that downstream CI jobs compare against.  This script scans
+the saved model directories, reads their metadata to recover division and cutoff
+information, and replays the production feature builder for each combination so
+that analysts can diff expected versus current feature sets.
+"""
+
 from __future__ import annotations
 
 import json
