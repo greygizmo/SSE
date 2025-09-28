@@ -18,7 +18,7 @@ import json
 import math
 import re
 import sys
-from typing import Dict
+from typing import Dict, Any
 
 import click
 import pandas as pd
@@ -57,6 +57,21 @@ def _ensure_outdir(division: str, cutoff: str) -> LGContext:
     return LGContext(d, c, out)
 
 
+def _load_feature_matrix_override(path: str | None) -> pd.DataFrame | None:
+    if not path:
+        return None
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(f"Feature matrix override not found: {p}")
+    suffix = p.suffix.lower()
+    if suffix in {".parquet", ".pq", ".pqt"}:
+        return pd.read_parquet(p)
+    if suffix in {".csv", ".tsv"}:
+        sep = "\t" if suffix == ".tsv" else ","
+        return pd.read_csv(p, sep=sep)
+    raise ValueError(f"Unsupported feature matrix file type: {p.suffix}")
+
+
 def _static_scan(paths: list[Path]) -> dict:
     findings: list[dict] = []
     for base in paths:
@@ -88,16 +103,31 @@ def run_static_checks(ctx: LGContext) -> Dict[str, str]:
     return {"static_scan": str(static_path)}
 
 
-def run_feature_date_audit(ctx: LGContext, window_months: int) -> Dict[str, str]:
-    # Prefer curated engine (facts live there)
-    try:
-        engine = get_curated_connection()
-    except Exception:
-        engine = get_db_connection()
-    # Build feature matrix to enumerate features (no training)
+def run_feature_date_audit(
+    ctx: LGContext,
+    window_months: int,
+    feature_matrix: Any | None = None,
+) -> Dict[str, str]:
+    fm = None
+    engine = None
     cfg = load_config()
     mask_tail = int(getattr(getattr(cfg, "validation", object()), "gauntlet_mask_tail_days", 0) or 0)
-    fm = create_feature_matrix(engine, ctx.division, ctx.cutoff, window_months, mask_tail_days=mask_tail)
+
+    if feature_matrix is None:
+        # Prefer curated engine (facts live there)
+        try:
+            engine = get_curated_connection()
+        except Exception:
+            engine = get_db_connection()
+        fm = create_feature_matrix(
+            engine,
+            ctx.division,
+            ctx.cutoff,
+            window_months,
+            mask_tail_days=mask_tail,
+        )
+    else:
+        fm = feature_matrix
     if isinstance(fm, pd.DataFrame):
         fm_df = fm.copy()
     elif hasattr(fm, "to_pandas"):
@@ -106,15 +136,20 @@ def run_feature_date_audit(ctx: LGContext, window_months: int) -> Dict[str, str]
         fm_df = pd.DataFrame(fm)
     cols = [c for c in fm_df.columns if c not in ("customer_id", "bought_in_division")]
     # Compute max observable event date at/before cutoff for lifetime-style features
-    df = pd.read_sql_query(
-        "SELECT MAX(order_date) AS max_order_date FROM fact_transactions WHERE order_date <= :cutoff",
-        engine,
-        params={"cutoff": ctx.cutoff},
-    )
-    try:
-        max_order_date = pd.to_datetime(df["max_order_date"].iloc[0]) if not df.empty else None
-    except Exception:
-        max_order_date = None
+    max_order_date = None
+    if engine is not None:
+        try:
+            df = pd.read_sql_query(
+                "SELECT MAX(order_date) AS max_order_date FROM fact_transactions WHERE order_date <= :cutoff",
+                engine,
+                params={"cutoff": ctx.cutoff},
+            )
+            try:
+                max_order_date = pd.to_datetime(df["max_order_date"].iloc[0]) if not df.empty else None
+            except Exception:
+                max_order_date = None
+        except Exception:
+            max_order_date = None
     cutoff_dt = pd.to_datetime(ctx.cutoff)
     effective_end = cutoff_dt
     if mask_tail and mask_tail > 0:
@@ -277,6 +312,7 @@ def run_permutation_gate(
     n_perm: int | None = None,
     min_auc_gap: float | None = None,
     max_p_value: float | None = None,
+    feature_matrix: Any | None = None,
 ) -> Dict[str, str]:
     cfg = load_config()
     val_cfg = getattr(cfg, "validation", object())
@@ -296,12 +332,22 @@ def run_permutation_gate(
         except Exception:
             return None
 
-    try:
-        engine = get_curated_connection()
-    except Exception:
-        engine = get_db_connection()
-
-    fm = create_feature_matrix(engine, ctx.division, ctx.cutoff, window_months, mask_tail_days=mask_tail)
+    engine = None
+    fm = None
+    if feature_matrix is None:
+        try:
+            engine = get_curated_connection()
+        except Exception:
+            engine = get_db_connection()
+        fm = create_feature_matrix(
+            engine,
+            ctx.division,
+            ctx.cutoff,
+            window_months,
+            mask_tail_days=mask_tail,
+        )
+    else:
+        fm = feature_matrix
     if hasattr(fm, "is_empty") and fm.is_empty():  # type: ignore[attr-defined]
         raise RuntimeError("Empty feature matrix for permutation gate")
 
@@ -635,6 +681,7 @@ def run_topk_ablation_dynamic(ctx: LGContext, window_months: int, k_list: list[i
 @click.option("--cutoff", required=True, help="Cutoff date YYYY-MM-DD")
 @click.option("--window-months", default=6, type=int)
 @click.option("--static-only/--no-static-only", default=False, help="Run only static checks (no dynamic checks)")
+@click.option("--feature-matrix-path", default=None, help="Optional Parquet/CSV feature matrix override")
 @click.option("--run-permutation/--no-run-permutation", default=True, help="Run label permutation leakage gate")
 @click.option("--permutation-n-perm", type=int, default=None, help="Override permutation iterations for label shuffle gate")
 @click.option("--permutation-min-auc-gap", type=float, default=None, help="Minimum baseline minus permuted AUC gap for PASS")
@@ -657,6 +704,7 @@ def main(
     cutoff: str,
     window_months: int,
     static_only: bool,
+    feature_matrix_path: str | None,
     run_permutation: bool,
     permutation_n_perm: int | None,
     permutation_min_auc_gap: float | None,
@@ -678,12 +726,24 @@ def main(
     ctx = _ensure_outdir(division, cutoff)
     artifacts: Dict[str, str] = {}
 
+    feature_matrix_override = _load_feature_matrix_override(feature_matrix_path)
+    if feature_matrix_override is not None:
+        logger.info("Using feature matrix override from %s", feature_matrix_path)
+
     # Static checks (gating)
     artifacts.update(run_static_checks(ctx))
-    artifacts.update(run_feature_date_audit(ctx, window_months))
+    artifacts.update(run_feature_date_audit(ctx, window_months, feature_matrix=feature_matrix_override))
 
     # Dynamic checks (gating): run LR-based implementations to keep runtime manageable
     if not static_only:
+        if feature_matrix_override is not None and (run_shift14_training or run_shift_grid or run_repro_check or run_topk_ablation):
+            logger.warning(
+                "Feature matrix override provided; disabling dynamic checks that require database access."
+            )
+            run_shift14_training = False
+            run_shift_grid = False
+            run_repro_check = False
+            run_topk_ablation = False
         cfg = load_config()
         eps_auc = float(shift14_eps_auc) if shift14_eps_auc is not None else float(getattr(getattr(cfg, 'validation', object()), 'shift14_epsilon_auc', 0.01))
         eps_l10 = float(shift14_eps_lift10) if shift14_eps_lift10 is not None else float(getattr(getattr(cfg, 'validation', object()), 'shift14_epsilon_lift10', 0.25))
@@ -699,6 +759,7 @@ def main(
                         n_perm=permutation_n_perm,
                         min_auc_gap=permutation_min_auc_gap,
                         max_p_value=permutation_max_p_value,
+                        feature_matrix=feature_matrix_override,
                     )
                 )
             except Exception as e:

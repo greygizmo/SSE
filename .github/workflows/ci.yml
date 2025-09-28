@@ -34,6 +34,20 @@ jobs:
         run: |
           pytest -q
 
+      - name: Leakage Gauntlet (Printers, 2024-12-31)
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          python -m gosales.pipeline.run_leakage_gauntlet \
+            --division Printers \
+            --cutoff 2024-12-31 \
+            --window-months 6 \
+            --feature-matrix-path gosales/tests/fixtures/leakage/demo_feature_matrix.parquet \
+            --no-run-shift14-training \
+            --no-run-shift-grid \
+            --no-run-topk-ablation \
+            --no-run-repro-check
+
       - name: CI Gate (schema/validation)
         env:
           PYTHONPATH: ${{ github.workspace }}
