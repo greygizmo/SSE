@@ -124,3 +124,10 @@ This document summarizes the intent and criticality of every automated test in t
 - **`test_build_lift.py`** and whitespace tests (noted above) ensure exploratory mining outputs function.
 
 Collectively, these tests form a safety net over data ingestion, feature generation, model training, scoring, whitespace prioritization, validation, UI, and operational workflows. Keeping them green is essential for trustworthy recommendations and measurable business outcomes.
+
+---
+
+## Modeling and Calibration (New)
+
+- `test_phase3_train_safe_calibration.py`
+  - `test_phase3_calibration_skips_records_reason` forces a sparse-positive training case and asserts that Phase 3 training emits diagnostics without crashing and records a calibration skip (`calibration='none'`) along with a reason. This guards against pipeline aborts on thin cohorts and ensures per-cutoff aggregation is complete.

@@ -94,10 +94,16 @@ def run_feature_date_audit(ctx: LGContext, window_months: int) -> Dict[str, str]
         engine = get_db_connection()
     # Build feature matrix to enumerate features (no training)
     cfg = load_config()
-    mask_tail = int(getattr(getattr(cfg, 'validation', object()), 'gauntlet_mask_tail_days', 0) or 0)
+    mask_tail = int(getattr(getattr(cfg, "validation", object()), "gauntlet_mask_tail_days", 0) or 0)
     fm = create_feature_matrix(engine, ctx.division, ctx.cutoff, window_months, mask_tail_days=mask_tail)
-    cols = [c for c in fm.columns if c not in ("customer_id", "bought_in_division")]
-    # Compute max observable event date at/before cutoff
+    if isinstance(fm, pd.DataFrame):
+        fm_df = fm.copy()
+    elif hasattr(fm, "to_pandas"):
+        fm_df = fm.to_pandas()
+    else:
+        fm_df = pd.DataFrame(fm)
+    cols = [c for c in fm_df.columns if c not in ("customer_id", "bought_in_division")]
+    # Compute max observable event date at/before cutoff for lifetime-style features
     df = pd.read_sql_query(
         "SELECT MAX(order_date) AS max_order_date FROM fact_transactions WHERE order_date <= :cutoff",
         engine,
@@ -108,30 +114,159 @@ def run_feature_date_audit(ctx: LGContext, window_months: int) -> Dict[str, str]
     except Exception:
         max_order_date = None
     cutoff_dt = pd.to_datetime(ctx.cutoff)
+    effective_end = cutoff_dt
+    if mask_tail and mask_tail > 0:
+        try:
+            effective_end = cutoff_dt - pd.to_timedelta(mask_tail, unit="D")
+        except Exception:
+            effective_end = cutoff_dt
+
+    import numpy as np
+
+    def _coerce_numeric(series: pd.Series) -> pd.Series:
+        numeric = pd.to_numeric(series, errors="coerce")
+        if numeric.empty:
+            return numeric
+        numeric = numeric.replace([np.inf, -np.inf], np.nan).dropna()
+        return numeric
+
+    def _infer_latest_event(col_name: str, series: pd.Series) -> pd.Timestamp | None:
+        lowered = str(col_name).lower()
+
+        # Direct datetime-like columns
+        dt_series = None
+        try:
+            if pd.api.types.is_datetime64_any_dtype(series):
+                dt_series = pd.to_datetime(series, errors="coerce")
+            elif series.dtype == object or "_date" in lowered or "timestamp" in lowered or lowered.endswith("_dt"):
+                dt_series = pd.to_datetime(series, errors="coerce")
+        except Exception:
+            dt_series = None
+        if dt_series is not None:
+            dt_series = dt_series.dropna()
+            if not dt_series.empty:
+                latest_dt = dt_series.max()
+                try:
+                    latest_dt = latest_dt.tz_localize(None)  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+                if pd.notna(latest_dt):
+                    return pd.to_datetime(latest_dt)
+
+        # Recency expressed as days since cutoff
+        if "days_since" in lowered or "recency_days" in lowered:
+            numeric = _coerce_numeric(series)
+            if not numeric.empty:
+                values = numeric.to_numpy(dtype=float)
+                values = values[np.isfinite(values)]
+                if values.size:
+                    min_days = float(np.min(np.maximum(values, 0.0)))
+                    return cutoff_dt - pd.to_timedelta(min_days, unit="D")
+
+        # Log-recency variants (log1p transform of days)
+        if "log_recency" in lowered:
+            numeric = _coerce_numeric(series)
+            if not numeric.empty:
+                values = numeric.to_numpy(dtype=float)
+                values = values[np.isfinite(values)]
+                if values.size:
+                    days = np.expm1(values)
+                    days = days[np.isfinite(days)]
+                    if days.size:
+                        min_days = float(np.min(np.maximum(days, 0.0)))
+                        return cutoff_dt - pd.to_timedelta(min_days, unit="D")
+
+        # Recency decay (exp(-days / half_life))
+        if "recency_decay__hl" in lowered:
+            match = re.search(r"__hl(\d+)", lowered)
+            if match:
+                try:
+                    half_life = float(match.group(1))
+                except Exception:
+                    half_life = None
+                if half_life:
+                    numeric = _coerce_numeric(series)
+                    if not numeric.empty:
+                        values = numeric.to_numpy(dtype=float)
+                        values = values[(values > 0.0) & np.isfinite(values)]
+                        if values.size:
+                            days = -half_life * np.log(values)
+                            days = days[np.isfinite(days)]
+                            if days.size:
+                                min_days = float(np.min(np.maximum(days, 0.0)))
+                                return cutoff_dt - pd.to_timedelta(min_days, unit="D")
+
+        # Future-looking expiring horizons (treated as post-cutoff checks)
+        expiring = re.search(r"expiring_(\d+)d", lowered)
+        if expiring:
+            try:
+                horizon = int(expiring.group(1))
+                return cutoff_dt + pd.to_timedelta(horizon, unit="D")
+            except Exception:
+                pass
+
+        # Lagged affinity / offset-style features
+        lag_match = re.search(r"lag(\d+)d", lowered)
+        if lag_match:
+            try:
+                lag_days = int(lag_match.group(1))
+                return cutoff_dt - pd.to_timedelta(lag_days, unit="D")
+            except Exception:
+                pass
+
+        offset_match = re.search(r"_off(\d+)d", lowered)
+        if offset_match:
+            try:
+                offset_days = int(offset_match.group(1))
+                return cutoff_dt - pd.to_timedelta(offset_days, unit="D")
+            except Exception:
+                pass
+
+        window_match = re.search(r"(?:__|_last_)(\d+)m", lowered)
+        if window_match:
+            return effective_end
+
+        if lowered.endswith("__life") or "__life__" in lowered or lowered.endswith("_life"):
+            return max_order_date
+
+        return None
+
     rows = []
+    latest_values: list[pd.Timestamp] = []
     for name in cols:
-        latest = max_order_date
-        status = "OK"
-        if latest is not None and latest > cutoff_dt:
+        series = fm_df.get(name)
+        if series is None:
+            latest = None
+        else:
+            latest = _infer_latest_event(name, series)
+        if isinstance(latest, pd.Timestamp) and pd.notna(latest):
+            latest = latest.tz_localize(None) if getattr(latest, "tzinfo", None) else latest
+            latest_values.append(latest)
+        status = "UNKNOWN"
+        if latest is None or pd.isna(latest):
+            status = "UNKNOWN"
+        elif latest > cutoff_dt:
             status = "LEAK"
+        else:
+            status = "OK"
         rows.append({
             "feature": str(name),
-            "latest_event_date": (latest.date().isoformat() if pd.notna(latest) else None),
+            "latest_event_date": (latest.date().isoformat() if isinstance(latest, pd.Timestamp) and pd.notna(latest) else None),
             "cutoff": ctx.cutoff,
             "status": status,
         })
     audit_csv = ctx.out_dir / f"feature_date_audit_{ctx.division}_{ctx.cutoff}.csv"
     pd.DataFrame(rows).to_csv(audit_csv, index=False)
+    overall_latest = max(latest_values) if latest_values else None
     summary = {
         "status": ("FAIL" if any(r["status"] == "LEAK" for r in rows) else "PASS"),
-        "max_event_date": (max_order_date.date().isoformat() if isinstance(max_order_date, pd.Timestamp) and pd.notna(max_order_date) else None),
+        "max_event_date": (overall_latest.date().isoformat() if isinstance(overall_latest, pd.Timestamp) and pd.notna(overall_latest) else None),
         "cutoff": ctx.cutoff,
         "feature_count": len(rows),
     }
     summary_json = ctx.out_dir / f"feature_date_audit_{ctx.division}_{ctx.cutoff}.json"
     summary_json.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     return {"feature_date_audit": str(summary_json), "feature_date_audit_csv": str(audit_csv)}
-
 
 def write_consolidated_report(ctx: LGContext, artifacts: Dict[str, str]) -> Path:
     status_map: Dict[str, str] = {}

@@ -66,7 +66,7 @@ features:
   add_missingness_flags: true
   use_eb_smoothing: true
   use_market_basket: true
-  use_als_embeddings: true
+  use_als_embeddings: false
   als_lookback_months: 12
   use_item2vec: false
   # Optional: run ALS over assets rollups (guarded sizes)
@@ -79,6 +79,8 @@ features:
     reg: 0.1
   use_text_tags: false
   use_assets: true
+  build_assets_on_demand: true
+  force_assets_on_sqlite: false
   # Leakage guards
   expiring_guard_days: 30      # exclude [cutoff, cutoff+30d] from expiring_{30,60,90}d windows
   recency_floor_days: 30       # floor 'days_since_last_*' features to >=30 days
@@ -92,6 +94,9 @@ features:
   pooled_alpha_industry: 50.0
   pooled_alpha_sub: 50.0
   silence_pooled_encoder_warnings: true
+  # Memory guard thresholds (very high by default; you will see WARN logs if hit)
+  sqlite_skip_advanced_rows: 10000000       # On SQLite, skip advanced extras when feature rows exceed this
+  fastpath_minimal_return_rows: 10000000    # Return minimal feature matrix if rows exceed this
 modeling:
   seed: 42
   folds: 3
@@ -106,6 +111,8 @@ modeling:
     feature_fraction: [0.7, 0.9]
     bagging_fraction: [0.7, 0.9]
   calibration_methods: [platt, isotonic]
+  # Prefer Platt when positives are very sparse (< threshold)
+  sparse_isotonic_threshold_pos: 1000
   top_k_percents: [5, 10, 20]
   capacity_percent: 10
   shap_max_rows: 50000

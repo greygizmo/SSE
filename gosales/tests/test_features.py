@@ -55,6 +55,51 @@ def test_feature_cli_checksum(tmp_path, monkeypatch):
     assert result.exit_code == 0
 
 
+
+def test_feature_matrix_handles_mixed_case_division(tmp_path):
+    eng = create_engine(f"sqlite:///{tmp_path}/test_features_case.db")
+    fact = pd.DataFrame(
+        [
+            {
+                "customer_id": 1,
+                "order_date": "2024-01-10",
+                "product_division": "SOLIDWORKS",
+                "product_sku": "SWX_Core",
+                "gross_profit": 100,
+                "quantity": 1,
+            },
+            {
+                "customer_id": 1,
+                "order_date": "2024-02-05",
+                "product_division": "solidworks",
+                "product_sku": "SWX_Core",
+                "gross_profit": 50,
+                "quantity": 1,
+            },
+            {
+                "customer_id": 2,
+                "order_date": "2024-01-15",
+                "product_division": "services",
+                "product_sku": "Training",
+                "gross_profit": 20,
+                "quantity": 1,
+            },
+        ]
+    )
+    fact.to_sql("fact_transactions", eng, if_exists="replace", index=False)
+    pd.DataFrame({"customer_id": [1, 2]}).to_sql("dim_customer", eng, if_exists="replace", index=False)
+
+    fm = create_feature_matrix(
+        eng,
+        "sOlIdWoRkS",
+        cutoff_date="2024-01-31",
+        prediction_window_months=1,
+    )
+
+    pdf = fm.to_pandas()
+    assert int(pdf.loc[pdf["customer_id"] == 1, "bought_in_division"].iloc[0]) == 1
+
+
 def test_cli_config_override_persist(tmp_path, monkeypatch):
     out_dir = tmp_path / "out"
     monkeypatch.setattr("gosales.features.build.OUTPUTS_DIR", out_dir)
@@ -94,3 +139,25 @@ def test_cli_config_override_persist(tmp_path, monkeypatch):
         stats = json.load(f)
     assert stats["winsor_caps"]["rfm__div__gp_sum__3m"]["upper"] == 75.0
 
+
+def test_missingness_flags_capture_original_nulls(tmp_path):
+    eng = create_engine(f"sqlite:///{tmp_path}/test_missingness.db")
+    _seed(eng)
+    # Add a customer with no transactions so engineered columns are NaN before fillna
+    pd.DataFrame({"customer_id": [3]}).to_sql("dim_customer", eng, if_exists="append", index=False)
+
+    fm = create_feature_matrix(eng, "Solidworks", cutoff_date="2024-01-31", prediction_window_months=1)
+    pdf = fm.to_pandas()
+    # Normalize type for safer lookups
+    pdf["customer_id"] = pdf["customer_id"].astype(str)
+
+    # Ensure a canonical feature gets a corresponding _missing flag
+    missing_cols = [c for c in pdf.columns if c.endswith("_missing")]
+    assert "total_transactions_all_time_missing" in missing_cols
+
+    cust3_flag = int(pdf.loc[pdf["customer_id"] == "3", "total_transactions_all_time_missing"].iloc[0])
+    cust1_flag = int(pdf.loc[pdf["customer_id"] == "1", "total_transactions_all_time_missing"].iloc[0])
+
+    # Customer without transactions should be flagged as missing prior to fillna; customer with history should not
+    assert cust3_flag == 1
+    assert cust1_flag == 0

@@ -29,7 +29,7 @@ def setup_score_customers_import():
 
 
 
-def test_discover_available_models_preserves_casing(tmp_path):
+def test_discover_available_models_normalizes_division(tmp_path):
     setup_score_customers_import()
     from gosales.pipeline.score_customers import discover_available_models
 
@@ -38,5 +38,53 @@ def test_discover_available_models_preserves_casing(tmp_path):
     model_dir.mkdir()
 
     available = discover_available_models(models_root)
-    assert "Multi Word" in available
-    assert available["Multi Word"] == model_dir
+    assert "multi word" in available
+    assert available["multi word"] == model_dir
+
+
+def test_model_without_metadata_survives_pruning(tmp_path):
+    setup_score_customers_import()
+    from gosales.pipeline.score_customers import (
+        discover_available_models,
+        _filter_models_by_targets,
+    )
+
+    models_root = tmp_path
+    model_dir = models_root / "SW_Inspection_model"
+    model_dir.mkdir()
+
+    available = discover_available_models(models_root)
+    # Discovered key should be casefolded but retain underscore
+    assert "sw_inspection" in available
+
+    filtered = _filter_models_by_targets(available, {"SW Inspection"})
+    assert "sw_inspection" in filtered
+    assert filtered["sw_inspection"] == model_dir
+
+
+def test_filtering_prefers_primary_and_handles_variants(tmp_path):
+    setup_score_customers_import()
+    from gosales.pipeline.score_customers import (
+        discover_available_models,
+        _filter_models_by_targets,
+    )
+
+    models_root = tmp_path
+    # Primary model with hyphen
+    primary_dir = models_root / "SW-Inspection_model"
+    primary_dir.mkdir()
+    # Cold-start variant with underscore
+    cold_dir = models_root / "SW_Inspection_cold_model"
+    cold_dir.mkdir()
+
+    available = discover_available_models(models_root)
+    # Primary entry exists; discovery keeps distinct keys for hyphen/underscore
+    assert "sw-inspection" in available
+    assert available["sw-inspection"] == primary_dir
+
+    # Filtering should match targets regardless of case/space/hyphen/underscore
+    targets = ["SW   Inspection", "", None]
+    filtered = _filter_models_by_targets(available, targets)  # type: ignore[arg-type]
+    assert "sw-inspection" in filtered and filtered["sw-inspection"] == primary_dir
+    # Cold model uses a different discovered key (with "_cold"); it should be pruned
+    assert "sw_inspection_cold" not in filtered

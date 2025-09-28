@@ -95,6 +95,13 @@ def customer_als_embeddings(
     U.columns = [f'als_f{d}' for d in range(U.shape[1])]
     # user_index categories align to original string IDs
     U['customer_id'] = user_index.astype('string').values
+    # Prefer numeric customer_id when safely convertible (keeps tests and downstream contracts happy)
+    try:
+        tmp = pd.to_numeric(U['customer_id'], errors='coerce')
+        if not tmp.isna().any():
+            U['customer_id'] = tmp.astype('Int64')
+    except Exception:
+        pass
     return pl.from_pandas(U)
 
 

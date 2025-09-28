@@ -10,6 +10,7 @@ from gosales.pipeline.rank_whitespace import (
     RankInputs,
     rank_whitespace,
 )
+from gosales.pipeline.rank_whitespace import _als_centroid_path_for_div
 
 
 def test_scale_weights_by_coverage_scales_and_normalizes():
@@ -117,3 +118,52 @@ def test_rank_whitespace_item2vec_only_fills_remaining_zero_rows():
     assert res.loc["c2", "als_norm"] > res.loc["c3", "als_norm"]
 
 
+def test_division_specific_owner_als_centroid_no_leakage(tmp_path, monkeypatch):
+    # Ensure centroids persist under a temp outputs dir
+    monkeypatch.setattr("gosales.pipeline.rank_whitespace.OUTPUTS_DIR", tmp_path)
+
+    # Division A: has owners and ALS vectors near (+1, +1)
+    df_a = pd.DataFrame(
+        {
+            "division_name": ["A"] * 3,
+            "customer_id": ["a1", "a2", "a3"],
+            "icp_score": [0.1, 0.2, 0.3],
+            "als_f0": [1.0, 0.9, 0.8],
+            "als_f1": [1.0, 0.8, 0.9],
+            "owned_division_pre_cutoff": [True, True, False],
+        }
+    )
+
+    # Division B: no owners, ALS vectors in opposite quadrant; includes a zero vector
+    df_b = pd.DataFrame(
+        {
+            "division_name": ["B"] * 3,
+            "customer_id": ["b1", "b2", "b3"],
+            "icp_score": [0.1, 0.2, 0.3],
+            "als_f0": [-1.0, -0.5, 0.0],
+            "als_f1": [-1.0, -0.5, 0.0],
+            "owned_division_pre_cutoff": [False, False, False],
+        }
+    )
+
+    df_all = pd.concat([df_a, df_b], ignore_index=True)
+    inputs = RankInputs(scores=df_all)
+    res = rank_whitespace(inputs, weights=(0.0, 0.0, 1.0, 0.0))
+
+    # A's centroid should be persisted; B has no owners so no persisted centroid
+    path_a = _als_centroid_path_for_div("A")
+    path_b = _als_centroid_path_for_div("B")
+    assert path_a.exists()
+    assert not path_b.exists()
+
+    # The persisted A centroid should differ from B's in-group mean (fallback)
+    import numpy as np
+    a_centroid = np.load(path_a)
+    b_mean = df_b[["als_f0", "als_f1"]].astype(float).mean(axis=0).to_numpy()
+    assert not np.allclose(a_centroid, b_mean)
+
+    # Within division B, ALS norms should reflect signal (non-zero for valid rows, zero for zero-vector row)
+    res_b = res[res["division_name"] == "B"].set_index("customer_id")
+    assert float(res_b.loc["b3", "als_norm"]) == 0.0  # zero vector yields zero norm
+    # At least one valid row should have positive ALS norm
+    assert (res_b.loc[["b1", "b2"], "als_norm"] > 0).any()

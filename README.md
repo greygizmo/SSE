@@ -26,7 +26,10 @@ A division-focused Ideal Customer Profile (ICP) & Whitespace engine. The pipelin
   - LR now trains via a Pipeline: `StandardScaler(with_mean=False)` → `LogisticRegression`; calibration is applied to the entire pipeline; coefficient export unwraps the calibrated pipeline
   - LightGBM remains scale-invariant (no scaler in front)
   - Metrics: AUC, PR-AUC, Brier, lift@{5,10,20}%, revenue-weighted lift@K, calibration MAE
+  - Calibration: adaptive CV per cutoff and at final fit. When per-class counts cannot support `cv>=2`, calibration is skipped and uncalibrated probabilities are used; diagnostics record `calibration='none'` with a reason. Isotonic is automatically downgraded to Platt when positives are sparse (see `modeling.sparse_isotonic_threshold_pos`).
+  - Diagnostics: emits `diagnostics_<division>.json` with a `results_grid` containing one row per cutoff per model, including `auc`, `lift10`, `brier`, and calibration fields (`calibration`, `calibration_reason`). This confirms every cutoff contributed to aggregation and surfaces any calibration fallbacks.
   - Artifacts: `metrics.json`, `gains.csv`, `calibration.csv`, `thresholds.csv`, `model_card.json`, SHAP summaries (optional; guarded if SHAP not installed)
+  - Tuning guide: see `docs/calibration.md` for calibration behavior, diagnostics, and practical tuning tips.
   - Guardrails: degenerate classifier check, deterministic LGBM, early stopping, overfit-gap guard, capped `scale_pos_weight`
 
 - **Phase 4 — Whitespace Ranking / Next‑Best‑Action**
@@ -89,6 +92,7 @@ $env:PYTHONPATH = "$PWD"; python -m gosales.pipeline.rank_whitespace --cutoff "2
 
 # 8) Launch Streamlit UI (Phase 6)
 $env:PYTHONPATH = "$PWD"; streamlit run gosales/ui/app.py
+#   Within the UI, open the **Docs** navigation tab to browse repository guides such as the calibration tuning guide.
 ```
 
 ---

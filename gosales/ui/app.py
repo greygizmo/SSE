@@ -401,7 +401,7 @@ with st.sidebar:
     # Use radio buttons for navigation
     tab = st.radio(
         "Select Page",
-        ["Overview", "Metrics", "Explainability", "Whitespace", "Prospects", "Validation", "Runs", "Monitoring", "Architecture", "Quality Assurance", "Configuration & Launch", "Feature Guide", "Customer Enrichment", "About"],
+        ["Overview", "Metrics", "Explainability", "Whitespace", "Prospects", "Validation", "Runs", "Monitoring", "Architecture", "Quality Assurance", "Configuration & Launch", "Feature Guide", "Customer Enrichment", "Docs", "About"],
         index=0,
         label_visibility="collapsed",
         help="Choose the dashboard section to view"
@@ -2999,7 +2999,44 @@ elif tab == "Feature Guide":
         - Toggle `pooled_encoders_enable` and tune `pooled_alpha_*` to control shrinkage.
         - Set `modeling.safe_divisions` for divisions that benefit from SAFE policy.
         """)
-if tab == "About":
+elif tab == "Docs":
+    st.markdown('<h2 class="section-header">Documentation</h2>', unsafe_allow_html=True)
+    st.write("Browse repository documentation, including the calibration tuning guide.")
+
+    docs_dir = Path('docs')
+    preferred = [
+        ('Calibration', docs_dir / 'calibration.md'),
+        ('Artifact Catalog', docs_dir / 'artifact_catalog.md'),
+        ('Feature Dictionary', docs_dir / 'feature_dictionary.md'),
+        ('Targets And Taxonomy', docs_dir / 'targets_and_taxonomy.md'),
+        ('Test Suite Overview', docs_dir / 'test_suite_overview.md'),
+    ]
+    discovered = []
+    try:
+        if docs_dir.exists():
+            for p in sorted(docs_dir.glob('*.md')):
+                discovered.append((p.stem.replace('_', ' ').title(), p))
+    except Exception:
+        pass
+    seen = set(p for _, p in preferred)
+    for name, p in discovered:
+        if p not in seen:
+            preferred.append((name, p))
+
+    if not preferred:
+        st.info("No documentation found in the 'docs' directory.")
+    else:
+        titles = [name for name, _ in preferred]
+        choice = st.selectbox("Select document", titles, index=0)
+        path = dict(preferred)[choice]
+        content = _read_text(path)
+        if content:
+            st.markdown(f"### {choice}")
+            st.markdown(content)
+        else:
+            st.warning(f"Unable to load {path.name}")
+
+elif tab == "About":
     st.header("About & Configuration")
     st.markdown("High-level info about this app and pointers to configuration and docs.")
     repo_root = Path(__file__).resolve().parents[2]

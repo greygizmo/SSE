@@ -66,6 +66,10 @@ All options live in `gosales/config.yaml`. Key entries:
   - `pooled_encoders_lookback_months`: lookback for encoders (default: 24)
   - `pooled_alpha_industry`, `pooled_alpha_sub`: smoothing strength
   - `use_assets`, `use_als_embeddings`, `use_market_basket`, `add_missingness_flags`
+  - Memory guards (for local SQLite runs):
+    - `sqlite_skip_advanced_rows`: when feature rows exceed this, advanced extras are skipped. Default: 10,000,000.
+    - `fastpath_minimal_return_rows`: when feature rows exceed this, a minimal feature matrix is returned early. Default: 10,000,000.
+    - Both emit WARN logs when triggered with row counts and thresholds. In repo tests, a conservative cap is applied automatically for local SQLite when your configured `database.engine` != `sqlite` to keep peak memory under control.
 
 - modeling
   - `models`: search order (e.g., `[lgbm, logreg]`), selection is metric-driven
@@ -77,13 +81,20 @@ All options live in `gosales/config.yaml`. Key entries:
   - `gauntlet_*`: e.g., mask tail days, purge days, label buffer
   - thresholds: `shift14_epsilon_*`, `ablation_epsilon_*`
 
-### Whitespace (Phase‑4)
+### Whitespace (Phase-4)
 
 - `weights`: base blend weights `[p_icp_pct, lift_norm, als_norm, EV_norm]`.
 - `als_coverage_threshold`: minimum ALS coverage to avoid shrinking ALS weight; below this threshold ALS is downweighted and, if available, item2vec is used to backfill.
 - `segment_columns`: optional list of segment keys (e.g., `['industry','size_bin']`) to apply coverage‑aware blending per segment; falls back to global when segment rows < `segment_min_rows`.
 - `segment_min_rows`: minimum rows per segment required to use segment‑specific weights.
-- `bias_division_max_share_topN`: max share per division in the selected top‑percent capacity; enforced by rebalancer.
+- `bias_division_max_share_topN`: max share per division in the selected top-percent capacity; enforced by rebalancer.
+
+#### ALS Centroids (division-specific)
+
+- Owner ALS centroid is computed per division from rows marked `owned_division_pre_cutoff == True` when available and cached under `gosales/outputs/` as `als_owner_centroid_<division>.npy`.
+- Assets-ALS centroid is also cached per division as `assets_als_owner_centroid_<division>.npy` when assets signals are present.
+- During ranking, ALS similarity uses the division’s cached centroid when `division_name` is present; fallback order is: per-division cache → in-group owned rows → in-group mean of valid rows. When no division context is available, the legacy global `als_owner_centroid.npy` is used if present.
+- This prevents cross-division leakage of centroids and makes results reproducible per division; tests assert distinct centroids and scores across divisions even if one division has no owners.
 
 See the UI “Feature Guide” tab for a rendered view of the current configuration.
 
@@ -91,11 +102,13 @@ See the UI “Feature Guide” tab for a rendered view of the current configurat
 
 ## Recent Changes
 
-- Post_Processing model added as a first‑class target. Artifacts live under `gosales/models/post_processing_model` and include `metadata.json` with `division`, `cutoff_date`, and `prediction_window_months`.
-- Scoring aligns per‑division score frames before concatenation to avoid schema width mismatches.
+- Post_Processing model added as a first-class target. Artifacts live under `gosales/models/post_processing_model` and include `metadata.json` with `division`, `cutoff_date`, and `prediction_window_months`.
+- Scoring aligns per-division score frames before concatenation to avoid schema width mismatches.
 - Scoring prefers curated DB connection (where curated fact tables exist), with safe fallback to the primary connection.
 - Trainer always emits `metadata.json` (class balance, features, cutoff/window), even when degenerate probabilities abort artifact write.
 - Prequential evaluator sanitizes features to numeric floats to prevent dtype errors with LightGBM.
+- Label auto-widening in `gosales.labels.targets` now honors SKU-targeted models (e.g., `Printers`), reusing `sku_targets` during widening so only intended SKUs contribute to positives.
+- Whitespace ranking now persists and uses division-specific ALS owner centroids and assets-ALS centroids (`als_owner_centroid_<division>.npy`, `assets_als_owner_centroid_<division>.npy`). Falls back safely when division context is missing. Guards added in tests to prevent cross-division centroid leakage.
 
 ### Quick Commands
 

@@ -84,6 +84,10 @@ class Features:
     use_text_tags: bool = False
     # Toggle Moneyball-based asset features at cutoff (rollups, expiring windows, subs shares)
     use_assets: bool = True
+    # Automatically rebuild fact_assets when missing (default on)
+    build_assets_on_demand: bool = True
+    # Allow asset rebuilds even when connected to SQLite (default off)
+    force_assets_on_sqlite: bool = False
     # Guard days for look-ahead expiration windows; exclude [cutoff, cutoff+guard]
     expiring_guard_days: int = 14
     # Floor for recency features to avoid near-cutoff signals (e.g., 14 days)
@@ -104,6 +108,9 @@ class Features:
     pooled_alpha_sub: float = 50.0
     # Silence pooled-encoder warnings (e.g., dtype/join chatter) in features engine
     silence_pooled_encoder_warnings: bool = False
+    # Memory guard thresholds (set very high by default; see engine for behavior)
+    sqlite_skip_advanced_rows: int = 10_000_000
+    fastpath_minimal_return_rows: int = 10_000_000
 
 
 @dataclass
@@ -260,6 +267,8 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
     env_db_engine = os.getenv("GOSALES_DB_ENGINE")
     env_sqlite_path = os.getenv("GOSALES_SQLITE_PATH")
     env_use_assets = os.getenv("GOSALES_FEATURES_USE_ASSETS")
+    env_build_assets_on_demand = os.getenv("GOSALES_FEATURES_BUILD_ASSETS_ON_DEMAND")
+    env_force_assets_sqlite = os.getenv("GOSALES_FEATURES_FORCE_ASSETS_ON_SQLITE")
     env_exp_guard = os.getenv("GOSALES_FEATURES_EXPIRING_GUARD_DAYS")
     env_rec_floor = os.getenv("GOSALES_FEATURES_RECENCY_FLOOR_DAYS")
     if env_db_engine:
@@ -271,6 +280,14 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
         truthy = {"1", "true", "yes", "on"}
         val = str(env_use_assets).strip().lower() in truthy
         cfg_dict.setdefault("features", {})["use_assets"] = val
+    if env_build_assets_on_demand is not None:
+        truthy = {"1", "true", "yes", "on"}
+        val = str(env_build_assets_on_demand).strip().lower()
+        cfg_dict.setdefault("features", {})["build_assets_on_demand"] = val in truthy
+    if env_force_assets_sqlite is not None:
+        truthy = {"1", "true", "yes", "on"}
+        val = str(env_force_assets_sqlite).strip().lower()
+        cfg_dict.setdefault("features", {})["force_assets_on_sqlite"] = val in truthy
     if env_exp_guard is not None:
         try:
             cfg_dict.setdefault("features", {})["expiring_guard_days"] = int(env_exp_guard)
@@ -378,6 +395,8 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
             pooled_alpha_industry=float(feat_cfg.get("pooled_alpha_industry", 50.0)),
             pooled_alpha_sub=float(feat_cfg.get("pooled_alpha_sub", 50.0)),
             silence_pooled_encoder_warnings=bool(feat_cfg.get("silence_pooled_encoder_warnings", False)),
+            sqlite_skip_advanced_rows=int(feat_cfg.get("sqlite_skip_advanced_rows", 10_000_000)),
+            fastpath_minimal_return_rows=int(feat_cfg.get("fastpath_minimal_return_rows", 10_000_000)),
         ),
         modeling=ModelingConfig(
             seed=int(mdl_cfg.get("seed", 42)),

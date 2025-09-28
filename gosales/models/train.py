@@ -196,10 +196,58 @@ def _emit_diagnostics(out_dir: Path, division: str, context: dict) -> None:
     except Exception:
         pass
 
-def _calibrate(clf, X_train: pd.DataFrame, y_train: pd.Series, X_valid: pd.DataFrame, method: str):
-    calibrated = CalibratedClassifierCV(estimator=clf, method="sigmoid" if method == "platt" else "isotonic", cv=3)
-    calibrated.fit(X_train, y_train)
-    return calibrated
+def _calibrate(
+    clf,
+    X_train: pd.DataFrame,
+    y_train: pd.Series,
+    X_valid: pd.DataFrame,
+    method: str,
+    folds: int | None = 3,
+    sparse_isotonic_threshold_pos: int | None = None,
+):
+    """Safely calibrate a classifier, adapting cv to class counts.
+
+    Returns a tuple: (calibrated_model_or_none, chosen_method, reason_or_none)
+    - chosen_method: 'platt' | 'isotonic' | 'none'
+    - reason_or_none: string reason when calibration is skipped/fails
+    """
+    try:
+        # Class balance checks on training labels
+        pos = int(np.sum(y_train))
+        neg = int(len(y_train) - pos)
+        if pos == 0 or neg == 0:
+            return None, "none", "single_class_train"
+
+        # Prefer requested method; optionally downgrade isotonic for sparse positives
+        chosen = str(method).strip().lower()
+        if chosen not in ("platt", "isotonic"):
+            chosen = "platt"
+        if chosen == "isotonic" and sparse_isotonic_threshold_pos is not None:
+            try:
+                if pos < int(sparse_isotonic_threshold_pos):
+                    chosen = "platt"
+            except Exception:
+                pass
+
+        # Determine feasible cv folds given per-class counts
+        req_folds = int(folds or 3)
+        n_splits = min(req_folds, pos, neg)
+        if n_splits < 2:
+            return None, "none", "insufficient_per_class"
+
+        calibrated = CalibratedClassifierCV(
+            estimator=clf,
+            method=("sigmoid" if chosen == "platt" else "isotonic"),
+            cv=n_splits,
+        )
+        calibrated.fit(X_train, y_train)
+        return calibrated, chosen, None
+    except Exception as e:
+        try:
+            name = type(e).__name__
+        except Exception:
+            name = "CalibrationError"
+        return None, "none", f"calibration_error:{name}"
 
 
 @click.command()
@@ -419,17 +467,42 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
                         best_lr_pipe = pipe
                         best_conv = not conv_warn
             if best_lr_pipe is not None:
-                # Calibration on the entire pipeline
+                # Calibration on the entire pipeline (safe, per-cutoff)
                 best_cal = None
-                best_brier = 1e9
+                best_brier = None
+                best_cal_method = "none"
+                best_cal_reason = None
                 for m in cal_methods:
-                    cal = _calibrate(best_lr_pipe, X_train, y_train, X_valid, m)
-                    p = cal.predict_proba(X_valid)[:, 1]
-                    brier = brier_score_loss(y_valid, p)
-                    if brier < best_brier:
+                    cal, cm, reason = _calibrate(
+                        best_lr_pipe,
+                        X_train,
+                        y_train,
+                        X_valid,
+                        m,
+                        folds=getattr(getattr(cfg, 'modeling', object()), 'folds', 3),
+                        sparse_isotonic_threshold_pos=getattr(getattr(cfg, 'modeling', object()), 'sparse_isotonic_threshold_pos', None),
+                    )
+                    if cal is None:
+                        if best_cal is None and best_cal_reason is None:
+                            best_cal_reason = reason
+                        continue
+                    p_cal = cal.predict_proba(X_valid)[:, 1]
+                    brier = brier_score_loss(y_valid, p_cal)
+                    if best_brier is None or brier < best_brier:
                         best_brier = brier
                         best_cal = cal
-                p = best_cal.predict_proba(X_valid)[:, 1]
+                        best_cal_method = cm
+                        best_cal_reason = None
+
+                # Choose calibrated if available, else fallback to uncalibrated pipeline
+                if best_cal is not None:
+                    p = best_cal.predict_proba(X_valid)[:, 1]
+                else:
+                    p = best_lr_pipe.predict_proba(X_valid)[:, 1]
+                    try:
+                        best_brier = brier_score_loss(y_valid, p)
+                    except Exception:
+                        best_brier = None
                 lift10 = _lift_at_k(y_valid, p, 10)
                 # Pull n_iter_ from underlying LR if available
                 try:
@@ -440,9 +513,15 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
                 except Exception:
                     n_iter_val = None
                 results.append({
-                    "cutoff": cutoff, "model": "logreg", "auc": float(best_lr_auc),
-                    "lift10": float(lift10), "brier": float(best_brier), "calibration": best_cal.method,
-                    "converged": bool(best_conv), "n_iter": n_iter_val
+                    "cutoff": cutoff,
+                    "model": "logreg",
+                    "auc": float(best_lr_auc),
+                    "lift10": float(lift10),
+                    "brier": float(best_brier) if best_brier is not None else None,
+                    "calibration": best_cal_method,
+                    "calibration_reason": best_cal_reason,
+                    "converged": bool(best_conv),
+                    "n_iter": n_iter_val,
                 })
 
         # LGBM challenger
@@ -512,19 +591,51 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
                                     best_auc = auc_lgbm
                                     best_lgbm = lgbm
             if best_lgbm is not None:
-                # Calibration
+                # Calibration (safe)
                 best_cal = None
-                best_brier = 1e9
+                best_brier = None
+                best_cal_method = "none"
+                best_cal_reason = None
                 for m in cal_methods:
-                    cal = _calibrate(best_lgbm, X_train, y_train, X_valid, m)
-                    p = cal.predict_proba(X_valid)[:,1]
-                    brier = brier_score_loss(y_valid, p)
-                    if brier < best_brier:
+                    cal, cm, reason = _calibrate(
+                        best_lgbm,
+                        X_train,
+                        y_train,
+                        X_valid,
+                        m,
+                        folds=getattr(getattr(cfg, 'modeling', object()), 'folds', 3),
+                        sparse_isotonic_threshold_pos=getattr(getattr(cfg, 'modeling', object()), 'sparse_isotonic_threshold_pos', None),
+                    )
+                    if cal is None:
+                        if best_cal is None and best_cal_reason is None:
+                            best_cal_reason = reason
+                        continue
+                    p_cal = cal.predict_proba(X_valid)[:, 1]
+                    brier = brier_score_loss(y_valid, p_cal)
+                    if best_brier is None or brier < best_brier:
                         best_brier = brier
                         best_cal = cal
-                p = best_cal.predict_proba(X_valid)[:,1]
+                        best_cal_method = cm
+                        best_cal_reason = None
+
+                if best_cal is not None:
+                    p = best_cal.predict_proba(X_valid)[:, 1]
+                else:
+                    p = best_lgbm.predict_proba(X_valid)[:, 1]
+                    try:
+                        best_brier = brier_score_loss(y_valid, p)
+                    except Exception:
+                        best_brier = None
                 lift10 = _lift_at_k(y_valid, p, 10)
-                results.append({"cutoff": cutoff, "model": "lgbm", "auc": float(best_auc), "lift10": float(lift10), "brier": float(best_brier), "calibration": best_cal.method})
+                results.append({
+                    "cutoff": cutoff,
+                    "model": "lgbm",
+                    "auc": float(best_auc),
+                    "lift10": float(lift10),
+                    "brier": float(best_brier) if best_brier is not None else None,
+                    "calibration": best_cal_method,
+                    "calibration_reason": best_cal_reason,
+                })
 
     # Aggregate and select winner by lift@10 then cal-Brier
     if not results:
@@ -605,15 +716,46 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
             ('model', lr),
         ])
         pipe.fit(X_final, y_final)
-        # Calibrate entire pipeline using selected method (prefer isotonic)
-        cal = CalibratedClassifierCV(pipe, method='isotonic' if final_cal_method == 'isotonic' else 'sigmoid', cv=3).fit(X_final, y_final)
-        model = cal
+        # Calibrate entire pipeline using selected method with dynamic cv
+        try:
+            pos_f = int(np.sum(y_final))
+            neg_f = int(len(y_final) - pos_f)
+            folds_f = int(getattr(getattr(cfg, 'modeling', object()), 'folds', 3) or 3)
+            n_splits_f = min(folds_f, pos_f, neg_f)
+        except Exception:
+            n_splits_f = 3
+        if n_splits_f >= 2:
+            cal = CalibratedClassifierCV(
+                pipe,
+                method='isotonic' if final_cal_method == 'isotonic' else 'sigmoid',
+                cv=n_splits_f,
+            ).fit(X_final, y_final)
+            model = cal
+        else:
+            logger.warning("Skipping final calibration for LR: insufficient per-class counts; using uncalibrated model")
+            model = pipe
         feature_names = list(X_final.columns)
     else:
         clf = LGBMClassifier(random_state=cfg.modeling.seed, n_estimators=400, learning_rate=0.05, deterministic=True, n_jobs=1)
         clf.fit(X_final, y_final)
-        cal = CalibratedClassifierCV(clf, method='isotonic' if final_cal_method == 'isotonic' else 'sigmoid', cv=3).fit(X_final, y_final)
-        model = cal
+        # Dynamic cv for final calibration; fallback to uncalibrated if infeasible
+        try:
+            pos_f = int(np.sum(y_final))
+            neg_f = int(len(y_final) - pos_f)
+            folds_f = int(getattr(getattr(cfg, 'modeling', object()), 'folds', 3) or 3)
+            n_splits_f = min(folds_f, pos_f, neg_f)
+        except Exception:
+            n_splits_f = 3
+        if n_splits_f >= 2:
+            cal = CalibratedClassifierCV(
+                clf,
+                method='isotonic' if final_cal_method == 'isotonic' else 'sigmoid',
+                cv=n_splits_f,
+            ).fit(X_final, y_final)
+            model = cal
+        else:
+            logger.warning("Skipping final calibration for LGBM: insufficient per-class counts; using uncalibrated model")
+            model = clf
         feature_names = list(X_final.columns)
 
     # Save artifacts

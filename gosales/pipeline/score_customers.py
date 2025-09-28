@@ -7,6 +7,7 @@ import pandas as pd
 import mlflow
 import mlflow.sklearn
 import json
+from collections.abc import Iterable
 from pathlib import Path
 import joblib
 
@@ -14,7 +15,7 @@ from gosales.utils.db import get_db_connection, get_curated_connection, validate
 from gosales.utils.logger import get_logger
 from gosales.utils.paths import MODELS_DIR, OUTPUTS_DIR
 from gosales.models.shap_utils import compute_shap_reasons
-from gosales.utils.normalize import normalize_division
+from gosales.utils.normalize import normalize_division, normalize_model_key
 from gosales.utils.config import load_config
 import numpy as np
 from gosales.features.engine import create_feature_matrix
@@ -64,7 +65,7 @@ def discover_available_models(models_dir: Path | None = None) -> dict[str, Path]
     for p in root.glob("*_model"):
         name = p.name
         is_cold = name.endswith("_cold_model")
-        div = name.replace("_model", "")
+        div = normalize_division(name.replace("_model", ""))
         meta_path = p / "metadata.json"
         try:
             if meta_path.exists():
@@ -85,6 +86,54 @@ def discover_available_models(models_dir: Path | None = None) -> dict[str, Path]
         if d not in available:
             available[d] = path
     return available
+
+
+def _filter_models_by_targets(
+    available_models: dict[str, Path], targets: Iterable[str]
+) -> dict[str, Path]:
+    """Filter discovered models to only those that match supported targets.
+
+    Matching is performed on a normalized form that is tolerant to case,
+    underscores vs spaces, hyphens vs spaces, and extra whitespace.
+    The returned mapping preserves the original discovered keys.
+    """
+    normalized_targets = {normalize_model_key(t) for t in targets if t}
+    if not normalized_targets:
+        return dict(available_models)
+
+    # Group candidates by normalized key and de-duplicate with preference for non-cold models
+    def _is_cold(path: Path) -> bool:
+        return path.name.endswith("_cold_model")
+
+    grouped: dict[str, list[tuple[str, Path]]] = {}
+    unmatched: list[str] = []
+    for key, path in available_models.items():
+        nk = normalize_model_key(key)
+        if nk in normalized_targets:
+            grouped.setdefault(nk, []).append((key, path))
+        else:
+            unmatched.append(key)
+
+    filtered: dict[str, Path] = {}
+    dedup_pruned: list[str] = []
+    for nk, items in grouped.items():
+        # Choose best candidate: prefer non-cold; tie-break by key for determinism
+        items_sorted = sorted(items, key=lambda it: (_is_cold(it[1]), it[0]))
+        best_key, best_path = items_sorted[0]
+        filtered[best_key] = best_path
+        for other_key, _ in items_sorted[1:]:
+            dedup_pruned.append(other_key)
+
+    pruned = unmatched + dedup_pruned
+    if pruned:
+        # Debug aid to understand pruning behavior in ops
+        sample = ", ".join(sorted(pruned)[:10])
+        logger.debug(
+            "Pruned %d model(s) during filtering (sample: %s)",
+            len(pruned),
+            sample,
+        )
+    return filtered
  
 def _sanitize_features(X: pd.DataFrame) -> pd.DataFrame:
     """Ensure numeric float dtype; replace infs/NaNs with 0.0 for scoring."""
@@ -544,7 +593,7 @@ def generate_scoring_outputs(
         from gosales.etl.sku_map import get_supported_models, division_set as _division_set
         exclude = {"Hardware", "Maintenance"}
         targets = sorted({d for d in _division_set() if d not in exclude} | set(get_supported_models()))
-        available_models = {k: v for k, v in available_models.items() if k in targets}
+        available_models = _filter_models_by_targets(available_models, targets)
         if not available_models:
             logger.warning("No supported models found for scoring after pruning legacy models.")
     except Exception as e:
@@ -616,11 +665,22 @@ def generate_scoring_outputs(
         # Whitespace-only wiring for divisions without models (e.g., Post_Processing)
         try:
             from gosales.etl.sku_map import division_set as _division_set
-            need_pp = ("Post_Processing" in _division_set()) and ("Post_Processing" not in available_models)
+            known_divisions = {normalize_division(d) for d in _division_set()}
+            available_keys = {normalize_division(name) for name in available_models}
+            need_pp = (
+                normalize_division("Post_Processing") in known_divisions
+                and normalize_division("Post_Processing") not in available_keys
+            )
             if need_pp:
                 ws_df = generate_whitespace_opportunities(engine)
                 if not ws_df.is_empty():
-                    ws_pp = ws_df.filter(pl.col("whitespace_division") == "Post_Processing")
+                    ws_pp = ws_df.filter(
+                        pl.col("whitespace_division")
+                        .cast(pl.Utf8)
+                        .str.strip_chars()
+                        .str.to_lowercase()
+                        == normalize_division("Post_Processing")
+                    )
                     if not ws_pp.is_empty():
                         cols = [c for c in ["customer_id","whitespace_division","whitespace_score","customer_name"] if c in ws_pp.columns]
                         ws_min = ws_pp.select(cols)

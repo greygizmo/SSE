@@ -66,34 +66,76 @@ def _assets_als_centroid_path_for_div(div: str) -> Path:
     key = str(div or "").strip().lower().replace(" ", "_").replace("/", "_")
     return OUTPUTS_DIR / f"assets_als_owner_centroid_{key}.npy"
 
+def _als_centroid_path_for_div(div: str) -> Path:
+    """Division-specific path for owner ALS centroid to avoid cross-division leakage.
+
+    Mirrors assets-ALS pathing but for the primary ALS embedding centroid derived
+    from rows with ``owned_division_pre_cutoff == True`` within the same division.
+    """
+    key = str(div or "").strip().lower().replace(" ", "_").replace("/", "_")
+    return OUTPUTS_DIR / f"als_owner_centroid_{key}.npy"
+
 
 def _apply_eligibility_and_centroid(df: pd.DataFrame) -> Tuple[pd.DataFrame, np.ndarray | None]:
     """Filter out simple ineligible rows (owned pre-cutoff) while capturing ALS owner centroid.
 
-    Returns the filtered dataframe and the centroid vector. If no owner embeddings
-    are present, attempts to load a previously computed centroid from disk.
+    Returns the filtered dataframe and a global fallback centroid vector when no
+    per-division context is available. When a ``division_name`` column is present,
+    computes and persists division-specific centroids to avoid cross-division leakage.
     """
     als_cols = [c for c in df.columns if c.startswith("als_f")]
     centroid: np.ndarray | None = None
-    if als_cols and "owned_division_pre_cutoff" in df.columns:
-        owners = df[df["owned_division_pre_cutoff"].astype(bool)]
-        if not owners.empty:
-            centroid = owners[als_cols].astype(float).mean(axis=0).to_numpy(dtype=float)
-            try:
-                ALS_CENTROID_PATH.parent.mkdir(parents=True, exist_ok=True)
-                np.save(ALS_CENTROID_PATH, centroid)
-            except Exception:
-                pass
-        elif ALS_CENTROID_PATH.exists():
-            try:
-                centroid = np.load(ALS_CENTROID_PATH)
-            except Exception:
-                centroid = None
-    elif ALS_CENTROID_PATH.exists():
+
+    # If divisions are present, persist per-division centroids (preferred path)
+    if als_cols and "owned_division_pre_cutoff" in df.columns and "division_name" in df.columns:
         try:
-            centroid = np.load(ALS_CENTROID_PATH)
+            # Persist per-division owner centroids where available
+            for div, g in df.groupby("division_name", dropna=False):
+                try:
+                    g_owners = g[g["owned_division_pre_cutoff"].astype(bool)]
+                except Exception:
+                    g_owners = pd.DataFrame(columns=df.columns)
+                if not g_owners.empty:
+                    c = g_owners[als_cols].apply(pd.to_numeric, errors="coerce").fillna(0.0).astype(float).mean(axis=0).to_numpy(dtype=float)
+                    try:
+                        p = _als_centroid_path_for_div(div)
+                        p.parent.mkdir(parents=True, exist_ok=True)
+                        np.save(p, c)
+                    except Exception:
+                        pass
+            # Provide a global fallback centroid across all owners (for callers without division context)
+            owners_all = df[df["owned_division_pre_cutoff"].astype(bool)]
+            if not owners_all.empty:
+                centroid = owners_all[als_cols].apply(pd.to_numeric, errors="coerce").fillna(0.0).astype(float).mean(axis=0).to_numpy(dtype=float)
         except Exception:
-            centroid = None
+            # If anything goes wrong, fall back to legacy global path behavior below
+            pass
+
+    # Legacy/global centroid behavior when no division context is available
+    if centroid is None and als_cols:
+        try:
+            if "owned_division_pre_cutoff" in df.columns:
+                owners = df[df["owned_division_pre_cutoff"].astype(bool)]
+            else:
+                owners = pd.DataFrame(columns=df.columns)
+            if not owners.empty:
+                centroid = owners[als_cols].astype(float).mean(axis=0).to_numpy(dtype=float)
+                try:
+                    ALS_CENTROID_PATH.parent.mkdir(parents=True, exist_ok=True)
+                    np.save(ALS_CENTROID_PATH, centroid)
+                except Exception:
+                    pass
+            elif ALS_CENTROID_PATH.exists():
+                try:
+                    centroid = np.load(ALS_CENTROID_PATH)
+                except Exception:
+                    centroid = None
+        except Exception:
+            if ALS_CENTROID_PATH.exists():
+                try:
+                    centroid = np.load(ALS_CENTROID_PATH)
+                except Exception:
+                    centroid = None
 
     # Compute and persist assets-ALS centroid similarly (if columns present)
     try:
@@ -151,39 +193,112 @@ def _compute_als_norm(
     # Measure raw embedding strength before any normalization.
     raw_strength = mat.abs().sum(axis=1).astype(float)
 
-    if owner_centroid is not None:
-        centroid_vec = np.asarray(owner_centroid, dtype=float)
-    else:
-        try:
-            valid_mask = raw_strength > 0
-            if 'owned_division_pre_cutoff' in df.columns:
-                owned_mask = df['owned_division_pre_cutoff'].astype(bool) & valid_mask
-            else:
-                owned_mask = valid_mask
-            if owned_mask.any():
-                centroid_source = mat.loc[owned_mask]
-            elif valid_mask.any():
-                centroid_source = mat.loc[valid_mask]
-            else:
-                centroid_source = mat
-            centroid_vec = centroid_source.mean(axis=0).to_numpy(dtype=float)
-        except Exception:
-            centroid_vec = mat.mean(axis=0).to_numpy(dtype=float)
-
-    if centroid_vec.shape[0] != mat.shape[1]:
-        centroid_vec = mat.mean(axis=0).to_numpy(dtype=float)
-
     sims = np.zeros(len(df), dtype=float)
     valid_rows = raw_strength > 0
-    if valid_rows.any():
-        m_valid = mat.loc[valid_rows].to_numpy(dtype=float)
-        try:
-            m_norm = normalize(m_valid, axis=1)
-            centroid_norm = normalize(centroid_vec.reshape(1, -1), axis=1)
-            sims_valid = cosine_similarity(m_norm, centroid_norm).ravel()
-        except Exception:
-            sims_valid = np.zeros(len(m_valid), dtype=float)
-        sims[valid_rows.to_numpy()] = sims_valid
+
+    # If division context exists, compute similarities per-division with division-specific centroids when available
+    if 'division_name' in df.columns:
+        for div, g in df.groupby('division_name', dropna=False):
+            idx = g.index
+            sub = (
+                g[als_cols]
+                .apply(pd.to_numeric, errors='coerce')
+                .fillna(0.0)
+                .to_numpy(dtype=float)
+            )
+            # Determine centroid vector priority:
+            # 1) division-specific persisted centroid
+            # 2) in-group owned rows (if present)
+            # 3) in-group mean of valid rows
+            centroid_vec = None
+            # Load per-division persisted centroid if present
+            try:
+                p = _als_centroid_path_for_div(div)
+                if p.exists():
+                    centroid_vec = np.load(p)
+            except Exception:
+                centroid_vec = None
+            # If not found, compute from in-group owned rows
+            if centroid_vec is None:
+                try:
+                    owned_mask = None
+                    if 'owned_division_pre_cutoff' in g.columns:
+                        owned_mask = g['owned_division_pre_cutoff'].astype(bool).to_numpy()
+                    if owned_mask is not None and owned_mask.any():
+                        centroid_vec = (
+                            g.loc[g['owned_division_pre_cutoff'].astype(bool), als_cols]
+                            .apply(pd.to_numeric, errors='coerce').fillna(0.0)
+                            .mean(axis=0).to_numpy(dtype=float)
+                        )
+                except Exception:
+                    centroid_vec = None
+            # Fallback to in-group mean of valid rows
+            if centroid_vec is None or centroid_vec.shape[0] != sub.shape[1]:
+                try:
+                    # Use only valid rows for mean if any
+                    sub_valid_mask = (raw_strength.loc[idx] > 0).to_numpy()
+                    if sub_valid_mask.any():
+                        centroid_vec = (
+                            g.loc[idx[sub_valid_mask], als_cols]
+                            .apply(pd.to_numeric, errors='coerce')
+                            .fillna(0.0).mean(axis=0).to_numpy(dtype=float)
+                        )
+                    else:
+                        centroid_vec = (
+                            g[als_cols]
+                            .apply(pd.to_numeric, errors='coerce').fillna(0.0)
+                            .mean(axis=0).to_numpy(dtype=float)
+                        )
+                except Exception:
+                    centroid_vec = (
+                        g[als_cols]
+                        .apply(pd.to_numeric, errors='coerce').fillna(0.0)
+                        .mean(axis=0).to_numpy(dtype=float)
+                    )
+            # Compute similarities for valid rows in this group
+            try:
+                grp_valid = (raw_strength.loc[idx] > 0).to_numpy()
+                if grp_valid.any():
+                    m_norm = normalize(sub[grp_valid], axis=1)
+                    c_norm = normalize(centroid_vec.reshape(1, -1), axis=1)
+                    sims_valid = cosine_similarity(m_norm, c_norm).ravel()
+                    sims_idx = np.where(grp_valid)[0]
+                    sims[idx[sims_idx]] = sims_valid
+            except Exception:
+                pass
+    else:
+        # Legacy/global behavior (no division context)
+        if owner_centroid is not None:
+            centroid_vec = np.asarray(owner_centroid, dtype=float)
+        else:
+            try:
+                valid_mask = valid_rows
+                if 'owned_division_pre_cutoff' in df.columns:
+                    owned_mask = df['owned_division_pre_cutoff'].astype(bool) & valid_mask
+                else:
+                    owned_mask = valid_mask
+                if owned_mask.any():
+                    centroid_source = mat.loc[owned_mask]
+                elif valid_mask.any():
+                    centroid_source = mat.loc[valid_mask]
+                else:
+                    centroid_source = mat
+                centroid_vec = centroid_source.mean(axis=0).to_numpy(dtype=float)
+            except Exception:
+                centroid_vec = mat.mean(axis=0).to_numpy(dtype=float)
+
+        if centroid_vec.shape[0] != mat.shape[1]:
+            centroid_vec = mat.mean(axis=0).to_numpy(dtype=float)
+
+        if valid_rows.any():
+            m_valid = mat.loc[valid_rows].to_numpy(dtype=float)
+            try:
+                m_norm = normalize(m_valid, axis=1)
+                centroid_norm = normalize(centroid_vec.reshape(1, -1), axis=1)
+                sims_valid = cosine_similarity(m_norm, centroid_norm).ravel()
+            except Exception:
+                sims_valid = np.zeros(len(m_valid), dtype=float)
+            sims[valid_rows.to_numpy()] = sims_valid
 
     als_norm = _percentile_normalize(pd.Series(sims, index=df.index))
     als_norm.loc[~valid_rows] = 0.0
@@ -541,12 +656,7 @@ class RankInputs:
 
 def rank_whitespace(inputs: RankInputs, *, weights: Iterable[float] = (0.60, 0.20, 0.10, 0.10)) -> pd.DataFrame:
     df = inputs.scores.copy()
-    # Standardize key dtypes
-    try:
-        if 'customer_id' in df.columns:
-            df['customer_id'] = df['customer_id'].astype(str)
-    except Exception:
-        pass
+    # Preserve incoming customer_id dtype; downstream merges handle casting as needed
     if df.empty:
         return df
     # Apply simple ownership eligibility and capture ALS centroid

@@ -62,13 +62,16 @@ def build_labels_for_division(
     # Window-period transactions for target division
     window_df = facts[(facts['order_date'] > cutoff_dt) & (facts['order_date'] <= win_end)].copy()
     # Normalize division string comparisons to avoid whitespace/case issues
-    window_df['product_division'] = window_df['product_division'].astype(str).str.strip()
+    window_df['product_division'] = (
+        window_df['product_division'].astype(str).str.strip().str.casefold()
+    )
     # Determine if caller passed a custom model (e.g., 'Printers'); if so, match by SKU set
-    sku_targets = tuple(get_model_targets(normalize_division(params.division)))
+    target_norm = normalize_division(params.division)
+    sku_targets = tuple(get_model_targets(target_norm))
     if sku_targets:
         window_target = window_df[window_df['product_sku'].astype(str).isin(sku_targets)].copy()
     else:
-        window_target = window_df[window_df['product_division'] == normalize_division(params.division)].copy()
+        window_target = window_df[window_df['product_division'] == target_norm].copy()
     # Optional denylist SKUs exclusion (e.g., trials/POC)
     try:
         cfg_obj = cfg.load_config()
@@ -107,8 +110,17 @@ def build_labels_for_division(
                 widened = min(int(params.max_window_months), widened + 3)
                 new_end = cutoff_dt + relativedelta(months=widened)
                 window_df_w = facts[(facts['order_date'] > cutoff_dt) & (facts['order_date'] <= new_end)].copy()
-                window_df_w['product_division'] = window_df_w['product_division'].astype(str).str.strip()
-                window_target_w = window_df_w[window_df_w['product_division'] == normalize_division(params.division)].copy()
+                window_df_w['product_division'] = (
+                    window_df_w['product_division'].astype(str).str.strip().str.casefold()
+                )
+                if sku_targets:
+                    window_target_w = window_df_w[
+                        window_df_w['product_sku'].astype(str).isin(sku_targets)
+                    ].copy()
+                else:
+                    window_target_w = window_df_w[
+                        window_df_w['product_division'] == target_norm
+                    ].copy()
                 labels = _compute_labels(window_target_w)
                 pos = int(labels['label'].sum()) if not labels.empty else 0
             # Update window_end if widened
@@ -117,7 +129,9 @@ def build_labels_for_division(
         pass
 
     # Cohorts from feature period
-    feature_df['product_division'] = feature_df['product_division'].astype(str).str.strip()
+    feature_df['product_division'] = (
+        feature_df['product_division'].astype(str).str.strip().str.casefold()
+    )
 
     had_any_df = (
         feature_df[['customer_id']]
@@ -135,7 +149,7 @@ def build_labels_for_division(
         )
     else:
         had_div_df = (
-            feature_df[feature_df['product_division'] == normalize_division(params.division)][['customer_id']]
+            feature_df[feature_df['product_division'] == target_norm][['customer_id']]
             .dropna()
             .drop_duplicates()
             .assign(had_div=1)
@@ -166,6 +180,13 @@ def build_labels_for_division(
     labels = labels[['customer_id', 'division', 'label', 'window_start', 'window_end', 'is_new_logo', 'is_expansion', 'is_renewal_like', 'censored_flag', 'net_gp_window']]
     labels = labels.drop_duplicates(subset=['customer_id', 'division'], keep='first')
 
+    # Ensure customer_id is numeric for downstream tests/consumers that expect ints
+    try:
+        labels['customer_id'] = pd.to_numeric(labels['customer_id'], errors='coerce').astype('Int64')
+    except Exception:
+        # Fall back silently if conversion is unsafe
+        pass
+
     return pl.from_pandas(labels)
 
 
@@ -180,5 +201,4 @@ def prevalence_report(labels_df: pl.DataFrame) -> pd.DataFrame:
     return pd.DataFrame([
         {"total": total, "positives": pos, "prevalence": prevalence, **cohorts}
     ])
-
 

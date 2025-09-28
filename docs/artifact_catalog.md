@@ -114,3 +114,18 @@ This catalog enumerates every artifact the GoSales Engine produces across the pi
 2. Locate the corresponding artifact in the tables above.
 3. Use the Purpose and Importance columns to determine what to inspect first and which downstream teams rely on the file.
 4. When creating new outputs, update this catalog to keep cross-functional documentation accurate.
+
+---
+
+## Phase 3 Diagnostics (New)
+
+In addition to the per-cutoff model artifacts above, training now emits a division-level diagnostics JSON to aid triage and auditing.
+
+| Artifact | Location Pattern | Purpose | Key Fields |
+| --- | --- | --- | --- |
+| `diagnostics_<division>.json` | `gosales/outputs/` | Summarizes the per-cutoff training loop and feature pruning. Ensures every cutoff contributes a metrics row, even if calibration is skipped. | `results_grid` array of rows with: `cutoff`, `model`, `auc`, `lift10`, `brier`, `calibration` ('platt'  'isotonic'  'none'), and `calibration_reason` when calibration is not applied. |
+
+Calibration behavior is now adaptive:
+- CV folds are set to `min(modeling.folds, #pos, #neg)` for the training fold of each cutoff.
+- When `n_splits < 2`, calibration is skipped and uncalibrated probabilities are used. The diagnostics row records `calibration='none'` and a reason such as `insufficient_per_class` or `single_class_train`.
+- Isotonic may be downgraded to Platt when positives are very sparse, controlled by `modeling.sparse_isotonic_threshold_pos`.

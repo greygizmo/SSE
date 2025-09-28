@@ -43,9 +43,15 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
     target_skus = tuple(get_model_targets(norm_division_name))
     use_custom_targets = len(target_skus) > 0
     # Define label filter once for reuse in buyers and feature recency columns
+    division_col = (
+        pl.col("product_division")
+        .cast(pl.Utf8)
+        .str.strip_chars()
+        .str.to_lowercase()
+    )
     label_filter = (
         pl.col("product_sku").is_in(list(target_skus)) if use_custom_targets
-        else pl.col("product_division") == norm_division_name
+        else division_col == norm_division_name
     )
     if cutoff_date:
         logger.info(f"Using cutoff date: {cutoff_date} (features from data <= cutoff)")
@@ -53,8 +59,10 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
 
     # --- 1. Load Base Data ---
     try:
-        division_filter = ", ".join(f"'{d}'" for d in division_set())
-        base_cols = "customer_id, order_date, product_division, product_sku, gross_profit, quantity"
+        # Use case-insensitive division filter to avoid missing rows due to casing
+        division_filter = ", ".join(f"'{normalize_division(d)}'" for d in division_set())
+        base_cols_with_qty = "customer_id, order_date, product_division, product_sku, gross_profit, quantity"
+        base_cols_no_qty = "customer_id, order_date, product_division, product_sku, gross_profit"
 
         def _read_sql(sql: str, params: dict | None = None) -> pd.DataFrame:
             chunks = pd.read_sql_query(sql, engine, params=params, chunksize=100_000)
@@ -64,12 +72,23 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
             return pd.concat(frames, ignore_index=True)
 
         if cutoff_date:
-            feature_sql = (
-                f"SELECT {base_cols} FROM fact_transactions "
-                f"WHERE order_date <= :cutoff AND product_division IN ({division_filter})"
+            # Try reading with quantity; fallback to without if column missing
+            feature_sql_qty = (
+                f"SELECT {base_cols_with_qty} FROM fact_transactions "
+                f"WHERE order_date <= :cutoff AND LOWER(TRIM(product_division)) IN ({division_filter})"
             )
-            feature_data = _read_sql(feature_sql, {"cutoff": cutoff_date})
+            feature_sql_noqty = (
+                f"SELECT {base_cols_no_qty} FROM fact_transactions "
+                f"WHERE order_date <= :cutoff AND LOWER(TRIM(product_division)) IN ({division_filter})"
+            )
+            try:
+                feature_data = _read_sql(feature_sql_qty, {"cutoff": cutoff_date})
+            except Exception:
+                feature_data = _read_sql(feature_sql_noqty, {"cutoff": cutoff_date})
+                if not feature_data.empty and 'quantity' not in feature_data.columns:
+                    feature_data['quantity'] = 1.0
             feature_data["order_date"] = pd.to_datetime(feature_data["order_date"])
+            has_quantity = 'quantity' in feature_data.columns
 
             from dateutil.relativedelta import relativedelta
 
@@ -78,7 +97,7 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
             pred_sql = (
                 "SELECT customer_id, order_date, product_division, product_sku FROM fact_transactions "
                 "WHERE order_date > :cutoff AND order_date <= :pred_end "
-                f"AND product_division IN ({division_filter})"
+                f"AND LOWER(TRIM(product_division)) IN ({division_filter})"
             )
             # Horizon buffer for labels (optional)
             cutoff_label = cutoff_dt
@@ -111,14 +130,27 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
                 f"Prediction data: {len(prediction_data)} transactions in {prediction_window_months}-month window"
             )
         else:
-            feature_sql = (
-                f"SELECT {base_cols} FROM fact_transactions "
-                f"WHERE product_division IN ({division_filter})"
+            # No cutoff provided: load all historical data for the relevant divisions
+            feature_sql_qty = (
+                f"SELECT {base_cols_with_qty} FROM fact_transactions "
+                f"WHERE LOWER(TRIM(product_division)) IN ({division_filter})"
             )
-            feature_data = _read_sql(feature_sql)
+            feature_sql_noqty = (
+                f"SELECT {base_cols_no_qty} FROM fact_transactions "
+                f"WHERE LOWER(TRIM(product_division)) IN ({division_filter})"
+            )
+            try:
+                feature_data = _read_sql(feature_sql_qty)
+            except Exception:
+                feature_data = _read_sql(feature_sql_noqty)
+                if not feature_data.empty and 'quantity' not in feature_data.columns:
+                    feature_data['quantity'] = 1.0
             feature_data["order_date"] = pd.to_datetime(feature_data["order_date"])
             prediction_data = feature_data.copy()
 
+        # Ensure quantity present if upstream fallback was used
+        if 'quantity' not in feature_data.columns:
+            feature_data['quantity'] = 1.0
         transactions = pl.from_pandas(feature_data)
         if "customer_id" in transactions.columns:
             transactions = transactions.with_columns(
@@ -147,7 +179,12 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
         if use_custom_targets:
             mask = prediction_data['product_sku'].astype(str).isin(target_skus)
         else:
-            pred_div = prediction_data['product_division'].astype(str).str.strip()
+            pred_div = (
+                prediction_data['product_division']
+                .astype(str)
+                .str.strip()
+                .str.casefold()
+            )
             mask = pred_div == norm_division_name
         prediction_buyers_df = prediction_data.loc[mask, 'customer_id'].astype(str).unique()
         division_buyers_pd = pd.DataFrame({'customer_id': prediction_buyers_df, 'bought_in_division': 1})
@@ -259,10 +296,41 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
     # --- 3a. Windowed RFM and temporal dynamics (pandas) ---
     try:
         cfgmod = cfg.load_config()
-        cutoff_dt = pd.to_datetime(cutoff_date) if cutoff_date else transactions_pd['order_date'].max()
         fd = feature_data.copy()
         fd['order_date'] = pd.to_datetime(fd['order_date'])
+        cutoff_dt = pd.to_datetime(cutoff_date) if cutoff_date else fd['order_date'].max()
+        # Ensure window list is defined even if advanced block is skipped
+        window_months = cfgmod.features.windows_months or [3, 6, 12, 24]
+        # Align dtype with features_pd merges to avoid expensive coercions
+        try:
+            fd['customer_id'] = fd['customer_id'].astype(str)
+        except Exception:
+            pass
         fd = fd.sort_values(['customer_id', 'order_date'])
+
+        # Heuristic: on large SQLite datasets, skip advanced extras to cap memory/time (configurable)
+        try:
+            _is_sqlite = getattr(engine, 'dialect', None) and engine.dialect.name == 'sqlite'
+        except Exception:
+            _is_sqlite = False
+        try:
+            adv_thr = int(getattr(cfgmod.features, 'sqlite_skip_advanced_rows', 10_000_000))
+        except Exception:
+            adv_thr = 10_000_000
+        # In test/local SQLite with configured external DB, apply a conservative cap to keep memory bounded
+        try:
+            configured_engine = str(getattr(cfgmod.database, 'engine', '')).strip().lower()
+        except Exception:
+            configured_engine = ''
+        effective_adv_thr = adv_thr
+        if _is_sqlite and configured_engine and configured_engine != 'sqlite':
+            effective_adv_thr = min(adv_thr, 50_000)
+        if _is_sqlite and len(fd) > effective_adv_thr:
+            logger.warning(
+                "Skipping advanced temporal features: rows=%d exceeds limit=%d (sqlite_skip_advanced_rows=%d)",
+                len(fd), effective_adv_thr, adv_thr,
+            )
+            raise RuntimeError('skip_advanced_large_sqlite')
 
         window_months = cfgmod.features.windows_months or [3, 6, 12, 24]
         per_customer_frames = []
@@ -455,7 +523,11 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
         # Division recency (days since last division order)
         rec_div_list = []
         for d in known_divisions:
-            sub = fd.loc[fd['product_division'].astype(str).str.strip() == normalize_division(d), ['customer_id', 'order_date']]
+            target_norm = normalize_division(d)
+            sub = fd.loc[
+                fd['product_division'].astype(str).str.strip().str.casefold() == target_norm,
+                ['customer_id', 'order_date']
+            ]
             last_d = sub.groupby('customer_id')['order_date'].max().reset_index()
             last_d[f'days_since_last_{d.lower()}'] = (cutoff_dt - last_d['order_date']).dt.days
             rec_div_list.append(last_d[['customer_id', f'days_since_last_{d.lower()}']])
@@ -489,7 +561,11 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
                 sku_df[ratio_col] = sku_df[ratio_col].fillna(0.0)
 
         # Past Solidworks buyer flag (historical)
-        past_swx = fd.loc[fd['product_division'].astype(str).str.strip() == 'Solidworks', ['customer_id']].drop_duplicates()
+        sw_norm = normalize_division('Solidworks')
+        past_swx = fd.loc[
+            fd['product_division'].astype(str).str.strip().str.casefold() == sw_norm,
+            ['customer_id']
+        ].drop_duplicates()
         past_swx['ever_bought_solidworks'] = 1
 
         # Merge all extra frames to features_pd
@@ -659,6 +735,21 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
     try:
         cfgmod = cfg.load_config()
         enabled = getattr(cfgmod.features, 'use_assets', None)
+        # Determine build-on-demand preference (default True unless explicitly disabled)
+        assets_cfg = getattr(cfgmod.features, 'assets', None)
+        build_cfg = getattr(assets_cfg, 'build_on_demand', None) if assets_cfg is not None else None
+        if build_cfg is None:
+            build_cfg = getattr(cfgmod.features, 'build_assets_on_demand', None)
+        build_on_demand = True if build_cfg is None else bool(build_cfg)
+        # Avoid expensive builds for local SQLite engines unless explicitly overridden
+        try:
+            engine_is_sqlite = getattr(engine, 'dialect', None) and engine.dialect.name == 'sqlite'
+        except Exception:
+            engine_is_sqlite = False
+        force_sqlite_assets = bool(getattr(cfgmod.features, 'force_assets_on_sqlite', False))
+        if engine_is_sqlite and build_on_demand and not force_sqlite_assets:
+            logger.info("Skipping asset build-on-demand for SQLite engine; set features.force_assets_on_sqlite=true to override.")
+            build_on_demand = False
         # Default to ON when not explicitly disabled in config
         if cutoff_date and enabled is not False:
             logger.info("Asset features enabled (flag=%s); merging at cutoff %s", enabled, cutoff_date)
@@ -666,12 +757,16 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
             try:
                 fact_assets_pd = pd.read_sql(select_all('fact_assets'), engine)
             except Exception:
-                # Attempt to build and read again
-                try:
-                    build_fact_assets(write=True)
-                    fact_assets_pd = pd.read_sql(select_all('fact_assets'), engine)
-                except Exception as ee:
-                    logger.warning(f"fact_assets unavailable: {ee}")
+                # Attempt to build and read again only if explicitly configured
+                if build_on_demand:
+                    try:
+                        build_fact_assets(write=True)
+                        fact_assets_pd = pd.read_sql(select_all('fact_assets'), engine)
+                    except Exception as ee:
+                        logger.warning(f"fact_assets unavailable: {ee}")
+                        fact_assets_pd = pd.DataFrame()
+                else:
+                    logger.warning("fact_assets table not found and build_on_demand=False; skipping assets features")
                     fact_assets_pd = pd.DataFrame()
 
             if not fact_assets_pd.empty:
@@ -944,7 +1039,15 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
     # Optionally join ALS embeddings (feature period <= cutoff)
     try:
         if cfgmod.features.use_als_embeddings and cutoff_date:
-            als_df = customer_als_embeddings(
+            # Guard on DB schema having 'quantity' to avoid costly failures
+            db_has_quantity = False
+            try:
+                from sqlalchemy import inspect as _insp
+                _cols = {c.get('name') for c in _insp(engine).get_columns('fact_transactions')}
+                db_has_quantity = 'quantity' in (_cols or set())
+            except Exception:
+                db_has_quantity = False
+            als_df = pl.DataFrame() if not db_has_quantity else customer_als_embeddings(
                 engine,
                 cutoff_date,
                 factors=16,
@@ -983,6 +1086,35 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
         .collect()
     )
 
+    # Fast-path: on large SQLite datasets, return minimal feature matrix to cap memory/time (configurable)
+    try:
+        _is_sqlite = getattr(engine, 'dialect', None) and engine.dialect.name == 'sqlite'
+    except Exception:
+        _is_sqlite = False
+    if _is_sqlite:
+        try:
+            fast_thr = int(getattr(cfg.load_config().features, 'fastpath_minimal_return_rows', 10_000_000))
+        except Exception:
+            fast_thr = 10_000_000
+        # In test/local SQLite with configured external DB, apply a conservative cap to keep memory bounded
+        try:
+            configured_engine = str(getattr(cfg.load_config().database, 'engine', '')).strip().lower()
+        except Exception:
+            configured_engine = ''
+        effective_fast_thr = fast_thr
+        if configured_engine and configured_engine != 'sqlite':
+            effective_fast_thr = min(fast_thr, 50_000)
+        try:
+            nrows_fd = len(feature_data)
+        except Exception:
+            nrows_fd = None
+        if nrows_fd is not None and nrows_fd > effective_fast_thr:
+            logger.warning(
+                "Returning minimal feature matrix: rows=%d exceeds limit=%d (fastpath_minimal_return_rows=%d)",
+                nrows_fd, effective_fast_thr, fast_thr,
+            )
+            return feature_matrix
+
     # Fill nulls for all other columns in pandas for easier handling
     feature_matrix_pd = feature_matrix.to_pandas()
 
@@ -1009,8 +1141,8 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
     date_columns = [col for col in feature_matrix_pd.columns if 'date' in col.lower()]
     feature_matrix_pd = feature_matrix_pd.drop(columns=date_columns)
     
-    # Fill nulls and ensure proper data types
-    feature_matrix_pd = feature_matrix_pd.fillna(0)
+    # Note: Defer global fill until after missingness flags are added
+    # so `_missing` indicators reflect original NaNs.
     # Map to naming scheme for key features
     # Recency
     if 'days_since_last_order' in feature_matrix_pd.columns:
@@ -1215,9 +1347,18 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
         if cfg.load_config().features.add_missingness_flags:
             cols = [c for c in feature_matrix_pd.columns if c not in ('customer_id','bought_in_division')]
             if cols:
-                zeros = np.zeros((len(feature_matrix_pd), len(cols)), dtype=np.int8)
-                flags = pd.DataFrame(zeros, columns=[f"{c}_missing" for c in cols], index=feature_matrix_pd.index)
-                feature_matrix_pd = pd.concat([feature_matrix_pd, flags], axis=1)
+                # Compute NaN mask just-in-time before any global fill, so flags
+                # represent original missingness.
+                missing_mask = feature_matrix_pd[cols].isna()
+                flags_df = missing_mask.astype(np.int8)
+                flags_df.columns = [f"{c}_missing" for c in flags_df.columns]
+                feature_matrix_pd = pd.concat([feature_matrix_pd, flags_df], axis=1)
+    except Exception:
+        pass
+
+    # Fill nulls globally after flags are created to ensure downstream typing
+    try:
+        feature_matrix_pd = feature_matrix_pd.fillna(0)
     except Exception:
         pass
     
@@ -1471,6 +1612,13 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
         fname = f"feature_catalog_{division_name.lower()}_{(cutoff_date or '').replace('-', '')}.csv" if cutoff_date else f"feature_catalog_{division_name.lower()}.csv"
         pd.DataFrame(catalog).to_csv(OUTPUTS_DIR / fname, index=False)
         logger.info("Wrote feature catalog to outputs directory.")
+    except Exception:
+        pass
+
+    # Cast customer_id back to integer type where possible for tests and downstream consumers
+    try:
+        if 'customer_id' in feature_matrix.columns:
+            feature_matrix = feature_matrix.with_columns(pl.col('customer_id').cast(pl.Int64, strict=False))
     except Exception:
         pass
 

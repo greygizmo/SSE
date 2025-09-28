@@ -81,6 +81,7 @@ This list merges GPT-5-Proâ€™s recommendations with our proposed upgrades. 
 - [x] ALS coverage enforcement + item2vec backfill to reduce cold-start.
   - If `features.use_item2vec: true` and ALS coverage < `whitespace.als_coverage_threshold`, ranker computes item2vec similarity and backfills rows with missing ALS.
   - Weight scaling also shrinks ALS contribution proportional to coverage (config threshold honored).
+  - Division-specific ALS owner centroids are now persisted and used during ranking to prevent cross-division leakage. Files: `als_owner_centroid_<division>.npy` (and for assets-ALS: `assets_als_owner_centroid_<division>.npy`). Regression tests verify distinct centroids and behavior when a division has no owners.
 - [x] Capacity-aware threshold optimization (hit capacity targets with stable capture@K across eras).
   - Selection rebalancer enforces `whitespace.bias_division_max_share_topN` at the top‑percent capacity by capping each division’s share and topping up from others by score.
   - Emits capacity summary and bias/diversity warnings as before; now the selected set respects the share cap when configured.
@@ -233,4 +234,10 @@ Artifacts:
 ### Rollback Safety
 
 - [ ] One‑flag revert for SAFE mode (`features.safe_mode=false`) and for purge CV (`--purge-days 0`), documented in `docs/OPERATIONS.md`.
-- [ ] Snapshot copy of the last known‑good artifacts (run registry) with quick restore instructions.
+- [ ] Snapshot copy of the last known-good artifacts (run registry) with quick restore instructions.
+
+### Follow-up Issues
+
+- [ ] Centralize missingness mask + fill strategy for consistent `_missing` flags across all engineered columns.
+  - Tracking doc: `gosales/docs/issues/0001-centralize-missingness-flags.md`
+  - Summary: Compute features first, capture a comprehensive NaN mask, generate `_missing` flags, then apply a single centralized fill pass (configurable). Provide a feature flag `features.centralized_fill_enable` for safe rollout.

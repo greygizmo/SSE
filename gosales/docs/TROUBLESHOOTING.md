@@ -29,6 +29,12 @@
 
 - Ranker down-weights low-coverage signals automatically. Improve data coverage over time or adjust `whitespace.weights`.
 
+### ALS centroid seems to leak across divisions
+
+- Ensure ranking inputs include `division_name`. When present, the ranker uses per-division ALS owner centroids cached under `gosales/outputs/` as `als_owner_centroid_<division>.npy` (and `assets_als_owner_centroid_<division>.npy` for assets-ALS).
+- If results appear shared across divisions, check whether the per-division centroid files exist for each division and that old global `als_owner_centroid.npy` isn’t being relied upon inadvertently in contexts without `division_name`.
+- Deleting stale centroid `.npy` files under `gosales/outputs/` is safe; they will be recomputed on the next run.
+
 ### `icp_scores.csv` write fails on Windows
 
 - If `icp_scores.csv` is open in Excel, Windows may lock the file. The scorer now writes a timestamped fallback file in the same folder and logs a warning. Close Excel and re-run if you need the canonical filename.
