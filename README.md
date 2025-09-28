@@ -273,6 +273,7 @@ gosales/
   - Utilities: `scripts/peek_assets_views.py`, `scripts/build_assets_features.py`.
 
 - Scoring/Ranking improvements
+  - Adaptive batch scoring keeps ALS, market-basket, pooled encoders, and missingness flags enabled while capping peak memory; override size with `GOSALES_BATCH_TARGET_MB` (MB, default 160).
   - Scorer reindexes to `feature_list.json` and zero‑fills to avoid LightGBM shape mismatches.
   - Signals propagated to ranker: `mb_lift_max`, `mb_lift_mean`, `als_f*`, and EV proxy. Capacity summary now exported as `capacity_summary_<cutoff>.csv`.
   - Output writer is resilient to Windows file locks on `icp_scores.csv`; a timestamped fallback is written and a warning logged.

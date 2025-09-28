@@ -69,6 +69,7 @@ All options live in `gosales/config.yaml`. Key entries:
   - Memory guards (for local SQLite runs):
     - `sqlite_skip_advanced_rows`: when feature rows exceed this, advanced extras are skipped. Default: 10,000,000.
     - `fastpath_minimal_return_rows`: when feature rows exceed this, a minimal feature matrix is returned early. Default: 10,000,000.
+  - 2025-09 update: defaults for `add_missingness_flags`, `use_market_basket`, `use_als_embeddings`, and `pooled_encoders_enable` remain `true`; the scorer now batches to `float32` slices automatically, so leave these on unless you are debugging feature sources.
     - Both emit WARN logs when triggered with row counts and thresholds. In repo tests, a conservative cap is applied automatically for local SQLite when your configured `database.engine` != `sqlite` to keep peak memory under control.
 
 - modeling
@@ -104,6 +105,7 @@ See the UI “Feature Guide” tab for a rendered view of the current configurat
 
 - Post_Processing model added as a first-class target. Artifacts live under `gosales/models/post_processing_model` and include `metadata.json` with `division`, `cutoff_date`, and `prediction_window_months`.
 - Scoring aligns per-division score frames before concatenation to avoid schema width mismatches.
+- Scoring introduces adaptive batch mode: wide feature matrices (>=50k columns equivalent) are scored in float32 Polars slices so ALS, market-basket, missingness flags, and pooled encoders stay enabled on laptops without spiking memory.
 - Scoring prefers curated DB connection (where curated fact tables exist), with safe fallback to the primary connection.
 - Trainer always emits `metadata.json` (class balance, features, cutoff/window), even when degenerate probabilities abort artifact write.
 - Prequential evaluator sanitizes features to numeric floats to prevent dtype errors with LightGBM.

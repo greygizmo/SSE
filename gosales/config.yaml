@@ -63,10 +63,12 @@ labels:
 features:
   windows_months: [3, 6, 12, 24]
   gp_winsor_p: 0.99
+  # Include missingness flags (needed for gap detection); rely on batch scoring for memory control
   add_missingness_flags: true
   use_eb_smoothing: true
+  # Enable market-basket affinities; batching handles wide matrices
   use_market_basket: true
-  use_als_embeddings: false
+  use_als_embeddings: true
   als_lookback_months: 12
   use_item2vec: false
   # Optional: run ALS over assets rollups (guarded sizes)
@@ -89,6 +91,7 @@ features:
   offset_days: [60]
   enable_window_deltas: true
   affinity_lag_days: 60
+  # Enable pooled encoders for industry smoothing; batching keeps memory bounded
   pooled_encoders_enable: true
   pooled_encoders_lookback_months: 24
   pooled_alpha_industry: 50.0

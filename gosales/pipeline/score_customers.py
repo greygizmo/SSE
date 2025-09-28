@@ -7,6 +7,7 @@ import pandas as pd
 import mlflow
 import mlflow.sklearn
 import json
+import os
 from collections.abc import Iterable
 from pathlib import Path
 import joblib
@@ -135,18 +136,191 @@ def _filter_models_by_targets(
         )
     return filtered
  
-def _sanitize_features(X: pd.DataFrame) -> pd.DataFrame:
+def _load_feature_order(model_dir: Path, meta: dict | None = None) -> list[str]:
+    """Return the canonical feature order for a trained model."""
+    candidates: list[str] = []
+    feat_list_path = model_dir / "feature_list.json"
+    try:
+        if feat_list_path.exists():
+            with open(feat_list_path, "r", encoding="utf-8") as f:
+                loaded = json.load(f) or []
+                if isinstance(loaded, list):
+                    candidates = [str(col) for col in loaded]
+    except Exception:
+        candidates = []
+    if not candidates and meta:
+        try:
+            loaded = meta.get("feature_names") or []
+            if isinstance(loaded, list):
+                candidates = [str(col) for col in loaded]
+        except Exception:
+            candidates = []
+    return candidates
+
+
+def _estimate_dense_bytes(n_rows: int, n_features: int, dtype_size: int) -> int:
+    if n_rows <= 0 or n_features <= 0:
+        return 0
+    return n_rows * n_features * dtype_size
+
+
+def _should_use_batched_scoring(n_rows: int, n_features: int) -> bool:
+    dtype_size = np.dtype(np.float32).itemsize
+    approx_bytes = _estimate_dense_bytes(n_rows, n_features, dtype_size)
+    return approx_bytes >= 800 * 1024 * 1024 or n_features >= 150_000 or n_rows >= 200_000
+
+
+def _determine_batch_rows(
+    n_rows: int,
+    n_features: int,
+    *,
+    target_bytes: int | None = None,
+) -> int:
+    if n_rows <= 0:
+        return 0
+    if target_bytes is None:
+        target_bytes = 160 * 1024 * 1024
+        env_target = os.getenv("GOSALES_BATCH_TARGET_MB")
+        if env_target:
+            try:
+                target_mb = max(32.0, float(env_target))
+                target_bytes = int(target_mb * 1024 * 1024)
+            except ValueError:
+                logger.warning("Invalid GOSALES_BATCH_TARGET_MB=%s; using default 160MB", env_target)
+    dtype_size = np.dtype(np.float32).itemsize
+    if n_features <= 0:
+        return max(1, min(n_rows, 5000))
+    rows = max(1, target_bytes // max(1, n_features * dtype_size))
+    return max(1, min(n_rows, rows))
+
+
+def _prepare_customer_names(df: pd.DataFrame | None) -> pd.DataFrame | None:
+    if df is None or df.empty:
+        return None
+    prepared = df.copy()
+    if "customer_id" in prepared.columns:
+        prepared["customer_id"] = prepared["customer_id"].astype(str)
+    return prepared
+
+
+def _compute_cold_mask(df: pd.DataFrame) -> pd.Series:
+    mask = pd.Series(False, index=df.index)
+    if df.empty:
+        return mask
+    if "rfm__all__tx_n__12m" in df.columns:
+        tx12 = pd.to_numeric(df["rfm__all__tx_n__12m"], errors="coerce").fillna(0.0)
+        mask |= tx12 <= 0
+    als_cols = [c for c in df.columns if str(c).startswith("als_f")]
+    if als_cols:
+        als_strength = df[als_cols].apply(pd.to_numeric, errors="coerce").fillna(0.0).abs().sum(axis=1)
+        mask |= als_strength <= 0
+    return mask
+
+
+def _assemble_scores_dataframe(
+    feature_matrix_pd: pd.DataFrame,
+    probabilities: np.ndarray,
+    *,
+    division_name: str,
+    cutoff: str,
+    window_months: int,
+    meta: dict,
+    run_manifest: dict | None,
+    customer_names: pd.DataFrame | None,
+) -> pd.DataFrame:
+    scores_df = feature_matrix_pd[["customer_id", "bought_in_division"]].copy()
+    scores_df["division_name"] = division_name
+    scores_df["icp_score"] = probabilities
+
+    aux_cols = [
+        "rfm__all__gp_sum__12m",
+        "affinity__div__lift_topk__12m",
+        "mb_lift_max",
+        "mb_lift_mean",
+        "total_gp_all_time",
+        "total_transactions_all_time",
+    ]
+    for aux_col in aux_cols:
+        if aux_col in feature_matrix_pd.columns and aux_col not in scores_df.columns:
+            scores_df[aux_col] = pd.to_numeric(feature_matrix_pd[aux_col], errors="coerce").fillna(0.0)
+
+    try:
+        for base in ["mb_lift_max", "mb_lift_mean"]:
+            if base not in scores_df.columns:
+                candidates = [c for c in feature_matrix_pd.columns if str(c).startswith(base)]
+                if candidates:
+                    scores_df[base] = pd.to_numeric(feature_matrix_pd[candidates[0]], errors="coerce").fillna(0.0)
+        aff_base = "affinity__div__lift_topk__12m"
+        if aff_base not in scores_df.columns:
+            aff_cands = [c for c in feature_matrix_pd.columns if str(c).startswith(aff_base)]
+            if aff_cands:
+                scores_df[aff_base] = pd.to_numeric(feature_matrix_pd[aff_cands[0]], errors="coerce").fillna(0.0)
+    except Exception:
+        pass
+
+    als_cols = [c for c in feature_matrix_pd.columns if str(c).startswith("als_f")]
+    if als_cols:
+        try:
+            scores_df[als_cols] = feature_matrix_pd[als_cols].apply(pd.to_numeric, errors="coerce").fillna(0.0)
+        except Exception:
+            for c in als_cols:
+                scores_df[c] = pd.to_numeric(feature_matrix_pd[c], errors="coerce").fillna(0.0)
+
+    i2v_cols = [c for c in feature_matrix_pd.columns if str(c).startswith("i2v_f")]
+    if i2v_cols:
+        try:
+            scores_df[i2v_cols] = feature_matrix_pd[i2v_cols].apply(pd.to_numeric, errors="coerce").fillna(0.0)
+        except Exception:
+            for c in i2v_cols:
+                scores_df[c] = pd.to_numeric(feature_matrix_pd[c], errors="coerce").fillna(0.0)
+
+    for seg_str in ["industry", "industry_sub"]:
+        if seg_str in feature_matrix_pd.columns and seg_str not in scores_df.columns:
+            try:
+                scores_df[seg_str] = feature_matrix_pd[seg_str].astype(str).fillna("")
+            except Exception:
+                pass
+
+    try:
+        tx_div_col = "rfm__div__tx_n__12m"
+        if tx_div_col in feature_matrix_pd.columns:
+            scores_df["owned_division_pre_cutoff"] = (
+                pd.to_numeric(feature_matrix_pd[tx_div_col], errors="coerce").fillna(0.0) > 0
+            ).astype(int)
+    except Exception:
+        pass
+
+    scores_df["cutoff_date"] = cutoff
+    scores_df["prediction_window_months"] = int(window_months)
+    try:
+        scores_df["calibration_method"] = meta.get("calibration_method")
+        if run_manifest is not None:
+            mv = run_manifest.get("git_sha") or run_manifest.get("run_id")
+        else:
+            mv = meta.get("trained_at")
+        scores_df["model_version"] = mv
+    except Exception:
+        pass
+
+    if customer_names is not None and not customer_names.empty:
+        scores_df["customer_id"] = scores_df["customer_id"].astype(str)
+        scores_df = scores_df.merge(customer_names, on="customer_id", how="left")
+
+    return scores_df
+
+
+def _sanitize_features(X: pd.DataFrame, *, dtype: np.dtype = np.float64) -> pd.DataFrame:
     """Ensure numeric float dtype; replace infs/NaNs with 0.0 for scoring."""
     Xc = X.copy()
     for col in Xc.columns:
         Xc[col] = pd.to_numeric(Xc[col], errors="coerce")
     Xc.replace([np.inf, -np.inf], np.nan, inplace=True)
-    return Xc.fillna(0.0).astype(float)
+    return Xc.fillna(0.0).astype(dtype)
 
 
-def _score_p_icp(model, X: pd.DataFrame) -> np.ndarray:
+def _score_p_icp(model, X: pd.DataFrame, *, dtype: np.dtype = np.float64) -> np.ndarray:
     """Predict calibrated probability after sanitizing features."""
-    Xc = _sanitize_features(X)
+    Xc = _sanitize_features(X, dtype=dtype)
     # Prefer predict_proba; fallback to decision_function if unavailable
     if hasattr(model, "predict_proba"):
         return model.predict_proba(Xc)[:, 1]
@@ -156,6 +330,105 @@ def _score_p_icp(model, X: pd.DataFrame) -> np.ndarray:
     # Final fallback: predict() then cast to float
     preds = getattr(model, "predict", lambda Z: np.zeros(len(Z)))(Xc)
     return np.asarray(preds, dtype=float)
+
+
+def _load_cold_model(norm_key: str) -> tuple[object | None, dict | None, Path | None]:
+    if not norm_key:
+        return None, None, None
+    cold_dir = MODELS_DIR / f"{norm_key}_cold_model"
+    if not cold_dir.exists():
+        return None, None, cold_dir
+    cold_model = None
+    cold_meta = None
+    cold_pkl = cold_dir / "model.pkl"
+    if cold_pkl.exists():
+        try:
+            cold_model = joblib.load(cold_pkl)
+            logger.info(f"Loaded cold-start model from {cold_pkl}")
+        except Exception as exc:
+            logger.warning(f"Failed to load cold-start model from {cold_pkl}: {exc}")
+    cold_meta_path = cold_dir / "metadata.json"
+    if cold_meta_path.exists():
+        try:
+            with open(cold_meta_path, "r", encoding="utf-8") as f:
+                cold_meta = json.load(f)
+        except Exception as exc:
+            logger.warning(f"Unable to read cold model metadata at {cold_meta_path}: {exc}")
+    return cold_model, cold_meta, cold_dir
+
+
+def _score_customers_batch(
+    feature_matrix: pl.DataFrame,
+    *,
+    model,
+    cold_model,
+    division_name: str,
+    cutoff: str,
+    window_months: int,
+    meta: dict,
+    run_manifest: dict | None,
+    train_cols: list[str],
+    cold_train_cols: list[str],
+    customer_names: pd.DataFrame | None,
+) -> pl.DataFrame:
+    n_rows = feature_matrix.height
+    feature_cols_count = len(train_cols) if train_cols else max(len(feature_matrix.columns) - 2, 0)
+    batch_rows = _determine_batch_rows(n_rows, feature_cols_count)
+    logger.info("Using batch scoring for %s (rows=%d, features=%d, batch_rows=%d)", division_name, n_rows, feature_cols_count, batch_rows)
+    frames: list[pd.DataFrame] = []
+    idx = 0
+    while idx < n_rows:
+        length = min(batch_rows, n_rows - idx)
+        part = feature_matrix.slice(idx, length)
+        part_pd = part.to_pandas()
+        feature_values = part_pd.drop(columns=["customer_id", "bought_in_division"], errors="ignore")
+        aligned = feature_values
+        if train_cols:
+            aligned = feature_values.reindex(columns=train_cols, fill_value=0.0)
+        aligned = aligned.astype(np.float32, copy=False)
+        probs = _score_p_icp(model, aligned, dtype=np.float32)
+
+        if cold_model is not None:
+            cold_mask = _compute_cold_mask(part_pd)
+            if cold_mask.any():
+                cold_features = feature_values
+                if cold_train_cols:
+                    cold_features = cold_features.reindex(columns=cold_train_cols, fill_value=0.0)
+                cold_features = cold_features.astype(np.float32, copy=False)
+                cold_scores = _score_p_icp(cold_model, cold_features, dtype=np.float32)
+                probs = np.asarray(probs, dtype=float)
+                probs[cold_mask.values] = np.asarray(cold_scores)[cold_mask.values]
+
+        chunk_scores = _assemble_scores_dataframe(
+            part_pd,
+            np.asarray(probs, dtype=float),
+            division_name=division_name,
+            cutoff=cutoff,
+            window_months=window_months,
+            meta=meta,
+            run_manifest=run_manifest,
+            customer_names=customer_names,
+        )
+
+        try:
+            if len(aligned.columns) <= 5000:
+                reasons = compute_shap_reasons(model, aligned, aligned.columns, top_k=3)
+                for col in ["reason_1", "reason_2", "reason_3"]:
+                    if col in reasons.columns:
+                        chunk_scores[col] = reasons[col]
+        except Exception:
+            pass
+
+        frames.append(chunk_scores)
+        idx += length
+
+    if not frames:
+        return pl.DataFrame()
+
+    combined = pd.concat(frames, ignore_index=True)
+    logger.info("Successfully scored %d customers for %s (batch mode)", len(combined), division_name)
+    return pl.from_pandas(combined)
+
 
 def score_customers_for_division(
     engine,
@@ -172,45 +445,23 @@ def score_customers_for_division(
     ``metadata.json``; raises ``MissingModelMetadataError`` if absent.
     """
     logger.info(f"Scoring customers for division: {division_name}")
-    
+
     # Load model via joblib pickle
     pkl = model_path / "model.pkl"
     try:
         model = joblib.load(pkl)
         logger.info(f"Loaded joblib model from {pkl}")
-    except Exception as e:
-        logger.error(f"Failed to load model from {pkl}: {e}")
+    except Exception as exc:
+        logger.error(f"Failed to load model from {pkl}: {exc}")
         return pl.DataFrame()
 
-    # Optional cold-start model (static+assets) for sparse accounts
-    cold_model = None
-    cold_meta = None
-    try:
-        from gosales.utils.normalize import normalize_division as _norm_div
-        norm_div = _norm_div(division_name)
-        norm_key = str(norm_div).lower()
-        cold_dir = MODELS_DIR / f"{norm_key}_cold_model"
-        cold_pkl = cold_dir / "model.pkl"
-        cold_meta_path = cold_dir / "metadata.json"
-        if cold_pkl.exists():
-            cold_model = joblib.load(cold_pkl)
-            logger.info(f"Loaded cold-start model from {cold_pkl}")
-            try:
-                with open(cold_meta_path, "r", encoding="utf-8") as f:
-                    cold_meta = json.load(f)
-            except Exception:
-                cold_meta = None
-    except Exception:
-        cold_model = None
-    
-    # Get feature matrix for all customers for the specified division
-    # Enforce presence of cutoff and window in metadata; if missing, fail fast
+    # Load model metadata
     meta_path = model_path / "metadata.json"
     try:
         with open(meta_path, "r", encoding="utf-8") as f:
             meta = json.load(f)
-    except Exception as e:
-        logger.error(f"Missing or unreadable metadata.json at {meta_path}: {e}")
+    except Exception as exc:
+        logger.error(f"Missing or unreadable metadata.json at {meta_path}: {exc}")
         if run_manifest is not None:
             run_manifest.setdefault("alerts", []).append({
                 "division": division_name,
@@ -249,11 +500,19 @@ def score_customers_for_division(
             })
         raise MissingModelMetadataError(msg)
 
-    # Use exact division string from metadata if present
     div_from_meta = normalize_division(meta.get("division"))
     if div_from_meta:
         division_name = div_from_meta
+
+    norm_key = normalize_division(division_name) or division_name
+    norm_key_str = str(norm_key).lower() if norm_key else str(division_name).lower()
+
+    cold_model, cold_meta, cold_dir = _load_cold_model(norm_key_str)
+    cold_train_cols = _load_feature_order(cold_dir, cold_meta) if cold_dir is not None else []
+    train_cols = _load_feature_order(model_path, meta)
+
     feature_matrix = create_feature_matrix(engine, division_name, cutoff, window_months)
+    customer_names = _prepare_customer_names(_get_dim_customer(engine))
 
     # Prevalence guardrail: if labels present and zero prevalence while training had positives, skip
     try:
@@ -271,10 +530,10 @@ def score_customers_for_division(
                     "code": "ZERO_PREVALENCE_UNEXPECTED",
                     "message": f"Prevalence is zero at cutoff {cutoff}, but training had {trained_pos} positives. Skipping division.",
                 }
-                # Instrumentation: show product_division uniques in window
                 try:
                     import pandas as _pd
                     from dateutil.relativedelta import relativedelta as _rd
+
                     cutoff_dt = _pd.to_datetime(cutoff)
                     win_end = cutoff_dt + _rd(months=int(window_months))
                     window_df = _pd.read_sql(
@@ -302,39 +561,34 @@ def score_customers_for_division(
                 return pl.DataFrame()
     except Exception:
         pass
-    
+
     if feature_matrix.is_empty():
         logger.warning(f"No feature matrix for {division_name}")
         return pl.DataFrame()
-    
-    # Prepare features for scoring (must match training)
-    X = feature_matrix.drop(["customer_id", "bought_in_division"]).to_pandas()
-    # Align columns to training feature order using saved metadata or feature_list.json
+
+    feature_cols_count = len(train_cols) if train_cols else max(len(feature_matrix.columns) - 2, 0)
+    if _should_use_batched_scoring(feature_matrix.height, feature_cols_count):
+        return _score_customers_batch(
+            feature_matrix,
+            model=model,
+            cold_model=cold_model,
+            division_name=division_name,
+            cutoff=cutoff,
+            window_months=window_months,
+            meta=meta,
+            run_manifest=run_manifest,
+            train_cols=train_cols,
+            cold_train_cols=cold_train_cols,
+            customer_names=customer_names,
+        )
+
     try:
-        train_cols: list[str] = []
-        meta_path = model_path / "metadata.json"
-        feat_list_path = model_path / "feature_list.json"
-        # Prefer explicit feature_list.json (canonical order); fallback to metadata
-        if feat_list_path.exists():
-            with open(feat_list_path, "r", encoding="utf-8") as f:
-                try:
-                    import json as _json
-                    train_cols = list(_json.load(f) or [])
-                except Exception:
-                    train_cols = []
-        if (not train_cols) and meta_path.exists():
-            with open(meta_path, "r", encoding="utf-8") as f:
-                meta = json.load(f)
-                train_cols = list(meta.get("feature_names", []) or [])
+        X = feature_matrix.drop(["customer_id", "bought_in_division"]).to_pandas()
         if train_cols:
-            # Hard reindex guarantees exact shape/order and zero‑fills missing
             missing = [c for c in train_cols if c not in X.columns]
             extra = [c for c in X.columns if c not in train_cols]
             if missing or extra:
-                logger.info(
-                    "Feature alignment: %d missing, %d extra columns (will reindex)",
-                    len(missing), len(extra)
-                )
+                logger.info("Feature alignment: %d missing, %d extra columns (will reindex)", len(missing), len(extra))
                 try:
                     if missing:
                         logger.debug("Missing top20: %s", missing[:20])
@@ -343,149 +597,47 @@ def score_customers_for_division(
                 except Exception:
                     pass
             X = X.reindex(columns=train_cols, fill_value=0.0)
-    except Exception as e:
-        # If metadata missing, proceed with current X but log
-        logger.warning(f"Feature alignment skipped due to error: {e}")
-    
-    try:
-        # Default: warm model scores for all
-        probabilities = _score_p_icp(model, X)
+        X = X.astype(np.float32, copy=False)
+        probabilities = _score_p_icp(model, X, dtype=np.float32)
 
-        # Build scores_df and carry select auxiliary features for ranker
         feature_matrix_pd = feature_matrix.to_pandas()
-        # Cold-route gating: sparse behavior (no 12m tx) or zero ALS vector
-        try:
-            cold_mask = pd.Series(False, index=feature_matrix_pd.index)
-            if 'rfm__all__tx_n__12m' in feature_matrix_pd.columns:
-                tx12 = pd.to_numeric(feature_matrix_pd['rfm__all__tx_n__12m'], errors='coerce').fillna(0.0)
-                cold_mask |= (tx12 <= 0)
-            als_cols_all = [c for c in feature_matrix_pd.columns if str(c).startswith('als_f')]
-            if als_cols_all:
-                als_abs_sum = feature_matrix_pd[als_cols_all].abs().sum(axis=1)
-                cold_mask |= (als_abs_sum <= 0)
-            # If we have a cold model, route cold rows through it (with its own feature alignment)
-            if cold_model is not None and cold_mask.any():
-                # Align features to cold model feature list if present
-                X_full = feature_matrix.drop(["customer_id", "bought_in_division"]).to_pandas()
-                cold_train_cols = []
-                cold_feat_list = (MODELS_DIR / f"{norm_key}_cold_model" / "feature_list.json")
-                if cold_feat_list.exists():
-                    try:
-                        with open(cold_feat_list, 'r', encoding='utf-8') as f:
-                            cold_train_cols = list(json.load(f) or [])
-                    except Exception:
-                        cold_train_cols = []
-                if not cold_train_cols and cold_meta is not None:
-                    cold_train_cols = list(cold_meta.get('feature_names', []) or [])
-                if cold_train_cols:
-                    X_cold = X_full.reindex(columns=cold_train_cols, fill_value=0.0)
-                else:
-                    X_cold = X_full
-                # Score cold rows only
-                cold_scores = _score_p_icp(cold_model, X_cold)
-                # Replace warm predictions with cold ones for cold rows
-                probabilities[cold_mask.values] = np.asarray(cold_scores)[cold_mask.values]
-        except Exception as _exc:
-            logger.warning(f"Cold-route scoring skipped due to error: {_exc}")
-        scores_df = feature_matrix_pd[["customer_id", "bought_in_division"]].copy()
-        scores_df['division_name'] = division_name
-        scores_df['icp_score'] = probabilities
-        # Optional EV and affinity signals
-        aux_cols = [
-            'rfm__all__gp_sum__12m',        # EV proxy
-            'affinity__div__lift_topk__12m',# affinity aggregate (if present; may have lag suffix)
-            'mb_lift_max',                  # primary basket-lift signal used by ranker (may have lag suffix)
-            'mb_lift_mean',                 # secondary (not required but useful)
-            'total_gp_all_time',            # size proxy for segment weighting
-            'total_transactions_all_time',  # size proxy for segment weighting
-        ]
-        for aux_col in aux_cols:
-            if aux_col in feature_matrix_pd.columns and aux_col not in scores_df.columns:
-                scores_df[aux_col] = pd.to_numeric(feature_matrix_pd[aux_col], errors='coerce').fillna(0.0)
-        # Handle suffix variants produced by feature builder (e.g., _lag60d)
-        try:
-            # mb_lift_max / mb_lift_mean
-            for base in ['mb_lift_max','mb_lift_mean']:
-                if base not in scores_df.columns:
-                    candidates = [c for c in feature_matrix_pd.columns if str(c).startswith(base)]
-                    if candidates:
-                        c = candidates[0]
-                        scores_df[base] = pd.to_numeric(feature_matrix_pd[c], errors='coerce').fillna(0.0)
-            # affinity aggregate
-            aff_base = 'affinity__div__lift_topk__12m'
-            if aff_base not in scores_df.columns:
-                aff_cands = [c for c in feature_matrix_pd.columns if str(c).startswith(aff_base)]
-                if aff_cands:
-                    scores_df[aff_base] = pd.to_numeric(feature_matrix_pd[aff_cands[0]], errors='coerce').fillna(0.0)
-        except Exception:
-            pass
+        cold_mask = _compute_cold_mask(feature_matrix_pd) if cold_model is not None else pd.Series(False, index=feature_matrix_pd.index)
 
-        # Pass through ALS embedding columns so ranker can compute als_norm
-        als_cols = [c for c in feature_matrix_pd.columns if str(c).startswith('als_f')]
-        if als_cols:
-            try:
-                scores_df[als_cols] = feature_matrix_pd[als_cols].apply(pd.to_numeric, errors='coerce').fillna(0.0)
-            except Exception:
-                for c in als_cols:
-                    scores_df[c] = pd.to_numeric(feature_matrix_pd[c], errors='coerce').fillna(0.0)
-        # Optional item2vec embeddings (fallback if ALS coverage low)
-        i2v_cols = [c for c in feature_matrix_pd.columns if str(c).startswith('i2v_f')]
-        if i2v_cols:
-            try:
-                scores_df[i2v_cols] = feature_matrix_pd[i2v_cols].apply(pd.to_numeric, errors='coerce').fillna(0.0)
-            except Exception:
-                for c in i2v_cols:
-                    scores_df[c] = pd.to_numeric(feature_matrix_pd[c], errors='coerce').fillna(0.0)
+        if cold_model is not None and cold_mask.any():
+            cold_features = feature_matrix.drop(["customer_id", "bought_in_division"]).to_pandas()
+            if cold_train_cols:
+                cold_features = cold_features.reindex(columns=cold_train_cols, fill_value=0.0)
+            cold_features = cold_features.astype(np.float32, copy=False)
+            cold_scores = _score_p_icp(cold_model, cold_features, dtype=np.float32)
+            probabilities = np.asarray(probabilities, dtype=float)
+            probabilities[cold_mask.values] = np.asarray(cold_scores)[cold_mask.values]
 
-        # Segment columns (strings): copy as-is if present
-        for seg_str in ['industry', 'industry_sub']:
-            if seg_str in feature_matrix_pd.columns and seg_str not in scores_df.columns:
-                try:
-                    scores_df[seg_str] = feature_matrix_pd[seg_str].astype(str).fillna("")
-                except Exception:
-                    pass
+        scores_df = _assemble_scores_dataframe(
+            feature_matrix_pd,
+            np.asarray(probabilities, dtype=float),
+            division_name=division_name,
+            cutoff=cutoff,
+            window_months=window_months,
+            meta=meta,
+            run_manifest=run_manifest,
+            customer_names=customer_names,
+        )
 
-        # Ownership flag for ALS centroid (last 12m div transactions)
-        try:
-            tx_div_col = 'rfm__div__tx_n__12m'
-            if tx_div_col in feature_matrix_pd.columns:
-                scores_df['owned_division_pre_cutoff'] = (pd.to_numeric(feature_matrix_pd[tx_div_col], errors='coerce').fillna(0.0) > 0).astype(int)
-        except Exception:
-            pass
-        # Propagate scoring metadata for auditing
-        scores_df['cutoff_date'] = cutoff
-        scores_df['prediction_window_months'] = int(window_months)
-        try:
-            scores_df['calibration_method'] = meta.get('calibration_method')
-            if run_manifest is not None:
-                mv = run_manifest.get('git_sha') or run_manifest.get('run_id')
-            else:
-                mv = meta.get('trained_at')
-            scores_df['model_version'] = mv
-        except Exception:
-            pass
-        
-        customer_names = _get_dim_customer(engine)
-        scores_df["customer_id"] = scores_df["customer_id"].astype(str)
-        customer_names["customer_id"] = customer_names["customer_id"].astype(str)
-        scores_df = scores_df.merge(customer_names, on="customer_id", how="left")
-        
-        
-        # Optional SHAP reason codes for explainability (best-effort)
         try:
             reasons = compute_shap_reasons(model, X, X.columns, top_k=3)
             reasons.index = scores_df.index
-            for i, col in enumerate(["reason_1","reason_2","reason_3"], start=1):
+            for col in ["reason_1", "reason_2", "reason_3"]:
                 if col not in scores_df.columns:
-                    scores_df[col] = reasons[f"reason_{i}"]
-        except Exception as _exc:
+                    scores_df[col] = reasons[col]
+        except Exception:
             pass
+
         logger.info(f"Successfully scored {len(scores_df)} customers for {division_name}")
         return pl.from_pandas(scores_df)
-        
-    except Exception as e:
-        logger.error(f"Failed to score customers for {division_name}: {e}")
+    except Exception as exc:
+        logger.error(f"Failed to score customers for {division_name}: {exc}")
         return pl.DataFrame()
+
 
 def generate_whitespace_opportunities(engine):
     """Generate whitespace opportunities with a lightweight scoring heuristic.

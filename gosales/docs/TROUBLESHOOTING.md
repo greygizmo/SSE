@@ -47,3 +47,18 @@
   - Ensure `implicit` is installed for ALS; a TruncatedSVD fallback is provided but requires recent activity.
 
 
+### OOM or malloc failure during scoring
+
+- `score_customers_for_division` now auto-detects wide matrices and switches to float32 batch scoring. If you still see `Unable to allocate ...` errors:
+  - Confirm you are on the latest branch and `gosales/config.yaml` keeps `add_missingness_flags`, `use_market_basket`, `use_als_embeddings`, and `pooled_encoders_enable` set to `true`. These features rely on the batch path to stay efficient.
+  - Check run logs for `Using batch scoring for <division>`; if absent, ensure metadata includes `feature_list.json` so column counts are accurate.
+  - Lower the batch target (default 160 MB) by setting `GOSALES_BATCH_TARGET_MB=96` before running `python -m gosales.pipeline.score_customers`; smaller batches trade runtime for peak memory.
+  - As a last resort, temporarily disable the heaviest family (market-basket or ALS) via config, but capture a TODO to re-enable after the run.
+
+### Training still OOMs after batching
+
+- Training remains dense on purpose. If LightGBM/LogReg blow past memory:
+  - Trim `features.windows_months` or `enable_window_deltas` to reduce column count.
+  - Drop rarely used assets toggles (e.g., `use_assets_als`) first.
+  - Validate class balance; extremely sparse divisions may be better served by cold models only.
+
