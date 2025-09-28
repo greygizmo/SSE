@@ -15,6 +15,7 @@ overall report is emitted as leakage_report_<division>_<cutoff>.json.
 from dataclasses import dataclass
 from pathlib import Path
 import json
+import math
 import re
 import sys
 from typing import Dict
@@ -27,6 +28,7 @@ from gosales.utils.paths import OUTPUTS_DIR, ROOT_DIR
 from gosales.utils.logger import get_logger
 from gosales.utils.db import get_curated_connection, get_db_connection
 from gosales.features.engine import create_feature_matrix
+from gosales.pipeline.leakage_diagnostics import run_label_permutation
 
 
 logger = get_logger(__name__)
@@ -267,6 +269,98 @@ def run_feature_date_audit(ctx: LGContext, window_months: int) -> Dict[str, str]
     summary_json = ctx.out_dir / f"feature_date_audit_{ctx.division}_{ctx.cutoff}.json"
     summary_json.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     return {"feature_date_audit": str(summary_json), "feature_date_audit_csv": str(audit_csv)}
+
+
+def run_permutation_gate(
+    ctx: LGContext,
+    window_months: int,
+    n_perm: int | None = None,
+    min_auc_gap: float | None = None,
+    max_p_value: float | None = None,
+) -> Dict[str, str]:
+    cfg = load_config()
+    val_cfg = getattr(cfg, "validation", object())
+    perm_n = int(n_perm if n_perm is not None else getattr(val_cfg, "permutation_n_perm", 50))
+    min_gap = float(min_auc_gap if min_auc_gap is not None else getattr(val_cfg, "permutation_min_auc_gap", 0.05))
+    max_p = float(max_p_value if max_p_value is not None else getattr(val_cfg, "permutation_max_p_value", 0.01))
+    mask_tail = int(getattr(val_cfg, "gauntlet_mask_tail_days", 0) or 0)
+
+    def _safe_float(value: object) -> float | None:
+        try:
+            if value is None:
+                return None
+            val = float(value)
+            if math.isnan(val):
+                return None
+            return val
+        except Exception:
+            return None
+
+    try:
+        engine = get_curated_connection()
+    except Exception:
+        engine = get_db_connection()
+
+    fm = create_feature_matrix(engine, ctx.division, ctx.cutoff, window_months, mask_tail_days=mask_tail)
+    if hasattr(fm, "is_empty") and fm.is_empty():  # type: ignore[attr-defined]
+        raise RuntimeError("Empty feature matrix for permutation gate")
+
+    if isinstance(fm, pd.DataFrame):
+        df = fm.copy()
+    elif hasattr(fm, "to_pandas"):
+        df = fm.to_pandas()  # type: ignore[assignment]
+    else:
+        df = pd.DataFrame(fm)
+
+    artifacts = run_label_permutation(ctx.out_dir, df, n_perm=perm_n)
+    diag_path_str = artifacts.get("permutation_diag")
+    if not diag_path_str:
+        raise RuntimeError("Permutation diagnostics did not emit permutation_diag.json")
+
+    diag_path = Path(diag_path_str)
+    stats = json.loads(diag_path.read_text(encoding="utf-8"))
+    baseline = _safe_float(stats.get("baseline_auc"))
+    perm_mean = _safe_float(stats.get("permuted_auc_mean"))
+    p_value = _safe_float(stats.get("p_value"))
+    gap = (baseline - perm_mean) if (baseline is not None and perm_mean is not None) else None
+
+    gap_ok = gap is not None and gap >= min_gap
+    p_ok = p_value is not None and p_value <= max_p
+    status = "PASS" if (gap_ok or p_ok) else "FAIL"
+
+    reasons: list[str] = []
+    if not gap_ok:
+        if gap is None:
+            reasons.append("Missing baseline/permuted AUC to compute degradation.")
+        else:
+            reasons.append(f"AUC degradation {gap:.4f} below minimum {min_gap:.4f}.")
+    if not p_ok:
+        if p_value is None:
+            reasons.append("Permutation p-value missing.")
+        else:
+            reasons.append(f"Permutation p-value {p_value:.4f} exceeds maximum {max_p:.4f}.")
+
+    summary: dict[str, object] = {
+        "status": status,
+        "baseline_auc": baseline,
+        "permuted_auc_mean": perm_mean,
+        "auc_degradation": gap,
+        "p_value": p_value,
+        "thresholds": {
+            "min_auc_gap": min_gap,
+            "max_p_value": max_p,
+            "n_perm": perm_n,
+        },
+        "permutation_diag": str(diag_path),
+    }
+    if reasons and status != "PASS":
+        summary["reasons"] = reasons
+
+    gate_path = ctx.out_dir / f"permutation_gate_{ctx.division}_{ctx.cutoff}.json"
+    gate_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    artifacts["permutation_gate"] = str(gate_path)
+    return artifacts
+
 
 def write_consolidated_report(ctx: LGContext, artifacts: Dict[str, str]) -> Path:
     status_map: Dict[str, str] = {}
@@ -541,6 +635,10 @@ def run_topk_ablation_dynamic(ctx: LGContext, window_months: int, k_list: list[i
 @click.option("--cutoff", required=True, help="Cutoff date YYYY-MM-DD")
 @click.option("--window-months", default=6, type=int)
 @click.option("--static-only/--no-static-only", default=False, help="Run only static checks (no dynamic checks)")
+@click.option("--run-permutation/--no-run-permutation", default=True, help="Run label permutation leakage gate")
+@click.option("--permutation-n-perm", type=int, default=None, help="Override permutation iterations for label shuffle gate")
+@click.option("--permutation-min-auc-gap", type=float, default=None, help="Minimum baseline minus permuted AUC gap for PASS")
+@click.option("--permutation-max-p-value", type=float, default=None, help="Maximum permutation p-value for PASS")
 @click.option("--run-shift14-training/--no-run-shift14-training", default=True, help="Run Shift-14 dynamic check (LR)")
 @click.option("--run-shift-grid/--no-run-shift-grid", default=False, help="Run shift-grid checks (LR)")
 @click.option("--shift14-eps-auc", type=float, default=None)
@@ -559,6 +657,10 @@ def main(
     cutoff: str,
     window_months: int,
     static_only: bool,
+    run_permutation: bool,
+    permutation_n_perm: int | None,
+    permutation_min_auc_gap: float | None,
+    permutation_max_p_value: float | None,
     run_shift14_training: bool,
     run_shift_grid: bool,
     shift14_eps_auc: float | None,
@@ -587,6 +689,23 @@ def main(
         eps_l10 = float(shift14_eps_lift10) if shift14_eps_lift10 is not None else float(getattr(getattr(cfg, 'validation', object()), 'shift14_epsilon_lift10', 0.25))
         abl_auc = float(ablation_eps_auc) if ablation_eps_auc is not None else float(getattr(getattr(cfg, 'validation', object()), 'ablation_epsilon_auc', 0.01))
         abl_l10 = float(ablation_eps_lift10) if ablation_eps_lift10 is not None else float(getattr(getattr(cfg, 'validation', object()), 'ablation_epsilon_lift10', 0.25))
+
+        if run_permutation:
+            try:
+                artifacts.update(
+                    run_permutation_gate(
+                        ctx,
+                        window_months,
+                        n_perm=permutation_n_perm,
+                        min_auc_gap=permutation_min_auc_gap,
+                        max_p_value=permutation_max_p_value,
+                    )
+                )
+            except Exception as e:
+                payload = {'status': 'FAIL', 'error': str(e)}
+                p = ctx.out_dir / f"permutation_gate_{division}_{cutoff}.json"
+                p.write_text(json.dumps(payload, indent=2), encoding='utf-8')
+                artifacts['permutation_gate'] = str(p)
 
         if run_shift14_training:
             try:

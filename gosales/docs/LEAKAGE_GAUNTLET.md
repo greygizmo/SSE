@@ -20,6 +20,7 @@ Implemented checks
 - Group overlap audit (GroupKFold by `customer_id`): ensures no customer appears in both train and validation.
 - Feature-date audit: verifies latest event dates contributing to features are <= cutoff.
 - Static scan: detects banned time calls that may read “now” during feature construction.
+- Permutation gate: SAFE-masked label shuffle; requires AUC degradation ≥ `validation.permutation_min_auc_gap` or permutation `p ≤ validation.permutation_max_p_value`.
 - Shift-14 scaffold: optional training at `cutoff-14d` and comparison vs baseline; flags suspicious improvements.
 - Top-K ablation: ranks features by importance and (optionally) retrains after dropping top-K; flags suspicious improvements.
 
@@ -63,9 +64,13 @@ validation:
 validation:
   ablation_epsilon_auc: 0.01
   ablation_epsilon_lift10: 0.25
+  permutation_min_auc_gap: 0.05
+  permutation_max_p_value: 0.01
+  permutation_n_perm: 50
 ```
 
 - Override at runtime with `--ablation-eps-auc` and `--ablation-eps-lift10`.
+- Override permutation gate at runtime with `--permutation-n-perm`, `--permutation-min-auc-gap`, and `--permutation-max-p-value`. Disable entirely via `--no-run-permutation` (not recommended outside troubleshooting).
 
 Failure behavior
 

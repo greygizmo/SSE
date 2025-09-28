@@ -178,6 +178,10 @@ class ValidationConfig:
     # Leakage Gauntlet thresholds for Top-K ablation
     ablation_epsilon_auc: float = 0.01
     ablation_epsilon_lift10: float = 0.25
+    # Leakage Gauntlet thresholds for permutation gate
+    permutation_min_auc_gap: float = 0.05
+    permutation_max_p_value: float = 0.01
+    permutation_n_perm: int = 50
     # Gauntlet-only masking: exclude last N days inside windowed aggregations
     gauntlet_mask_tail_days: int = 14
     # Gauntlet-only: purge/embargo days between train and validation
@@ -446,6 +450,9 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
             shift14_epsilon_lift10=float(val_cfg.get("shift14_epsilon_lift10", 0.25)),
             ablation_epsilon_auc=float(val_cfg.get("ablation_epsilon_auc", 0.01)),
             ablation_epsilon_lift10=float(val_cfg.get("ablation_epsilon_lift10", 0.25)),
+            permutation_min_auc_gap=float(val_cfg.get("permutation_min_auc_gap", 0.05)),
+            permutation_max_p_value=float(val_cfg.get("permutation_max_p_value", 0.01)),
+            permutation_n_perm=int(val_cfg.get("permutation_n_perm", 50)),
             gauntlet_mask_tail_days=int(val_cfg.get("gauntlet_mask_tail_days", 14)),
             gauntlet_purge_days=int(val_cfg.get("gauntlet_purge_days", 30)),
             gauntlet_label_buffer_days=int(val_cfg.get("gauntlet_label_buffer_days", 0)),

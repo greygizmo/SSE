@@ -171,6 +171,10 @@ validation:
   # Top-K ablation thresholds
   ablation_epsilon_auc: 0.01
   ablation_epsilon_lift10: 0.25
+  # Permutation gate thresholds
+  permutation_min_auc_gap: 0.05
+  permutation_max_p_value: 0.01
+  permutation_n_perm: 50
   # Gauntlet-only: subtract last N days from windowed aggregates
   gauntlet_mask_tail_days: 60
   # Gauntlet-only: embargo/purge days between train and validation folds
