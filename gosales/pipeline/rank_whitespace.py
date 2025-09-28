@@ -116,71 +116,79 @@ def _apply_eligibility_and_centroid(df: pd.DataFrame) -> Tuple[pd.DataFrame, np.
     return df, centroid
 
 
-def _compute_als_norm(df: pd.DataFrame, cfg=None, owner_centroid: np.ndarray | None = None) -> pd.Series:
-    """Compute ALS similarity normalized to [0,1].
+def _compute_als_norm(
+    df: pd.DataFrame,
+    cfg=None,
+    owner_centroid: np.ndarray | None = None,
+) -> Tuple[pd.Series, pd.Series]:
+    """Compute ALS similarity and raw signal strength.
 
-    - If owner_centroid is provided, use it; else derive from owned-pre-cutoff when available.
+    Returns a tuple ``(als_norm, als_signal_strength)`` where ``als_norm`` is the
+    percentile-normalized cosine similarity to the owner centroid, and
+    ``als_signal_strength`` captures the sum of absolute ALS embedding factors
+    per row. The raw strength is used to assess coverage and to identify rows
+    lacking embeddings (zero vectors or missing columns).
     """
-    als_cols = [c for c in df.columns if c.startswith("als_f")]
-    centroid: np.ndarray | None = None
-    if als_cols and "owned_division_pre_cutoff" in df.columns:
-        owners = df[df["owned_division_pre_cutoff"].astype(bool)]
-        if not owners.empty:
-            centroid = owners[als_cols].astype(float).mean(axis=0).to_numpy(dtype=float)
-            try:
-                ALS_CENTROID_PATH.parent.mkdir(parents=True, exist_ok=True)
-                np.save(ALS_CENTROID_PATH, centroid)
-            except Exception:
-                pass
-        elif ALS_CENTROID_PATH.exists():
-            try:
-                centroid = np.load(ALS_CENTROID_PATH)
-            except Exception:
-                centroid = None
-    elif ALS_CENTROID_PATH.exists():
-        try:
-            centroid = np.load(ALS_CENTROID_PATH)
-        except Exception:
-            centroid = None
 
-    if "owned_division_pre_cutoff" in df.columns:
-        df = df[~df["owned_division_pre_cutoff"].astype(bool)].copy()
+    if df.empty:
+        empty = pd.Series(np.zeros(len(df)), index=df.index, dtype=float)
+        return empty, empty.copy()
 
-    return df, centroid
-
-
-def _compute_als_norm(df: pd.DataFrame, cfg=None, owner_centroid: np.ndarray | None = None) -> pd.Series:
-    """Compute ALS similarity normalized to [0,1].
-
-    - If ``owner_centroid`` is provided, use it for similarity.
-    - Else, prefer centroid of rows where ``owned_division_pre_cutoff`` is True.
-      Fall back to global centroid if no owned rows.
-    """
     als_cols = [c for c in df.columns if c.startswith("als_f")]
     if not als_cols:
-        return pd.Series(np.zeros(len(df)), index=df.index, dtype=float)
-    mat = df[als_cols].astype(float)
+        empty = pd.Series(np.zeros(len(df)), index=df.index, dtype=float)
+        return empty, empty.copy()
+
+    mat = (
+        df[als_cols]
+        .apply(pd.to_numeric, errors="coerce")
+        .fillna(0.0)
+    )
     if mat.empty:
-        return pd.Series(np.zeros(len(df)), index=df.index, dtype=float)
+        empty = pd.Series(np.zeros(len(df)), index=df.index, dtype=float)
+        return empty, empty.copy()
+
+    # Measure raw embedding strength before any normalization.
+    raw_strength = mat.abs().sum(axis=1).astype(float)
 
     if owner_centroid is not None:
         centroid_vec = np.asarray(owner_centroid, dtype=float)
     else:
-        if 'owned_division_pre_cutoff' in df.columns:
-            try:
-                base = mat[df['owned_division_pre_cutoff'].astype(bool)]
-                centroid_vec = (base.mean(axis=0) if not base.empty else mat.mean(axis=0)).to_numpy(dtype=float)
-            except Exception:
-                centroid_vec = mat.mean(axis=0).to_numpy(dtype=float)
-        else:
+        try:
+            valid_mask = raw_strength > 0
+            if 'owned_division_pre_cutoff' in df.columns:
+                owned_mask = df['owned_division_pre_cutoff'].astype(bool) & valid_mask
+            else:
+                owned_mask = valid_mask
+            if owned_mask.any():
+                centroid_source = mat.loc[owned_mask]
+            elif valid_mask.any():
+                centroid_source = mat.loc[valid_mask]
+            else:
+                centroid_source = mat
+            centroid_vec = centroid_source.mean(axis=0).to_numpy(dtype=float)
+        except Exception:
             centroid_vec = mat.mean(axis=0).to_numpy(dtype=float)
 
-    m = mat.to_numpy(dtype=float)
-    # Normalize embeddings and centroid to unit length prior to similarity calc
-    m_norm = normalize(m, axis=1)
-    centroid_norm = normalize(centroid_vec.reshape(1, -1), axis=1)
-    sims = cosine_similarity(m_norm, centroid_norm).ravel()
-    return _percentile_normalize(pd.Series(sims, index=df.index))
+    if centroid_vec.shape[0] != mat.shape[1]:
+        centroid_vec = mat.mean(axis=0).to_numpy(dtype=float)
+
+    sims = np.zeros(len(df), dtype=float)
+    valid_rows = raw_strength > 0
+    if valid_rows.any():
+        m_valid = mat.loc[valid_rows].to_numpy(dtype=float)
+        try:
+            m_norm = normalize(m_valid, axis=1)
+            centroid_norm = normalize(centroid_vec.reshape(1, -1), axis=1)
+            sims_valid = cosine_similarity(m_norm, centroid_norm).ravel()
+        except Exception:
+            sims_valid = np.zeros(len(m_valid), dtype=float)
+        sims[valid_rows.to_numpy()] = sims_valid
+
+    als_norm = _percentile_normalize(pd.Series(sims, index=df.index))
+    als_norm.loc[~valid_rows] = 0.0
+
+    return als_norm.astype(float), raw_strength
 
 
 def _compute_expected_value(df: pd.DataFrame, cfg=None) -> pd.Series:
@@ -344,15 +352,23 @@ def _apply_eligibility(df: pd.DataFrame, cfg) -> tuple[pd.DataFrame, dict]:
     else:
         logger.info("Eligibility applied: %s kept, %s dropped", counts["kept_rows"], dropped)
     return df[mask].copy(), counts
-def _scale_weights_by_coverage(base_weights: Iterable[float], als_norm: pd.Series, lift_norm: pd.Series, threshold: float = 0.30) -> Tuple[List[float], Dict[str, float]]:
+def _scale_weights_by_coverage(
+    base_weights: Iterable[float],
+    als_norm: pd.Series,
+    lift_norm: pd.Series,
+    threshold: float = 0.30,
+    *,
+    als_signal: pd.Series | None = None,
+) -> Tuple[List[float], Dict[str, float]]:
     w = list(base_weights)
     if len(w) != 4:
         raise ValueError("Expected 4 weights: [p_icp_pct, lift, als, ev]")
     adjustments: Dict[str, float] = {}
     def coverage(s: pd.Series) -> float:
-        return float((pd.to_numeric(s, errors='coerce').fillna(0.0) > 0).mean())
+        arr = pd.to_numeric(s, errors="coerce").fillna(0.0)
+        return float((arr > 0).mean())
     cov_lift = coverage(lift_norm)
-    cov_als = coverage(als_norm)
+    cov_als = coverage(als_signal if als_signal is not None else als_norm)
     # Downweight components with low coverage; keep p_icp and ev fixed
     # Scale factor = min(1, cov/threshold) so when cov<th, shrink proportionally
     def factor(cov: float) -> float:
@@ -542,7 +558,9 @@ def rank_whitespace(inputs: RankInputs, *, weights: Iterable[float] = (0.60, 0.2
     df['p_icp_pct'] = df.groupby('division_name')['p_icp'].transform(_percentile_normalize)
     # Affinity lift and ALS similarity
     df['lift_norm'] = _compute_affinity_lift(df)
-    df['als_norm'] = _compute_als_norm(df, owner_centroid=als_centroid)
+    als_norm, als_signal_strength = _compute_als_norm(df, owner_centroid=als_centroid)
+    df['als_norm'] = als_norm
+    df['_als_signal_strength'] = als_signal_strength
     # ALS coverage enforcement and optional assets-ALS / item2vec backfill
     try:
         from gosales.utils.config import load_config
@@ -553,13 +571,31 @@ def rank_whitespace(inputs: RankInputs, *, weights: Iterable[float] = (0.60, 0.2
         als_thr = 0.30
         use_i2v = False
     try:
-        cov_als = (pd.to_numeric(df['als_norm'], errors='coerce').fillna(0.0) > 0).mean()
+        cov_als = (
+            pd.to_numeric(df['_als_signal_strength'], errors='coerce').fillna(0.0) > 0
+        ).mean()
     except Exception:
         cov_als = 0.0
     # Prefer assets-ALS fallback when available, else item2vec
-    assets_als_present = any(c.startswith('als_assets_f') for c in df.columns)
+    assets_cols = [c for c in df.columns if c.startswith('als_assets_f')]
+    assets_als_present = bool(assets_cols)
+    assets_signal_strength = None
+    if assets_als_present:
+        try:
+            assets_signal_strength = (
+                df[assets_cols]
+                .apply(pd.to_numeric, errors='coerce')
+                .fillna(0.0)
+                .abs()
+                .sum(axis=1)
+                .astype(float)
+            )
+        except Exception:
+            assets_signal_strength = None
     if cov_als < als_thr:
-        mask_zero_als = pd.to_numeric(df['als_norm'], errors='coerce').fillna(0.0) <= 0
+        mask_zero_als = (
+            pd.to_numeric(df['_als_signal_strength'], errors='coerce').fillna(0.0) <= 0
+        )
         if assets_als_present:
             try:
                 aals = _compute_assets_als_norm(df, owner_centroid=None)
@@ -571,9 +607,15 @@ def rank_whitespace(inputs: RankInputs, *, weights: Iterable[float] = (0.60, 0.2
         i2v_present = any(c.startswith('i2v_f') for c in df.columns)
         if (use_i2v or i2v_present):
             i2v_norm = _compute_item2vec_norm(df, owner_centroid=None)
-            mask_zero_als = pd.to_numeric(df['als_norm'], errors='coerce').fillna(0.0) <= 0
-            if mask_zero_als.any():
-                df.loc[mask_zero_als, 'als_norm'] = i2v_norm[mask_zero_als]
+            mask_i2v = mask_zero_als
+            if assets_signal_strength is not None:
+                mask_i2v = mask_i2v & (assets_signal_strength.fillna(0.0) <= 0.0)
+            if not mask_i2v.any():
+                mask_i2v = (
+                    pd.to_numeric(df['als_norm'], errors='coerce').fillna(0.0) <= 0
+                ) & mask_zero_als
+            if mask_i2v.any():
+                df.loc[mask_i2v, 'als_norm'] = i2v_norm[mask_i2v]
     # EV proxy with cap and normalization
     try:
         from gosales.utils.config import load_config
@@ -623,9 +665,21 @@ def rank_whitespace(inputs: RankInputs, *, weights: Iterable[float] = (0.60, 0.2
             idx = g.index
             if len(g) < seg_min_rows:
                 # Fall back to global weights
-                w_adj, _ = _scale_weights_by_coverage(list(weights), df.loc[idx, 'als_norm'], df.loc[idx, 'lift_norm'], threshold=als_cov_thr)
+                w_adj, _ = _scale_weights_by_coverage(
+                    list(weights),
+                    df.loc[idx, 'als_norm'],
+                    df.loc[idx, 'lift_norm'],
+                    threshold=als_cov_thr,
+                    als_signal=df.loc[idx, '_als_signal_strength'],
+                )
             else:
-                w_adj, _ = _scale_weights_by_coverage(list(weights), g['als_norm'], g['lift_norm'], threshold=als_cov_thr)
+                w_adj, _ = _scale_weights_by_coverage(
+                    list(weights),
+                    g['als_norm'],
+                    g['lift_norm'],
+                    threshold=als_cov_thr,
+                    als_signal=g['_als_signal_strength'],
+                )
             sc = (
                 w_adj[0] * g['p_icp_pct'] +
                 w_adj[1] * g['lift_norm'] +
@@ -634,7 +688,13 @@ def rank_whitespace(inputs: RankInputs, *, weights: Iterable[float] = (0.60, 0.2
             ).astype(float)
             df.loc[idx, 'score'] = sc
     else:
-        w_adj, _ = _scale_weights_by_coverage(list(weights), df['als_norm'], df['lift_norm'], threshold=als_cov_thr)
+        w_adj, _ = _scale_weights_by_coverage(
+            list(weights),
+            df['als_norm'],
+            df['lift_norm'],
+            threshold=als_cov_thr,
+            als_signal=df['_als_signal_strength'],
+        )
         champion_score = (
             w_adj[0] * df['p_icp_pct'] +
             w_adj[1] * df['lift_norm'] +
@@ -738,3 +798,4 @@ def save_ranked_whitespace(df: pd.DataFrame, *, cutoff_tag: str | None = None) -
     path = OUTPUTS_DIR / name
     df.to_csv(path, index=False)
     return path
+
