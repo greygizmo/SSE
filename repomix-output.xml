@@ -51,10 +51,10 @@ gosales/docs/architecture/13_segments_and_embeddings.mmd
 gosales/docs/architecture/README.md
 gosales/docs/customer_feature_recommendations.md
 gosales/docs/FEATURES_AND_CONFIG.md
-gosales/docs/GoSales_Codex_Briefing_FRESH.md
-gosales/docs/GoSales_Codex_Playbook_Shift14_Gauntlet.md
+gosales/docs/legacy/GoSales_Codex_Briefing_FRESH.md
+gosales/docs/legacy/GoSales_Codex_Playbook_Shift14_Gauntlet.md
 gosales/docs/GoSales_Roadmap_TODO.md
-gosales/docs/GoSales_Shift14_Leakage_Gauntlet_GUIDE.md
+gosales/docs/legacy/GoSales_Shift14_Leakage_Gauntlet_GUIDE.md
 gosales/docs/GPT5_PRO_PROMPT.txt
 gosales/docs/GPT5_suggestions.md
 gosales/docs/grok_suggestions.md
@@ -12138,7 +12138,7 @@ scripts/train_all_models.py</directory_structure><files>This section contains th
 132: - Add Pandera/Great Expectations‑style checks to enforce ID casting to string and date recency bounds for lifecycle fields.
 133: - Pilot feature importance on a held‑out division to confirm lift from territory/lifecycle/tech‑stack groups before expanding breadth.
 134: 
-135: [Tyler&apos;s notes: we should add the milestone_* columns because they are marking the date when our Customer Success team takes a customer through a milestone (typically done in the year following a new purchase), however these must adhere to the cutoff date. Also, the &quot;named account&quot; columns could be helpful because they are signaling strategic accounts internally]</file><file path="gosales/docs/GoSales_Codex_Briefing_FRESH.md">  1: # GoSales — Fresh Briefing for Codex Agent  
+135: [Tyler&apos;s notes: we should add the milestone_* columns because they are marking the date when our Customer Success team takes a customer through a milestone (typically done in the year following a new purchase), however these must adhere to the cutoff date. Also, the &quot;named account&quot; columns could be helpful because they are signaling strategic accounts internally]</file><file path="gosales/docs/legacy/GoSales_Codex_Briefing_FRESH.md">  1: # GoSales — Fresh Briefing for Codex Agent  
   2: **Topic:** Shift‑14 Leakage Gauntlet, time‑adjacent signal, and how to stabilize honest accuracy  
   3: **Owner:** GoSales Engine / Division ICP &amp; Whitespace  
   4: **Audience:** Codex Agent (fresh session), MLOps/FE/Trainer maintainers  
@@ -12389,7 +12389,7 @@ scripts/train_all_models.py</directory_structure><files>This section contains th
 249: 
 250: ---
 251: 
-252: *End of brief.*</file><file path="gosales/docs/GoSales_Codex_Playbook_Shift14_Gauntlet.md">  1: # GoSales Codex Playbook — Shift‑14 Leakage Gauntlet, Time‑Adjacency, and Honest Accuracy
+252: *End of brief.*</file><file path="gosales/docs/legacy/GoSales_Codex_Playbook_Shift14_Gauntlet.md">  1: # GoSales Codex Playbook — Shift‑14 Leakage Gauntlet, Time‑Adjacency, and Honest Accuracy
   2: 
   3: **Audience:** OpenAI Codex CLI agent (and human reviewers)  
   4: **Objective:** Provide every detail needed to (1) understand why our models looked “too good,” (2) harden evaluation against time‑adjacency and cross‑customer leakage, (3) patch the code with unified diffs, and (4) validate that models remain accurate in a horizon‑robust way that truly helps sales reps.
@@ -12985,7 +12985,7 @@ scripts/train_all_models.py</directory_structure><files>This section contains th
 594: 
 595: ---
 596: 
-597: **End of file.**</file><file path="gosales/docs/GoSales_Shift14_Leakage_Gauntlet_GUIDE.md">  1: # GoSales – Shift‑14 Leakage Gauntlet Failures &amp; “Suspiciously Accurate” Models
+597: **End of file.**</file><file path="gosales/docs/legacy/GoSales_Shift14_Leakage_Gauntlet_GUIDE.md">  1: # GoSales – Shift‑14 Leakage Gauntlet Failures &amp; “Suspiciously Accurate” Models
   2: **Audience:** OpenAI Codex CLI agent (and human reviewers)  
   3: **Goal:** Provide a complete, code‑forward plan to (1) diagnose why models look “too good,” (2) fix evaluation contamination, (3) harden the Leakage Gauntlet, and (4) validate horizon‑robust performance.
   4: 
