@@ -117,6 +117,13 @@ This catalog enumerates every artifact the GoSales Engine produces across the pi
 
 ---
 
+### Whitespace: Centroid Cache Files
+
+| Artifact | Location Pattern | Purpose | Importance |
+| --- | --- | --- | --- |
+| `als_owner_centroid_<division>.npy` | `gosales/outputs/` | Division-specific ALS owner centroid used for ALS similarity during whitespace ranking. | Prevents cross-division leakage and stabilizes per-division scoring. |
+| `assets_als_owner_centroid_<division>.npy` | `gosales/outputs/` | Division-specific assets-ALS centroid used as a fallback similarity when ALS embeddings are sparse. | Improves coverage via assets signals while remaining division-scoped. |
+
 ## Phase 3 Diagnostics (New)
 
 In addition to the per-cutoff model artifacts above, training now emits a division-level diagnostics JSON to aid triage and auditing.
