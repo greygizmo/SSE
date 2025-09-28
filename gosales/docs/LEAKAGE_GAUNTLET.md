@@ -2,6 +2,19 @@
 
 This suite verifies that features and splits are leakage-safe and that “too good to be true” metrics do not persist under stress tests.
 
+### leakage_diagnostics CLI
+
+Use the streamlined diagnostics runner to generate SAFE-masked permutation and importance stability artifacts without invoking the full Gauntlet automation.
+
+```powershell
+$env:PYTHONPATH = "$PWD"; python -m gosales.pipeline.leakage_diagnostics --division Printers --cutoff 2024-12-31 --window-months 6 --n-perm 50 --n-subsets 5
+```
+
+Artifacts land in `gosales/outputs/leakage/<division>/<cutoff>/` as `permutation_diag.json`, `importance_stability.json`, and optional plots.
+
+The `run_leakage_gauntlet` CLI remains for full certification and is now documented under `gosales/docs/legacy/`.
+
+
 Implemented checks
 
 - Group overlap audit (GroupKFold by `customer_id`): ensures no customer appears in both train and validation.

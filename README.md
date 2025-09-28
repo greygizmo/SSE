@@ -278,12 +278,9 @@ gosales/
   - Signals propagated to ranker: `mb_lift_max`, `mb_lift_mean`, `als_f*`, and EV proxy. Capacity summary now exported as `capacity_summary_<cutoff>.csv`.
   - Output writer is resilient to Windows file locks on `icp_scores.csv`; a timestamped fallback is written and a warning logged.
 
-- Leakage Gauntlet
-  - `gosales/pipeline/run_leakage_gauntlet.py --division <Div> --cutoff YYYY-MM-DD` runs:
-    - GroupKFold‑by‑customer overlap audit → `fold_customer_overlap_*` CSV
-    - Feature‑date audit for transactions/assets → `feature_date_audit_*` CSV
-    - Static source scan for banned time calls → `static_scan_*` JSON
-    - Consolidated `leakage_report_*` with PASS/FAIL, non‑zero exit on failure
+- Leakage diagnostics
+  - `python -m gosales.pipeline.leakage_diagnostics --division <Div> --cutoff YYYY-MM-DD --window-months 6` runs SAFE-masked permutation tests and importance stability bootstraps; artifacts land in `gosales/outputs/leakage/<Div>/<cutoff>/`.
+  - Full Gauntlet automation (`python -m gosales.pipeline.run_leakage_gauntlet`) remains available for legacy gating; see `gosales/docs/legacy/` for the archived playbooks.
 
 - Metrics roll‑up
   - `scripts/metrics_summary.py` creates `gosales/outputs/metrics_summary.csv` from `metrics_*.json` across divisions.
