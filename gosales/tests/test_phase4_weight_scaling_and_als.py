@@ -1,9 +1,12 @@
 import pandas as pd
+import pytest
 
 from gosales.pipeline.rank_whitespace import (
     _scale_weights_by_coverage,
     _compute_als_norm,
     _compute_affinity_lift,
+    _compute_assets_als_norm,
+    _compute_item2vec_norm,
     RankInputs,
     rank_whitespace,
 )
@@ -82,5 +85,35 @@ def test_rank_whitespace_assets_fallback_for_sparse_als():
     assert res.loc["c4", "als_norm"] > 0
     # The true ALS row should remain competitive
     assert res.loc["c1", "als_norm"] >= res.loc["c2", "als_norm"]
+
+
+def test_rank_whitespace_item2vec_only_fills_remaining_zero_rows():
+    df = pd.DataFrame(
+        {
+            "division_name": ["A"] * 5,
+            "customer_id": ["c1", "c2", "c3", "c4", "c5"],
+            "icp_score": [0.2, 0.3, 0.4, 0.1, 0.05],
+            "als_f0": [0.9, 0.0, 0.0, 0.0, 0.0],
+            "als_f1": [0.8, 0.0, 0.0, 0.0, 0.0],
+            "als_assets_f0": [0.1, 0.6, 0.0, 0.0, 0.0],
+            "als_assets_f1": [0.2, 0.6, 0.0, 0.0, 0.0],
+            "i2v_f0": [0.2, 0.1, 0.5, 0.0, 0.0],
+            "i2v_f1": [0.2, 0.1, 0.5, 0.0, 0.0],
+        }
+    )
+    inputs = RankInputs(scores=df)
+    result = rank_whitespace(inputs, weights=(0.0, 0.0, 1.0, 0.0))
+    res = result.set_index("customer_id")
+
+    assets_norm = _compute_assets_als_norm(df, owner_centroid=None)
+    i2v_norm = _compute_item2vec_norm(df, owner_centroid=None)
+
+    assets_norm.index = df['customer_id']
+    i2v_norm.index = df['customer_id']
+
+    assert res.loc["c2", "als_norm"] == pytest.approx(assets_norm.loc["c2"])
+    assert res.loc["c3", "als_norm"] == pytest.approx(i2v_norm.loc["c3"])
+    # Asset fallback should remain stronger than i2v for row c2
+    assert res.loc["c2", "als_norm"] > res.loc["c3", "als_norm"]
 
 

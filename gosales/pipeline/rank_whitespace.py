@@ -577,7 +577,21 @@ def rank_whitespace(inputs: RankInputs, *, weights: Iterable[float] = (0.60, 0.2
     except Exception:
         cov_als = 0.0
     # Prefer assets-ALS fallback when available, else item2vec
-    assets_als_present = any(c.startswith('als_assets_f') for c in df.columns)
+    assets_cols = [c for c in df.columns if c.startswith('als_assets_f')]
+    assets_als_present = bool(assets_cols)
+    assets_signal_strength = None
+    if assets_als_present:
+        try:
+            assets_signal_strength = (
+                df[assets_cols]
+                .apply(pd.to_numeric, errors='coerce')
+                .fillna(0.0)
+                .abs()
+                .sum(axis=1)
+                .astype(float)
+            )
+        except Exception:
+            assets_signal_strength = None
     if cov_als < als_thr:
         mask_zero_als = (
             pd.to_numeric(df['_als_signal_strength'], errors='coerce').fillna(0.0) <= 0
@@ -593,11 +607,15 @@ def rank_whitespace(inputs: RankInputs, *, weights: Iterable[float] = (0.60, 0.2
         i2v_present = any(c.startswith('i2v_f') for c in df.columns)
         if (use_i2v or i2v_present):
             i2v_norm = _compute_item2vec_norm(df, owner_centroid=None)
-            mask_zero_als = (
-                pd.to_numeric(df['_als_signal_strength'], errors='coerce').fillna(0.0) <= 0
-            )
-            if mask_zero_als.any():
-                df.loc[mask_zero_als, 'als_norm'] = i2v_norm[mask_zero_als]
+            mask_i2v = mask_zero_als
+            if assets_signal_strength is not None:
+                mask_i2v = mask_i2v & (assets_signal_strength.fillna(0.0) <= 0.0)
+            if not mask_i2v.any():
+                mask_i2v = (
+                    pd.to_numeric(df['als_norm'], errors='coerce').fillna(0.0) <= 0
+                ) & mask_zero_als
+            if mask_i2v.any():
+                df.loc[mask_i2v, 'als_norm'] = i2v_norm[mask_i2v]
     # EV proxy with cap and normalization
     try:
         from gosales.utils.config import load_config
@@ -780,3 +798,4 @@ def save_ranked_whitespace(df: pd.DataFrame, *, cutoff_tag: str | None = None) -
     path = OUTPUTS_DIR / name
     df.to_csv(path, index=False)
     return path
+
