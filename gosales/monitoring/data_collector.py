@@ -5,20 +5,35 @@ data-quality indicators.  This module provides a collector class that assembles
 those signals from the database, filesystem, and host machine so dashboards can
 render a holistic view of nightly runs.
 """
+import csv
 import json
+import math
 import time
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 try:
     import psutil
     PSUTIL_AVAILABLE = True
 except ImportError:
     PSUTIL_AVAILABLE = False
-import sqlite3
+
+
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 
 from gosales.utils.paths import OUTPUTS_DIR
 from gosales.utils.db import get_db_connection
+from gosales.utils.logger import get_logger
+
+
+logger = get_logger(__name__)
+
+try:
+    from sqlalchemy import text as sql_text  # type: ignore
+except Exception:  # pragma: no cover - optional dependency
+    sql_text = None  # type: ignore
 
 
 class MonitoringDataCollector:
@@ -47,7 +62,7 @@ class MonitoringDataCollector:
         """Calculate overall data quality score based on various factors."""
         try:
             # Check if recent validation metrics exist
-            validation_files = list(OUTPUTS_DIR.glob("validation_metrics_*.json"))
+            validation_files = self._find_validation_metric_files()
             if validation_files:
                 latest_validation = max(validation_files, key=lambda x: x.stat().st_mtime)
                 with open(latest_validation, 'r') as f:
@@ -70,33 +85,371 @@ class MonitoringDataCollector:
 
     def _calculate_type_consistency_score(self) -> float:
         """Calculate type consistency score."""
-        try:
-            # Check database for type consistency
-            engine = get_db_connection()
-            if engine:
-                # Query a sample of customer_ids to check types
-                sample_query = """
-                SELECT customer_id FROM dim_customer LIMIT 10
-                UNION ALL
-                SELECT customer_id FROM fact_transactions LIMIT 10
-                """
-                # This is a simplified check - in practice you'd do more thorough analysis
-                return 98.5
-        except Exception:
-            pass
 
-        return 95.0
+        conservative_default = 92.0
+        fallback_default = 95.0
+
+        try:
+            engine = get_db_connection()
+            if not engine:
+                logger.warning("Database connection unavailable; using fallback type consistency score.")
+                return fallback_default
+
+            sample_query = """
+            SELECT 'dim_customer' AS source_table, customer_id FROM dim_customer LIMIT 10
+            UNION ALL
+            SELECT 'fact_transactions' AS source_table, customer_id FROM fact_transactions LIMIT 10
+            """
+
+            with engine.connect() as conn:
+                result = conn.execute(text(sample_query))
+                raw_rows = result.fetchall()
+
+        except SQLAlchemyError as exc:
+            logger.error("Type consistency query failed: %s", exc)
+            return conservative_default
+        except Exception as exc:
+            logger.error("Unexpected error while calculating type consistency: %s", exc)
+            return conservative_default
+
+        if not raw_rows:
+            logger.info("Type consistency sample query returned no rows; using fallback score.")
+            return fallback_default
+
+        sample_values = []
+        per_source_types = {}
+
+        for row in raw_rows:
+            source = 'unknown'
+            value = None
+
+            if isinstance(row, dict):
+                source = row.get('source_table', source)
+                value = row.get('customer_id')
+            elif hasattr(row, '_mapping'):
+                mapping = row._mapping
+                source = mapping.get('source_table', source)
+                if 'customer_id' in mapping:
+                    value = mapping['customer_id']
+                elif mapping:
+                    first_key = next(iter(mapping))
+                    value = mapping[first_key]
+            elif isinstance(row, (list, tuple)):
+                if len(row) >= 2:
+                    source, value = row[0], row[1]
+                elif row:
+                    value = row[0]
+            else:
+                value = getattr(row, 'customer_id', row)
+
+            sample_values.append(value)
+            per_source_types.setdefault(source, set()).add('NULL' if value is None else type(value).__name__)
+
+        observed_types = Counter(
+            'NULL' if value is None else type(value).__name__
+            for value in sample_values
+        )
+
+        predominant_count = observed_types.most_common(1)[0][1]
+        total_samples = len(sample_values)
+        consistency_ratio = predominant_count / total_samples
+
+        score = 100.0 - (1.0 - consistency_ratio) * 40.0
+
+        if any(len(type_names) > 1 for type_names in per_source_types.values()):
+            score -= 5.0
+
+        score = max(round(score, 2), 0.0)
+
+        logger.info("Derived type consistency score %.2f using distribution %s", score, dict(observed_types))
+
+        return score
 
     def _collect_performance_metrics(self) -> Dict[str, Any]:
         """Collect performance metrics from recent runs."""
-        performance = {
-            'processing_rate': 10125,  # records per second
-            'memory_usage': self._get_memory_usage(),
-            'active_divisions': 7,
-            'total_customers': 25261
-        }
+        run_context = self._load_latest_run_context()
+        performance: Dict[str, Any] = {}
+        fallbacks: Dict[str, str] = {}
+
+        processing_rate = self._derive_processing_rate(run_context)
+        if processing_rate is None:
+            processing_rate = 0.0
+            fallbacks['processing_rate'] = (
+                'No run artifacts with records and duration were available; '
+                'defaulted processing_rate to 0.0 records/s.'
+            )
+        performance['processing_rate'] = processing_rate
+
+        performance['memory_usage'] = self._get_memory_usage()
+
+        division_labels = self._derive_active_divisions(run_context)
+        if division_labels:
+            performance['active_divisions'] = len(division_labels)
+            performance['division_labels'] = division_labels
+        else:
+            performance['active_divisions'] = 0
+            fallbacks['active_divisions'] = (
+                'No division metadata found in recent manifests or outputs; '
+                'defaulted active_divisions to 0.'
+            )
+
+        total_customers = self._derive_total_customers(run_context)
+        if total_customers is None:
+            total_customers = 0
+            fallbacks['total_customers'] = (
+                'Unable to determine customer counts from the database or outputs; '
+                'defaulted total_customers to 0.'
+            )
+        performance['total_customers'] = total_customers
+
+        if fallbacks:
+            performance['fallbacks'] = fallbacks
 
         return performance
+
+    def _load_latest_run_context(self) -> Optional[Dict[str, Any]]:
+        """Return the most recent run context manifest if it exists."""
+        try:
+            if not OUTPUTS_DIR.exists():
+                return None
+            run_files = list(OUTPUTS_DIR.glob("run_context_*.json"))
+            if not run_files:
+                return None
+            latest = max(run_files, key=lambda p: p.stat().st_mtime)
+            with latest.open('r', encoding='utf-8') as fh:
+                return json.load(fh)
+        except Exception:
+            return None
+
+    def _derive_processing_rate(self, run_context: Optional[Dict[str, Any]]) -> Optional[float]:
+        """Derive records-per-second processing rate from run artifacts."""
+        if isinstance(run_context, dict):
+            for path in (
+                ('performance', 'processing_rate'),
+                ('metrics', 'processing_rate'),
+                ('processing_rate',),
+            ):
+                value: Any = run_context
+                try:
+                    for key in path:
+                        value = value[key]  # type: ignore[index]
+                except Exception:
+                    continue
+                numeric = self._coerce_float(value)
+                if numeric is not None:
+                    return numeric
+
+            steps = run_context.get('steps')
+            if isinstance(steps, list):
+                total_records = 0.0
+                total_duration = 0.0
+                for step in steps:
+                    if not isinstance(step, dict):
+                        continue
+                    records = self._coerce_int(
+                        step.get('records_processed')
+                        or step.get('records')
+                        or step.get('output_rows')
+                    )
+                    duration = self._coerce_float(
+                        step.get('duration_seconds') or step.get('duration')
+                    )
+                    if records is None or duration is None or duration <= 0:
+                        continue
+                    total_records += float(records)
+                    total_duration += duration
+
+                if total_records > 0 and total_duration > 0:
+                    return total_records / total_duration
+
+        return None
+
+    def _derive_active_divisions(self, run_context: Optional[Dict[str, Any]]) -> List[str]:
+        """Collect unique division labels from manifests or output files."""
+
+        def add_divisions(values: Any, acc: List[str]) -> None:
+            if not values:
+                return
+            if isinstance(values, str):
+                candidate_list = [values]
+            elif isinstance(values, (list, tuple, set)):
+                candidate_list = list(values)
+            else:
+                return
+            for raw in candidate_list:
+                label = str(raw).strip()
+                if not label:
+                    continue
+                if label not in acc:
+                    acc.append(label)
+
+        divisions: List[str] = []
+
+        if isinstance(run_context, dict):
+            add_divisions(run_context.get('divisions_scored'), divisions)
+            add_divisions(run_context.get('divisions'), divisions)
+
+            performance = run_context.get('performance')
+            if isinstance(performance, dict):
+                add_divisions(performance.get('divisions'), divisions)
+
+            metadata = run_context.get('metadata')
+            if isinstance(metadata, dict):
+                add_divisions(metadata.get('divisions_scored'), divisions)
+
+            steps = run_context.get('steps')
+            if isinstance(steps, list):
+                for step in steps:
+                    if isinstance(step, dict):
+                        add_divisions(step.get('division') or step.get('segment'), divisions)
+
+        if divisions:
+            return divisions
+
+        try:
+            if OUTPUTS_DIR.exists():
+                metric_paths = list(OUTPUTS_DIR.glob("metrics_*.json"))
+            else:
+                metric_paths = []
+            metric_paths.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+            for path in metric_paths:
+                stem = path.stem
+                parts = stem.split('_', 1)
+                if len(parts) == 2:
+                    add_divisions(parts[1], divisions)
+        except Exception:
+            return divisions
+
+        return divisions
+
+    def _derive_total_customers(self, run_context: Optional[Dict[str, Any]]) -> Optional[int]:
+        """Derive total customer counts from DB, manifests, or output files."""
+        if isinstance(run_context, dict):
+            for path in (
+                ('performance', 'total_customers'),
+                ('metrics', 'total_customers'),
+                ('total_customers',),
+            ):
+                value: Any = run_context
+                try:
+                    for key in path:
+                        value = value[key]  # type: ignore[index]
+                except Exception:
+                    continue
+                numeric = self._coerce_int(value)
+                if numeric is not None:
+                    return numeric
+
+        db_count = self._total_customers_from_db()
+        if db_count is not None:
+            return db_count
+
+        csv_count = self._total_customers_from_outputs()
+        if csv_count is not None:
+            return csv_count
+
+        return None
+
+    def _total_customers_from_db(self) -> Optional[int]:
+        """Attempt to count customers via the primary database connection."""
+        try:
+            engine = get_db_connection()
+            if not engine:
+                return None
+            with engine.connect() as conn:  # type: ignore[assignment]
+                query = "SELECT COUNT(*) FROM dim_customer"
+                try:
+                    if sql_text is not None:
+                        result = conn.execute(sql_text(query))
+                    else:  # pragma: no cover - exercised when SQLAlchemy unavailable
+                        result = conn.execute(query)
+                except Exception:
+                    result = conn.execute(query)
+
+                for accessor in ('scalar_one', 'scalar', 'first', 'fetchone'):
+                    if hasattr(result, accessor):
+                        output = getattr(result, accessor)()
+                        if output is None:
+                            continue
+                        if isinstance(output, (list, tuple)):
+                            output = output[0]
+                        numeric = self._coerce_int(output)
+                        if numeric is not None:
+                            return numeric
+        except Exception:
+            return None
+
+        return None
+
+    def _total_customers_from_outputs(self) -> Optional[int]:
+        """Count customers from known CSV outputs such as icp_scores or whitespace."""
+        try:
+            if not OUTPUTS_DIR.exists():
+                return None
+            candidates = []
+            candidates.extend(OUTPUTS_DIR.glob("icp_scores*.csv"))
+            candidates.extend(OUTPUTS_DIR.glob("whitespace_*.csv"))
+            if not candidates:
+                return None
+            candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+            for path in candidates:
+                count = self._count_rows_in_csv(path)
+                if count is not None:
+                    return count
+        except Exception:
+            return None
+        return None
+
+    @staticmethod
+    def _count_rows_in_csv(path: Path) -> Optional[int]:
+        try:
+            with path.open('r', encoding='utf-8', newline='') as handle:
+                reader = csv.reader(handle)
+                next(reader, None)  # skip header if present
+                return sum(1 for _ in reader)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _coerce_int(value: Any) -> Optional[int]:
+        if value is None or isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float):
+            if math.isnan(value):
+                return None
+            return int(value)
+        if isinstance(value, str):
+            cleaned = value.replace(',', '').strip()
+            if not cleaned:
+                return None
+            try:
+                return int(float(cleaned))
+            except ValueError:
+                return None
+        return None
+
+    @staticmethod
+    def _coerce_float(value: Any) -> Optional[float]:
+        if value is None or isinstance(value, bool):
+            return None
+        if isinstance(value, (int, float)):
+            try:
+                if isinstance(value, float) and math.isnan(value):
+                    return None
+            except TypeError:
+                return None
+            return float(value)
+        if isinstance(value, str):
+            cleaned = value.replace(',', '').strip()
+            if not cleaned:
+                return None
+            try:
+                return float(cleaned)
+            except ValueError:
+                return None
+        return None
 
     def _get_memory_usage(self) -> float:
         """Get current memory usage in GB."""
@@ -110,39 +463,99 @@ class MonitoringDataCollector:
 
     def _collect_recent_alerts(self) -> List[Dict[str, Any]]:
         """Collect recent alerts from logs and outputs."""
-        alerts = []
+        alerts: List[Dict[str, Any]] = []
+        validation_paths = sorted(
+            self._find_validation_metric_files(),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        found_validation = bool(validation_paths)
+        encountered_failure = False
 
-        try:
-            # Check for recent validation metrics
-            validation_files = list(OUTPUTS_DIR.glob("validation_metrics_*.json"))
-            if validation_files:
-                latest_validation = max(validation_files, key=lambda x: x.stat().st_mtime)
-                with open(latest_validation, 'r') as f:
-                    validation_data = json.load(f)
+        def _timestamp_from(payload: Dict[str, Any], path: Path) -> str:
+            return payload.get("timestamp") or datetime.fromtimestamp(path.stat().st_mtime).isoformat()
 
-                # Add validation alerts
-                if 'alerts' in validation_data:
-                    for alert in validation_data['alerts']:
-                        alerts.append({
-                            'level': alert.get('severity', 'INFO'),
-                            'message': alert.get('message', 'Unknown alert'),
-                            'timestamp': validation_data.get('timestamp', datetime.now().isoformat()),
-                            'component': alert.get('component', 'Validation')
-                        })
+        def _lower_is_better(metric_name: str) -> bool:
+            lowered = metric_name.lower()
+            return any(token in lowered for token in ("mae", "rmse", "mse", "loss", "error", "brier"))
 
-        except Exception:
-            pass
+        for path in validation_paths:
+            try:
+                validation_data = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
 
-        # Add default success alert if no other alerts
-        if not alerts:
+            timestamp = _timestamp_from(validation_data, path)
+            status = validation_data.get("status")
+            if status == "fail":
+                encountered_failure = True
+                alerts.append({
+                    "level": "ERROR",
+                    "message": f"Validation gates failed ({path.name}): status=fail",
+                    "timestamp": timestamp,
+                    "component": "Validation",
+                })
+
+            gates = validation_data.get("gates") or {}
+            divisions = validation_data.get("divisions") or []
+            if isinstance(gates, dict) and isinstance(divisions, list):
+                for division in divisions:
+                    if not isinstance(division, dict):
+                        continue
+                    division_name = division.get("division_name", "Unknown division")
+                    for metric_name, threshold in gates.items():
+                        try:
+                            metric_value = float(division.get(metric_name))
+                            threshold_value = float(threshold)
+                        except (TypeError, ValueError):
+                            continue
+                        if math.isnan(metric_value) or math.isnan(threshold_value):
+                            continue
+                        lower_is_better = _lower_is_better(metric_name)
+                        failed = (metric_value > threshold_value) if lower_is_better else (metric_value < threshold_value)
+                        if failed:
+                            encountered_failure = True
+                            comparator = ">" if lower_is_better else "<"
+                            alerts.append({
+                                "level": "ERROR",
+                                "message": (
+                                    f"Validation gate breach in {division_name} ({path.name}): "
+                                    f"{metric_name}={metric_value:.3f} {comparator} {threshold_value:.3f}"
+                                ),
+                                "timestamp": timestamp,
+                                "component": "Validation",
+                            })
+
+            if isinstance(validation_data.get("alerts"), list):
+                for alert in validation_data["alerts"]:
+                    if not isinstance(alert, dict):
+                        continue
+                    alerts.append({
+                        "level": alert.get("severity", "INFO"),
+                        "message": alert.get("message", "Unknown alert"),
+                        "timestamp": timestamp,
+                        "component": alert.get("component", "Validation"),
+                    })
+
+        if not alerts and (not found_validation or not encountered_failure):
             alerts.append({
-                'level': 'INFO',
-                'message': 'Pipeline completed successfully',
-                'timestamp': datetime.now().isoformat(),
-                'component': 'Pipeline'
+                "level": "INFO",
+                "message": "Pipeline completed successfully",
+                "timestamp": datetime.now().isoformat(),
+                "component": "Pipeline",
             })
 
         return alerts[:10]  # Return only the 10 most recent
+
+    def _find_validation_metric_files(self) -> List[Path]:
+        """Return all validation metric files including unsuffixed variants."""
+        validation_files: List[Path] = []
+        for pattern in ("validation_metrics.json", "validation_metrics_*.json"):
+            validation_files.extend(OUTPUTS_DIR.glob(pattern))
+
+        # Remove duplicates in case patterns overlap and ensure deterministic ordering
+        unique_files = {file.resolve(): file for file in validation_files}
+        return list(unique_files.values())
 
     def _collect_data_lineage(self) -> List[Dict[str, Any]]:
         """Collect data lineage information."""
@@ -262,3 +675,6 @@ if __name__ == "__main__":
     print(f"Monitoring data saved to: {filepath}")
     print(f"Health Score: {data['summary']['health_score']:.1f}%")
     print(f"Alert Count: {data['summary']['alert_count']}")
+
+
+

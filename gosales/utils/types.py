@@ -60,7 +60,7 @@ class TypeEnforcer:
         Returns:
             DataFrame with customer_id as string type
         """
-        if df is None or df.is_empty():
+        if cls._is_df_empty(df):
             return df
 
         # Auto-detect framework
@@ -96,7 +96,7 @@ class TypeEnforcer:
         Returns:
             DataFrame with enforced schema
         """
-        if df is None or df.is_empty():
+        if cls._is_df_empty(df):
             return df
 
         if framework == 'auto':
@@ -119,6 +119,23 @@ class TypeEnforcer:
                     logger.warning(f"Failed to enforce type for {col}: {e}")
 
         return result
+
+    @staticmethod
+    def _is_df_empty(df: Union[pd.DataFrame, pl.DataFrame, None]) -> bool:
+        """Determine whether a dataframe-like object is empty."""
+        if df is None:
+            return True
+
+        if hasattr(df, "is_empty"):
+            is_empty_attr = df.is_empty
+            if callable(is_empty_attr):
+                return is_empty_attr()
+            return bool(is_empty_attr)
+
+        try:
+            return len(df) == 0  # type: ignore[arg-type]
+        except TypeError:
+            return False
 
     @classmethod
     def validate_join_compatibility(cls, left_df: Union[pd.DataFrame, pl.DataFrame],

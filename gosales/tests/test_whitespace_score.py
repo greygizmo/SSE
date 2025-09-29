@@ -21,3 +21,18 @@ def test_whitespace_score_is_continuous(tmp_path):
     scores = df["whitespace_score"].to_list()
     assert min(scores) >= 0.0 and max(scores) <= 1.0
     assert not all(round(s, 1) in {0.5, 0.6, 0.8} for s in scores)
+
+
+def test_whitespace_score_handles_all_null_dates(tmp_path):
+    eng = create_engine(f"sqlite:///{tmp_path}/ws_null_dates.db")
+    transactions = pd.DataFrame([
+        {"customer_id": "1", "order_date": None, "product_division": "A", "gross_profit": 120.0},
+        {"customer_id": "2", "order_date": None, "product_division": "B", "gross_profit": 95.0},
+    ])
+    transactions.to_sql("fact_transactions", eng, if_exists="replace", index=False)
+    pd.DataFrame({"customer_id": ["1", "2"]}).to_sql("dim_customer", eng, if_exists="replace", index=False)
+
+    df = generate_whitespace_opportunities(eng)
+
+    assert not df.is_empty()
+    assert df["whitespace_score"].is_not_null().all()

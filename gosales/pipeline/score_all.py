@@ -6,6 +6,8 @@ deliverables.  It exists so operations teams have a single command that mirrors
 our production DAG.
 """
 
+from pathlib import Path
+
 from gosales.utils.db import get_db_connection, validate_connection
 from gosales.etl.load_csv import load_csv_to_db
 from gosales.etl.build_star import build_star_schema
@@ -14,14 +16,46 @@ import subprocess
 from gosales.pipeline.label_audit import compute_label_audit
 from gosales.pipeline.score_customers import generate_scoring_outputs
 from gosales.utils.logger import get_logger
-from gosales.utils.paths import DATA_DIR, OUTPUTS_DIR
+from gosales.utils.paths import DATA_DIR, MODELS_DIR, OUTPUTS_DIR
 from gosales.etl.sku_map import division_set, get_supported_models
 from gosales.utils.run_context import default_manifest, emit_manifest
 from gosales.pipeline.validate_holdout import validate_holdout
 from gosales.ops.run import run_context
 from gosales.utils.config import load_config
+from shutil import rmtree
 
 logger = get_logger(__name__)
+
+
+def _derive_targets():
+    """Return the sorted list of divisions/models to score."""
+
+    try:
+        divisions = set(division_set())
+    except Exception:
+        divisions = {"Solidworks"}
+    models = set(get_supported_models())
+    preferred_divisions = divisions | {"Training", "Services", "Simulation", "Scanning", "CAMWorks"}
+    preferred_models = models | {
+        "Printers",
+        "SWX_Seats",
+        "PDM_Seats",
+        "SW_Electrical",
+        "SW_Inspection",
+        "Success_Plan",
+    }
+    return sorted(preferred_divisions | preferred_models)
+
+
+def _prune_legacy_model_dirs(targets, models_dir, log=logger):
+    keep = {f"{t.lower()}_model" for t in targets}
+    for path in models_dir.glob("*_model"):
+        if path.name not in keep:
+            log.info(f"Pruning legacy model directory: {path}")
+            try:
+                rmtree(path)
+            except Exception as err:
+                log.warning(f"Failed to prune {path}: {err}")
 
 def score_all():
     """
@@ -56,16 +90,7 @@ def score_all():
             if strict:
                 raise RuntimeError(msg2)
             logger.warning(msg2)
-        try:
-            divisions = list(division_set())
-        except Exception:
-            divisions = ["Solidworks"]
-        # Include logical, SKU-based targets alongside reporting divisions
-        models = list(get_supported_models())
-        # Explicit target set to avoid duplicates and legacy divisions
-        preferred_divisions = {"Training", "Services", "Simulation", "Scanning", "CAMWorks"}
-        preferred_models = set(models) | {"Printers", "SWX_Seats", "PDM_Seats", "SW_Electrical", "SW_Inspection", "Success_Plan"}
-        targets = sorted(preferred_divisions | preferred_models)
+        targets = _derive_targets()
 
         # --- 2. ETL Phase ---
         logger.info("--- Phase 1: ETL ---")
@@ -135,16 +160,7 @@ def score_all():
 
         # Prune legacy model directories not in current targets
         try:
-            from gosales.utils.paths import MODELS_DIR
-            from shutil import rmtree
-            keep = {f"{t.lower()}_model" for t in targets}
-            for p in MODELS_DIR.glob("*_model"):
-                if p.name not in keep:
-                    logger.info(f"Pruning legacy model directory: {p}")
-                    try:
-                        rmtree(p)
-                    except Exception as ee:
-                        logger.warning(f"Failed to prune {p}: {ee}")
+            _prune_legacy_model_dirs(targets, MODELS_DIR, log=logger)
         except Exception as e:
             logger.warning(f"Model pruning step failed: {e}")
 
@@ -162,7 +178,15 @@ def score_all():
         try:
             manifest_path = emit_manifest(OUTPUTS_DIR, run_manifest["run_id"], run_manifest)
             logger.info(f"Wrote run manifest to {manifest_path}")
-            ctx["write_manifest"]({"run_manifest": str(manifest_path), "icp_scores": str(OUTPUTS_DIR / "icp_scores.csv"), "whitespace": str(OUTPUTS_DIR / "whitespace.csv")})
+            whitespace_entry = run_manifest.get("whitespace_artifact")
+            if whitespace_entry:
+                ws_path = Path(whitespace_entry)
+                if not ws_path.exists():
+                    ws_path = OUTPUTS_DIR / "whitespace.csv"
+                whitespace_str = str(ws_path)
+            else:
+                whitespace_str = str(OUTPUTS_DIR / "whitespace.csv")
+            ctx["write_manifest"]({"run_manifest": str(manifest_path), "icp_scores": str(OUTPUTS_DIR / "icp_scores.csv"), "whitespace": whitespace_str})
             ctx["append_registry"]({
                 "phase": "pipeline_score_all",
                 "divisions": targets,

@@ -1,8 +1,12 @@
 import json
+import types
 
 import pandas as pd
+import polars as pl
 
 import gosales.pipeline.score_customers as sc
+import gosales.pipeline.rank_whitespace as rw
+from gosales.utils.run_context import default_manifest
 
 
 def test_emit_capacity_and_logs_exports(tmp_path, monkeypatch):
@@ -108,3 +112,71 @@ def test_emit_capacity_and_logs_exports(tmp_path, monkeypatch):
     assert rec_b["coverage"]["als"] == 0.5
     assert rec_b["weights"]["global"]["normalized_weights"]["p_icp_pct"] == 0.6
     assert rec_b["selection"]["segments"]["warm"] == 1
+
+
+def test_generate_scoring_outputs_records_whitespace_artifact(tmp_path, monkeypatch):
+    monkeypatch.setattr(sc, "OUTPUTS_DIR", tmp_path)
+    monkeypatch.setattr(rw, "OUTPUTS_DIR", tmp_path)
+
+    run_manifest = default_manifest()
+    run_manifest["run_id"] = "testrun"
+    run_manifest["cutoff"] = "2024-06-30"
+
+    icp_df = pd.DataFrame(
+        {
+            "division_name": ["A"],
+            "customer_id": ["c1"],
+            "customer_name": ["Acme"],
+            "icp_score": [0.8],
+            "rfm__all__gp_sum__12m": [1.0],
+            "affinity__div__lift_topk__12m": [0.2],
+            "bought_in_division": [0],
+            "rfm__all__tx_n__12m": [0],
+            "assets_active_total": [0],
+            "assets_on_subs_total": [0],
+        }
+    )
+    icp_df.to_csv(tmp_path / "icp_scores.csv", index=False)
+
+    monkeypatch.setattr(sc, "discover_available_models", lambda: {})
+    monkeypatch.setattr(sc, "_filter_models_by_targets", lambda available, targets: available)
+    monkeypatch.setattr(sc, "generate_whitespace_opportunities", lambda engine: pl.DataFrame())
+    monkeypatch.setattr(sc, "validate_whitespace_schema", lambda path: {})
+    monkeypatch.setattr(sc, "write_schema_report", lambda report, path: None)
+
+    cfg = types.SimpleNamespace(
+        whitespace=types.SimpleNamespace(
+            shadow_mode=False,
+            capacity_mode="top_percent",
+            segment_allocation=None,
+            bias_division_max_share_topN=1.0,
+        ),
+        modeling=types.SimpleNamespace(capacity_percent=10),
+    )
+    monkeypatch.setattr(sc, "load_config", lambda: cfg)
+
+    def fake_rank(inputs):
+        base = inputs.scores.copy()
+        return base.assign(
+            score=0.9,
+            score_challenger=0.8,
+            p_icp=0.7,
+            p_icp_pct=0.6,
+            lift_norm=0.5,
+            als_norm=0.4,
+            EV_norm=0.3,
+            nba_reason="Reason",
+        )
+
+    monkeypatch.setattr(sc, "rank_whitespace", fake_rank)
+
+    def fake_emit(ranked, selected, cutoff_tag=None):
+        return pd.DataFrame({"division_name": ["A"], "selected_count": [len(selected)]})
+
+    monkeypatch.setattr(sc, "_emit_capacity_and_logs", fake_emit)
+
+    sc.generate_scoring_outputs(engine=None, run_manifest=run_manifest)
+
+    whitespace_path = tmp_path / "whitespace_20240630.csv"
+    assert whitespace_path.exists()
+    assert run_manifest["whitespace_artifact"] == str(whitespace_path)

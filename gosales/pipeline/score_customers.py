@@ -8,14 +8,28 @@ our customer scorecards and whitespace reports current.
 """
 import polars as pl
 import pandas as pd
-import mlflow
-import mlflow.sklearn
+from types import SimpleNamespace
 import json
 import os
 import copy
 from collections.abc import Iterable
 from pathlib import Path
 import joblib
+
+_MLFLOW_IMPORT_ERROR: Exception | None = None
+
+try:  # pragma: no cover - exercised indirectly via tests
+    import mlflow  # type: ignore[import]
+    import mlflow.sklearn  # type: ignore[import]
+    MLFLOW_AVAILABLE = True
+except Exception as exc:  # pragma: no cover - depends on environment
+    mlflow = SimpleNamespace()  # type: ignore[assignment]
+    mlflow.sklearn = SimpleNamespace()  # type: ignore[attr-defined]
+    _MLFLOW_IMPORT_ERROR = exc
+    MLFLOW_AVAILABLE = False
+else:
+    _MLFLOW_IMPORT_ERROR = None
+    MLFLOW_AVAILABLE = True
 
 from gosales.utils.db import get_db_connection, get_curated_connection, validate_connection
 from gosales.utils.logger import get_logger
@@ -32,6 +46,23 @@ from gosales.monitoring.drift import check_drift_and_emit_alerts
 from gosales.utils.config import load_config
 
 logger = get_logger(__name__)
+
+
+def _mlflow_unavailable(*_args, **_kwargs):
+    """Warn and raise when MLflow functionality is requested but unavailable."""
+
+    message = (
+        "MLflow is not installed but MLflow-dependent functionality was requested. "
+        "Install mlflow to enable this behavior."
+    )
+    logger.warning(message)
+    if _MLFLOW_IMPORT_ERROR is not None:
+        raise RuntimeError(message) from _MLFLOW_IMPORT_ERROR
+    raise RuntimeError(message)
+
+
+if not MLFLOW_AVAILABLE:  # pragma: no cover - behavior validated via tests
+    setattr(mlflow.sklearn, "load_model", _mlflow_unavailable)  # type: ignore[attr-defined]
 
 class MissingModelMetadataError(Exception):
     pass
@@ -628,8 +659,10 @@ def score_customers_for_division(
 ):
     """Score all customers for a specific division using a trained ML model.
 
-    Requires ``cutoff_date`` and ``prediction_window_months`` in the model's
-    ``metadata.json``; raises ``MissingModelMetadataError`` if absent.
+    Prefers ``cutoff_date`` and ``prediction_window_months`` from the model's
+    ``metadata.json``. When metadata fields are missing, validated fallback
+    arguments are used instead; if neither metadata nor arguments provide them,
+    ``MissingModelMetadataError`` is raised.
     """
     logger.info(f"Scoring customers for division: {division_name}")
 
@@ -660,10 +693,27 @@ def score_customers_for_division(
 
     cutoff = meta.get("cutoff_date")
     window_months = meta.get("prediction_window_months")
-    if cutoff is None or window_months is None:
-        msg = (
-            f"Required metadata fields missing for {division_name}: cutoff_date or prediction_window_months"
-        )
+
+    missing_fields: list[str] = []
+    fallback_fields: list[str] = []
+
+    if cutoff is None:
+        if cutoff_date is None:
+            missing_fields.append("cutoff_date")
+        else:
+            cutoff = cutoff_date
+            fallback_fields.append("cutoff_date")
+
+    if window_months is None:
+        if prediction_window_months is None:
+            missing_fields.append("prediction_window_months")
+        else:
+            window_months = prediction_window_months
+            fallback_fields.append("prediction_window_months")
+
+    if missing_fields:
+        joined = ", ".join(missing_fields)
+        msg = f"Required metadata fields missing for {division_name}: {joined}"
         logger.error(msg)
         if run_manifest is not None:
             run_manifest.setdefault("alerts", []).append({
@@ -673,6 +723,20 @@ def score_customers_for_division(
                 "message": msg,
             })
         raise MissingModelMetadataError(msg)
+
+    if fallback_fields:
+        joined = ", ".join(fallback_fields)
+        msg = (
+            f"metadata.json missing field(s) {joined} for {division_name}; used fallback arguments"
+        )
+        logger.warning(msg)
+        if run_manifest is not None:
+            run_manifest.setdefault("alerts", []).append({
+                "division": division_name,
+                "severity": "warning",
+                "code": "MISSING_METADATA_FIELDS",
+                "message": msg,
+            })
     try:
         window_months = int(window_months)
     except Exception:
@@ -866,12 +930,22 @@ def generate_whitespace_opportunities(engine):
 
         freq_max = max(customer_summary["purchase_count"].max(), 1)
         gp_max = max(customer_summary["total_gp"].max(), 1.0)
+        fallback_ts = pd.Timestamp("1970-01-01")
         ref_date = transactions["order_date"].max()
         min_date = transactions["order_date"].min()
+        if ref_date in (None, pl.Null):
+            ref_date = fallback_ts
+        if min_date in (None, pl.Null):
+            min_date = fallback_ts
         max_days = max((ref_date - min_date).days, 1)
         customer_summary = customer_summary.with_columns([
             (pl.col("purchase_count") / freq_max).alias("freq_norm"),
-            (1 - ((pl.lit(ref_date) - pl.col("last_purchase")).dt.total_days() / max_days)).clip(0.0, 1.0).alias("recency_norm"),
+            (
+                1 - ((pl.lit(ref_date) - pl.col("last_purchase")).dt.total_days() / max_days)
+            )
+            .clip(0.0, 1.0)
+            .fill_null(0.0)
+            .alias("recency_norm"),
             (pl.col("total_gp") / gp_max).alias("gp_norm"),
         ])
 
@@ -924,6 +998,10 @@ def generate_scoring_outputs(
     """
     logger.info("Starting customer scoring and whitespace analysis...")
     OUTPUTS_DIR.mkdir(exist_ok=True)
+    if run_manifest is not None:
+        # Clear any prior whitespace artifact entry so downstream callers rely on
+        # the path emitted by this execution.
+        run_manifest["whitespace_artifact"] = None
     
     # Discover available models by folder convention *_model
     available_models = discover_available_models()
@@ -1143,6 +1221,8 @@ def generate_scoring_outputs(
             except Exception:
                 pass
             path = save_ranked_whitespace(ranked, cutoff_tag=cutoff_tag)
+            if run_manifest is not None:
+                run_manifest["whitespace_artifact"] = str(path)
             logger.info(f"Saved Phase-4 ranked whitespace to {path}")
             # Also save segmented ranked outputs for warm/cold/prospect
             try:

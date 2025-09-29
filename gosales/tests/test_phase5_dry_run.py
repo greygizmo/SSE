@@ -29,3 +29,32 @@ def test_dry_run_creates_single_run(tmp_path, monkeypatch):
     entries = [json.loads(line) for line in registry_path.read_text(encoding="utf-8").splitlines()]
     run_ids = {e["run_id"] for e in entries}
     assert len(run_ids) == 1
+
+
+def test_cli_exception_still_records_run(tmp_path, monkeypatch):
+    fake_outputs = tmp_path / "outputs"
+    monkeypatch.setattr(paths, "OUTPUTS_DIR", fake_outputs)
+    monkeypatch.setattr(forward, "OUTPUTS_DIR", fake_outputs)
+    monkeypatch.setattr(run_module, "OUTPUTS_DIR", fake_outputs)
+
+    def boom(*_, **__):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(forward, "_build_validation_frame", boom)
+
+    runner = CliRunner()
+    result = runner.invoke(forward.main, [
+        "--division", "Solidworks",
+        "--cutoff", "2099-12-31",
+    ])
+
+    assert result.exit_code != 0
+
+    runs_dir = fake_outputs / "runs"
+    run_dirs = [p for p in runs_dir.iterdir() if p.is_dir()]
+    assert len(run_dirs) == 1
+
+    registry_path = runs_dir / "runs.jsonl"
+    entries = [json.loads(line) for line in registry_path.read_text(encoding="utf-8").splitlines()]
+    statuses = [e.get("status") for e in entries if e.get("run_id") == run_dirs[0].name]
+    assert "error" in statuses

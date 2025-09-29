@@ -11,11 +11,11 @@ import json
 import sys
 from pathlib import Path
 from typing import Dict, List
-import numpy as np
-from pathlib import Path as _Path
 
-from gosales.utils.paths import ROOT_DIR, OUTPUTS_DIR
+import numpy as np
+
 from gosales.utils.config import load_config
+from gosales.utils.paths import ROOT_DIR, OUTPUTS_DIR
 
 
 def _read_json(path: Path) -> Dict[str, object]:

@@ -1,9 +1,15 @@
+import joblib
 import pandas as pd
 import polars as pl
 import numpy as np
 from sqlalchemy import create_engine, inspect
 
 from gosales.pipeline import validate_holdout
+
+
+class DummyModel:
+    def predict_proba(self, X):
+        return np.array([[0.0, 1.0] for _ in range(len(X))])
 
 
 def test_validate_holdout_restores_fact_table(tmp_path, monkeypatch):
@@ -56,6 +62,11 @@ def test_validate_holdout_restores_fact_table(tmp_path, monkeypatch):
     monkeypatch.setattr(validate_holdout, "OUTPUTS_DIR", out_dir)
     monkeypatch.setattr(validate_holdout, "get_db_connection", lambda: eng)
 
+    model_dir = tmp_path / "models" / "solidworks_model"
+    model_dir.mkdir(parents=True)
+    joblib.dump(DummyModel(), model_dir / "model.pkl")
+    monkeypatch.setattr(validate_holdout, "MODELS_DIR", model_dir.parent)
+
     def fake_load_csv(path, table, engine):
         pd.read_csv(path).to_sql(table, engine, index=False, if_exists="replace")
 
@@ -72,12 +83,6 @@ def test_validate_holdout_restores_fact_table(tmp_path, monkeypatch):
             {"customer_id": [1], "bought_in_division": [1], "feat": [0.1]}
         ),
     )
-
-    class DummyModel:
-        def predict_proba(self, X):
-            return np.array([[0.0, 1.0] for _ in range(len(X))])
-
-    monkeypatch.setattr(validate_holdout.mlflow.sklearn, "load_model", lambda p: DummyModel())
     monkeypatch.setattr(validate_holdout, "roc_auc_score", lambda y, p: 1.0)
     monkeypatch.setattr(
         validate_holdout,

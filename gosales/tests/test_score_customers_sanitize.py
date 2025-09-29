@@ -1,11 +1,14 @@
+import importlib
 import json
+import sys
+
 import numpy as np
 import pandas as pd
 import polars as pl
 import joblib
-import mlflow.sklearn
+import pytest
 
-from gosales.pipeline.score_customers import score_customers_for_division
+import gosales.pipeline.score_customers as score_customers
 
 
 class _DummyModel:
@@ -31,7 +34,7 @@ def test_score_handles_strings_and_nans(monkeypatch, tmp_path):
 
     # Force joblib loader by making mlflow loader fail
     monkeypatch.setattr(
-        mlflow.sklearn,
+        score_customers.mlflow.sklearn,
         "load_model",
         lambda path: (_ for _ in ()).throw(RuntimeError("mlflow unavailable")),
     )
@@ -59,7 +62,23 @@ def test_score_handles_strings_and_nans(monkeypatch, tmp_path):
         ),
     )
 
-    result = score_customers_for_division(None, "Dummy", model_dir)
+    result = score_customers.score_customers_for_division(None, "Dummy", model_dir)
     assert result.height == 2
     assert "icp_score" in result.columns
+
+
+def test_score_customers_imports_without_mlflow(monkeypatch, caplog):
+    monkeypatch.setitem(sys.modules, "mlflow", None)
+    monkeypatch.setitem(sys.modules, "mlflow.sklearn", None)
+    caplog.set_level("WARNING")
+
+    reloaded = importlib.reload(score_customers)
+
+    assert reloaded.MLFLOW_AVAILABLE is False
+    with pytest.raises(RuntimeError):
+        reloaded.mlflow.sklearn.load_model("dummy")
+
+    assert any("MLflow is not installed" in record.message for record in caplog.records)
+
+    importlib.reload(score_customers)
 
