@@ -99,6 +99,13 @@ This catalog enumerates every artifact the GoSales Engine produces across the pi
 | --- | --- | --- | --- |
 | `metrics_summary.csv` | `gosales/outputs/` | Roll-up of metrics across divisions and cutoffs. | Enables executive dashboards and trend monitoring without manual aggregation.【F:README.md†L246-L247】 |
 
+## Observability and Monitoring
+
+| Artifact | Location Pattern | Purpose | Importance |
+| --- | --- | --- | --- |
+| `run_context_<timestamp>.json` | `gosales/outputs/` | Pipeline run manifest capturing divisions, cutoff metadata, and artifact pointers for each execution. | Enables monitoring to reconstruct what ran; the data collector reads it to derive division counts and runtime context. |
+| `monitoring_data_<timestamp>.json` | `gosales/outputs/` | Snapshot emitted by `MonitoringDataCollector` with processing rate, memory usage, active divisions, customer totals, and explicit fallback reasons when artifacts are missing. | Powers observability dashboards with live telemetry while flagging gaps instead of defaulting silently. |
+
 ## Published Reports
 
 | Artifact | Location Pattern | Purpose | Importance |

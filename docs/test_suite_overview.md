@@ -131,3 +131,19 @@ Collectively, these tests form a safety net over data ingestion, feature generat
 
 - `test_phase3_train_safe_calibration.py`
   - `test_phase3_calibration_skips_records_reason` forces a sparse-positive training case and asserts that Phase 3 training emits diagnostics without crashing and records a calibration skip (`calibration='none'`) along with a reason. This guards against pipeline aborts on thin cohorts and ensures per-cutoff aggregation is complete.
+
+## Observability and Pipeline Guardrails (2025-09)
+
+- **`test_db_connection.py`**
+  - `test_get_db_connection_falls_back_to_sqlite_when_azure_missing` confirms cloud credentials are optional and documents the SQLite fallback, preventing pipeline outages when env vars are absent.
+  - `test_get_db_connection_uses_custom_sqlite_path` and `test_get_db_connection_duckdb` guarantee configuration-driven URL overrides keep working across engines.
+- **`test_monitoring_data_collector.py`**
+  - `test_collect_recent_alerts_reads_base_validation_file` and the success/failure variants ensure monitoring reflects real validation alerts instead of static strings.
+  - `test_collect_performance_metrics_from_artifacts` + `_with_fallbacks` prove processing rate, division counts, and customer totals come from run manifests and DB counts with documented fallbacks when data is missing.
+- **`test_monitoring_type_consistency.py`**
+  - Exercises the type-consistency score path so mixed-type samples are penalized and uniform samples stay above 99, keeping monitoring honest about schema drift.
+- **`test_score_all_pruning.py`**
+  - Verifies `_derive_targets` and `_prune_legacy_model_dirs` keep current divisions (Solidworks) while pruning stale artifacts to control disk usage.
+- **`test_types.py`**
+  - Confirms `TypeEnforcer` gracefully handles empty DataFrames and coerces IDs/quantities, preserving schema contracts for downstream processors.
+

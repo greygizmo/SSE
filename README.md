@@ -47,6 +47,13 @@ A division-focused Ideal Customer Profile (ICP) & Whitespace engine. The pipelin
 - **Phase 6 — Configuration, UX, Observability**
   - Central config precedence and stricter validation
   - Run registry/manifests via `run_context` with per‑run `config_resolved.yaml`
+  - Monitoring telemetry: `MonitoringDataCollector` derives processing rate, division activity, and
+    customer totals from the latest run context, validation metrics, and live DB counts.
+    When artifacts are missing it now records explicit fallbacks so dashboards highlight data gaps
+    instead of masking issues.
+  - Database connectivity guardrails: pipeline entrypoints call `validate_connection` and honor
+    `database.strict_db`. `get_db_connection` now falls back to configured SQLite or DuckDB URLs
+    when Azure credentials are absent, keeping orchestration resilient.
   - Validation improvements: weighted PSI(EV vs holdout GP), per‑feature PSI highlights, `alerts.json`
   - Streamlit UI: artifact‑driven pages, validation badges (Cal MAE, PSI, KS), alerts display, caching + refresh
 
