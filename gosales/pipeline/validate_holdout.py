@@ -14,7 +14,7 @@ from typing import Dict, List
 import numpy as np
 import pandas as pd
 import polars as pl
-import mlflow.sklearn
+import joblib
 from sklearn import metrics as skm
 from sklearn.metrics import roc_auc_score, classification_report, confusion_matrix
 from sqlalchemy import text
@@ -271,12 +271,33 @@ def validate_against_holdout():
             if not model_path.exists():
                 logger.error(f"Model not found at {model_path}")
                 return None
+
+            model = None
+            joblib_path = model_path / "model.pkl"
+            joblib_err: Exception | None = None
             try:
-                model = mlflow.sklearn.load_model(str(model_path))
-                logger.info(f"Loaded model from {model_path}")
-            except Exception as e:
-                logger.error(f"Failed to load model: {e}")
-                return None
+                model = joblib.load(joblib_path)
+                logger.info(f"Loaded joblib model from {joblib_path}")
+            except Exception as exc:  # pragma: no cover - logged, fallback path tested
+                joblib_err = exc
+                logger.warning(f"Joblib model load failed at {joblib_path}: {exc}")
+
+            if model is None:
+                try:
+                    import mlflow.sklearn  # type: ignore
+
+                    model = mlflow.sklearn.load_model(str(model_path))
+                    logger.info(f"Loaded MLflow model from {model_path}")
+                except Exception as mlflow_exc:  # pragma: no cover - fallback error path
+                    if joblib_err is not None:
+                        logger.error(
+                            "Failed to load model via joblib (%s) and MLflow (%s)",
+                            joblib_err,
+                            mlflow_exc,
+                        )
+                    else:
+                        logger.error(f"Failed to load model via MLflow: {mlflow_exc}")
+                    return None
 
             # Prepare features for prediction
             feature_matrix_pd = feature_matrix.to_pandas()
