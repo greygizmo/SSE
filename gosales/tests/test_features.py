@@ -1,15 +1,16 @@
 from __future__ import annotations
 
+import json
 import pandas as pd
+import polars as pl
+import yaml
+from click.testing import CliRunner
 from sqlalchemy import create_engine
 
-from gosales.features.engine import create_feature_matrix
 from gosales.features.build import main as build_cli
-from click.testing import CliRunner
+from gosales.features.engine import create_feature_matrix
+from gosales.pipeline.rank_whitespace import _compute_assets_als_norm
 from gosales.utils.config import load_config
-import json
-import yaml
-import polars as pl
 
 
 def _seed(engine):
@@ -161,3 +162,64 @@ def test_missingness_flags_capture_original_nulls(tmp_path):
     # Customer without transactions should be flagged as missing prior to fillna; customer with history should not
     assert cust3_flag == 1
     assert cust1_flag == 0
+
+
+def test_load_config_parses_assets_als(tmp_path):
+    cfg_path = tmp_path / "custom_config.yaml"
+    paths = {
+        "raw": str(tmp_path / "raw"),
+        "staging": str(tmp_path / "staging"),
+        "curated": str(tmp_path / "curated"),
+        "outputs": str(tmp_path / "outputs"),
+    }
+    cfg_payload = {
+        "paths": paths,
+        "features": {
+            "use_assets_als": True,
+            "assets_als": {
+                "max_rows": 123,
+                "max_cols": 7,
+                "factors": 8,
+                "iters": 3,
+                "reg": 0.25,
+            },
+        },
+    }
+    with open(cfg_path, "w", encoding="utf-8") as f:
+        yaml.safe_dump(cfg_payload, f)
+
+    cfg = load_config(config_path=cfg_path)
+
+    assert cfg.features.use_assets_als is True
+    assert cfg.features.assets_als.max_rows == 123
+    assert cfg.features.assets_als.max_cols == 7
+    assert cfg.features.assets_als.factors == 8
+    assert cfg.features.assets_als.iters == 3
+    assert cfg.features.assets_als.reg == 0.25
+
+
+def test_assets_als_norm_respects_limits(monkeypatch):
+    class _AssetsCfg:
+        max_rows = 2
+        max_cols = 2
+
+    class _FeaturesCfg:
+        assets_als = _AssetsCfg()
+
+    class _Cfg:
+        features = _FeaturesCfg()
+
+    monkeypatch.setattr("gosales.utils.config.load_config", lambda *args, **kwargs: _Cfg())
+
+    df = pd.DataFrame(
+        {
+            "division_name": ["A"] * 3,
+            "als_assets_f0": [0.1, 0.2, 0.3],
+            "als_assets_f1": [0.4, 0.5, 0.6],
+            "als_assets_f2": [0.7, 0.8, 0.9],
+        }
+    )
+
+    result = _compute_assets_als_norm(df)
+
+    assert (result == 0).all()

@@ -22,45 +22,100 @@ from gosales.utils.run_context import default_manifest, emit_manifest
 from gosales.pipeline.validate_holdout import validate_holdout
 from gosales.ops.run import run_context
 from gosales.utils.config import load_config
+from gosales.utils.normalize import normalize_model_key
 from shutil import rmtree
 
 logger = get_logger(__name__)
 
 
+_ACTIVE_MODEL_ALIASES: tuple[str, ...] = ("", "_cold")
+
+
 def _derive_targets():
     """Return the sorted list of divisions/models to score."""
 
+    normalized = {}
+
+    def add_candidates(candidates):
+        for candidate in candidates:
+            if not candidate:
+                continue
+            norm = normalize_model_key(candidate)
+            if not norm:
+                continue
+            normalized.setdefault(norm, candidate)
+
     try:
-        divisions = set(division_set())
+        divisions = division_set()
     except Exception:
-        divisions = {"Solidworks"}
-    models = set(get_supported_models())
-    preferred_divisions = divisions | {"Training", "Services", "Simulation", "Scanning", "CAMWorks"}
-    preferred_models = models | {
-        "Printers",
-        "SWX_Seats",
-        "PDM_Seats",
-        "SW_Electrical",
-        "SW_Inspection",
-        "Success_Plan",
-    }
-    return sorted(preferred_divisions | preferred_models)
+        divisions = ("Solidworks",)
+
+    add_candidates(
+        (
+            "Printers",
+            "SWX_Seats",
+            "PDM_Seats",
+            "SW_Electrical",
+            "SW_Inspection",
+            "Success Plan",
+        )
+    )
+
+    add_candidates(divisions)
+    add_candidates(("Training", "Services", "Simulation", "Scanning", "CAMWorks"))
+
+    models = get_supported_models()
+    add_candidates(models)
+
+    return sorted(normalized.values())
 
 
 def _prune_legacy_model_dirs(targets, models_dir, log=logger):
-    keep = {f"{t.lower()}_model" for t in targets}
+    normalized_targets = {normalize_model_key(t) for t in targets if t}
+    keep_aliases: set[str] = set()
+
+    for target in normalized_targets:
+        if not target:
+            continue
+        base_variants = {
+            target,
+            target.replace(" ", "_"),
+            target.replace(" ", "-"),
+        }
+        for variant in base_variants:
+            variant = variant.strip()
+            if not variant:
+                continue
+            for alias in _ACTIVE_MODEL_ALIASES:
+                suffix = f"{alias}_model" if alias else "_model"
+                keep_aliases.add(f"{variant}{suffix}".casefold())
+
     for path in models_dir.glob("*_model"):
-        if path.name not in keep:
-            log.info(f"Pruning legacy model directory: {path}")
-            try:
-                rmtree(path)
-            except Exception as err:
-                log.warning(f"Failed to prune {path}: {err}")
+        name_cf = path.name.casefold()
+        if name_cf in keep_aliases:
+            continue
+
+        raw_base = path.name[:-6] if path.name.lower().endswith("_model") else path.name
+        aliasless_candidates = {raw_base}
+        raw_base_cf = raw_base.casefold()
+        for alias in _ACTIVE_MODEL_ALIASES:
+            if alias and raw_base_cf.endswith(alias):
+                aliasless_candidates.add(raw_base[: -len(alias)])
+
+        aliasless_candidates = {c for c in aliasless_candidates if c}
+        if any(normalize_model_key(candidate) in normalized_targets for candidate in aliasless_candidates):
+            continue
+
+        log.info(f"Pruning legacy model directory: {path}")
+        try:
+            rmtree(path)
+        except Exception as err:
+            log.warning(f"Failed to prune {path}: {err}")
 
 def score_all():
     """
     Orchestrates the entire GoSales pipeline from data ingestion to final scoring.
-    
+
     This master script executes the following steps in order:
     1.  Loads all raw CSV data into a staging table in the database.
     2.  Builds the clean, tidy star schema (`dim_customer`, `fact_transactions`).
@@ -122,7 +177,7 @@ def score_all():
 
         # --- 3. Label Audit (Phase 2) ---
         logger.info("--- Phase 2: Label audit (leakage-safe targets) ---")
-        # Training cutoff chosen so the 6-month target window is within training data (Jul–Dec 2024)
+        # Training cutoff chosen so the 6-month target window is within training data (Jul-Dec 2024)
         cutoff_date = "2024-06-30"
         prediction_window_months = 6
         for div in targets:
@@ -152,7 +207,17 @@ def score_all():
         for div in targets:
             try:
                 logger.info(f"Training model for target: {div} (cutoffs={cutoffs_arg})")
-                cmd = [sys.executable, "-m", "gosales.models.train", "--division", div, "--cutoffs", cutoffs_arg, "--window-months", str(prediction_window_months)]
+                cmd = [
+                    sys.executable,
+                    "-m",
+                    "gosales.models.train",
+                    "--division",
+                    div,
+                    "--cutoffs",
+                    cutoffs_arg,
+                    "--window-months",
+                    str(prediction_window_months),
+                ]
                 subprocess.run(cmd, check=True)
             except Exception as e:
                 logger.warning(f"Training failed for {div}: {e}")
@@ -172,7 +237,12 @@ def score_all():
         run_manifest["window_months"] = int(prediction_window_months)
 
         # Generate outputs; function will update manifest details (divisions scored, alerts)
-        generate_scoring_outputs(curated_engine, run_manifest=run_manifest)
+        generate_scoring_outputs(
+            curated_engine,
+            run_manifest=run_manifest,
+            cutoff_date=cutoff_date,
+            prediction_window_months=prediction_window_months,
+        )
 
         # Persist manifest alongside outputs and append to registry via run_context
         try:
@@ -186,15 +256,23 @@ def score_all():
                 whitespace_str = str(ws_path)
             else:
                 whitespace_str = str(OUTPUTS_DIR / "whitespace.csv")
-            ctx["write_manifest"]({"run_manifest": str(manifest_path), "icp_scores": str(OUTPUTS_DIR / "icp_scores.csv"), "whitespace": whitespace_str})
-            ctx["append_registry"]({
-                "phase": "pipeline_score_all",
-                "divisions": targets,
-                "cutoff": cutoff_date,
-                "window_months": int(prediction_window_months),
-                "artifact_count": 3,
-                "status": "finished",
-            })
+            ctx["write_manifest"](
+                {
+                    "run_manifest": str(manifest_path),
+                    "icp_scores": str(OUTPUTS_DIR / "icp_scores.csv"),
+                    "whitespace": whitespace_str,
+                }
+            )
+            ctx["append_registry"](
+                {
+                    "phase": "pipeline_score_all",
+                    "divisions": targets,
+                    "cutoff": cutoff_date,
+                    "window_months": int(prediction_window_months),
+                    "artifact_count": 3,
+                    "status": "finished",
+                }
+            )
         except Exception as e:
             logger.warning(f"Failed to write run manifest/registry: {e}")
         logger.info("--- Scoring Phase Complete ---")
@@ -216,7 +294,6 @@ def score_all():
             logger.warning(f"Hold-out validation step failed (non-blocking): {e}")
 
         logger.info("GoSales scoring pipeline finished successfully!")
-
 
 if __name__ == "__main__":
     score_all()

@@ -112,6 +112,320 @@ def _collect_topn_ids(
     return topn
 
 
+def _compute_topk_lifts(
+    y_valid: np.ndarray,
+    probs: np.ndarray,
+    weights_valid: np.ndarray,
+    top_k_percents: list[int],
+) -> tuple[dict[str, float | None], dict[str, float | None], float | None]:
+    """Compute lift and revenue lift metrics for the configured percentiles."""
+
+    lifts: dict[str, float | None] = {}
+    rev_lifts: dict[str, float | None] = {}
+    for k in top_k_percents:
+        key = f"lift@{int(k)}"
+        try:
+            lifts[key] = float(_lift_at_k(y_valid, probs, int(k)))
+        except Exception:
+            lifts[key] = None
+        rev_key = f"rev_lift@{int(k)}"
+        try:
+            val = _weighted_lift_at_k(y_valid, probs, weights_valid, int(k))
+            rev_lifts[rev_key] = float(val) if val == val else None
+        except Exception:
+            rev_lifts[rev_key] = None
+    lift10 = lifts.get("lift@10")
+    return lifts, rev_lifts, lift10
+
+
+def _train_logreg_for_cutoff(
+    cfg,
+    cal_methods: list[str],
+    X_train: pd.DataFrame,
+    y_train: np.ndarray,
+    X_valid: pd.DataFrame,
+    y_valid: np.ndarray,
+    weights_valid: np.ndarray,
+    valid_index: pd.Index,
+    df: pd.DataFrame,
+    cutoff: str,
+    pos_count: int,
+    prevalence: float,
+    top_k_percents: list[int],
+) -> tuple[dict | None, dict[int, list[str]]]:
+    """Train and evaluate the logistic regression model for a single cutoff."""
+
+    lr_params = getattr(getattr(cfg, "modeling", object()), "lr_grid", {})
+    best_lr_pipe = None
+    best_lr_auc = -1.0
+    best_conv = True
+    grid_l1 = lr_params.get("l1_ratio", [0.0, 0.2, 0.5, 0.8])
+    grid_C = lr_params.get("C", [0.1, 0.5, 1.0])
+    cw_cfg = str(getattr(getattr(cfg, "modeling", object()), "class_weight", "balanced")).lower()
+    class_weight = None if cw_cfg in ("none", "null", "") else "balanced"
+    for l1_ratio in grid_l1:
+        for C in grid_C:
+            if float(l1_ratio) == 0.0:
+                lr = LogisticRegression(
+                    penalty="l2",
+                    solver="lbfgs",
+                    C=C,
+                    max_iter=10000,
+                    tol=1e-3,
+                    class_weight=class_weight,
+                    random_state=getattr(getattr(cfg, "modeling", object()), "seed", 42),
+                )
+            else:
+                lr = LogisticRegression(
+                    penalty="elasticnet",
+                    solver="saga",
+                    l1_ratio=l1_ratio,
+                    C=C,
+                    max_iter=10000,
+                    tol=1e-3,
+                    class_weight=class_weight,
+                    random_state=getattr(getattr(cfg, "modeling", object()), "seed", 42),
+                )
+            pipe = Pipeline([
+                ("scaler", StandardScaler(with_mean=False)),
+                ("model", lr),
+            ])
+            with warnings.catch_warnings(record=True) as ws:
+                warnings.simplefilter("always", ConvergenceWarning)
+                pipe.fit(X_train, y_train)
+                conv_warn = any(isinstance(w.message, ConvergenceWarning) for w in ws)
+            p = pipe.predict_proba(X_valid)[:, 1]
+            auc_lr = roc_auc_score(y_valid, p)
+            if auc_lr > best_lr_auc:
+                best_lr_auc = auc_lr
+                best_lr_pipe = pipe
+                best_conv = not conv_warn
+
+    if best_lr_pipe is None:
+        return None, {}
+
+    best_cal = None
+    best_brier = None
+    best_cal_method = "none"
+    best_cal_reason = None
+    for m in cal_methods:
+        cal, cm, reason = _calibrate(
+            best_lr_pipe,
+            X_train,
+            y_train,
+            X_valid,
+            m,
+            folds=getattr(getattr(cfg, "modeling", object()), "folds", 3),
+            sparse_isotonic_threshold_pos=getattr(getattr(cfg, "modeling", object()), "sparse_isotonic_threshold_pos", None),
+        )
+        if cal is None:
+            if best_cal is None and best_cal_reason is None:
+                best_cal_reason = reason
+            continue
+        p_cal = cal.predict_proba(X_valid)[:, 1]
+        brier = brier_score_loss(y_valid, p_cal)
+        if best_brier is None or brier < best_brier:
+            best_brier = brier
+            best_cal = cal
+            best_cal_method = cm
+            best_cal_reason = None
+
+    if best_cal is not None:
+        probs = best_cal.predict_proba(X_valid)[:, 1]
+    else:
+        probs = best_lr_pipe.predict_proba(X_valid)[:, 1]
+        try:
+            best_brier = brier_score_loss(y_valid, probs)
+        except Exception:
+            best_brier = None
+
+    lifts_dict, rev_lifts_dict, lift10 = _compute_topk_lifts(
+        y_valid,
+        probs,
+        weights_valid,
+        top_k_percents,
+    )
+
+    try:
+        lr_inner = best_lr_pipe.named_steps.get("model")
+        n_iter_val = getattr(lr_inner, "n_iter_", None)
+        if isinstance(n_iter_val, (list, np.ndarray)):
+            n_iter_val = [int(x) for x in np.ravel(n_iter_val).tolist()]
+    except Exception:
+        n_iter_val = None
+
+    topn = _collect_topn_ids(probs, valid_index, df, top_k_percents)
+
+    result = {
+        "cutoff": cutoff,
+        "model": "logreg",
+        "auc": float(best_lr_auc),
+        "lift10": float(lift10) if lift10 is not None else None,
+        "brier": float(best_brier) if best_brier is not None else None,
+        "calibration": best_cal_method,
+        "calibration_reason": best_cal_reason,
+        "converged": bool(best_conv),
+        "n_iter": n_iter_val,
+        "positives": pos_count,
+        "prevalence": prevalence,
+    }
+    result.update({k: v for k, v in lifts_dict.items()})
+    result.update({k: v for k, v in rev_lifts_dict.items()})
+
+    return result, topn
+
+
+def _train_lgbm_for_cutoff(
+    cfg,
+    cal_methods: list[str],
+    X_train: pd.DataFrame,
+    y_train: np.ndarray,
+    X_valid: pd.DataFrame,
+    y_valid: np.ndarray,
+    weights_valid: np.ndarray,
+    valid_index: pd.Index,
+    df: pd.DataFrame,
+    cutoff: str,
+    pos_count: int,
+    prevalence: float,
+    top_k_percents: list[int],
+) -> tuple[dict | None, dict[int, list[str]]]:
+    """Train and evaluate the LGBM challenger for a single cutoff."""
+
+    pos = int(np.sum(y_train))
+    neg = int(len(y_train) - pos)
+    spw = neg / max(1, pos)
+    modeling_cfg = getattr(cfg, "modeling", object())
+    use_spw = bool(getattr(modeling_cfg, "use_scale_pos_weight", True))
+    spw_cap = float(getattr(modeling_cfg, "scale_pos_weight_cap", 10.0))
+    grid = getattr(modeling_cfg, "lgbm_grid", {})
+    best_lgbm = None
+    best_auc = -1.0
+    seed = getattr(modeling_cfg, "seed", 42)
+
+    for num_leaves in grid.get("num_leaves", [31]):
+        for min_data_in_leaf in grid.get("min_data_in_leaf", [50]):
+            for learning_rate in grid.get("learning_rate", [0.05]):
+                for feature_fraction in grid.get("feature_fraction", [0.9]):
+                    for bagging_fraction in grid.get("bagging_fraction", [0.9]):
+                        params = dict(
+                            random_state=seed,
+                            deterministic=True,
+                            n_jobs=1,
+                            n_estimators=400,
+                            learning_rate=learning_rate,
+                            num_leaves=num_leaves,
+                            min_data_in_leaf=min_data_in_leaf,
+                            feature_fraction=feature_fraction,
+                            bagging_fraction=bagging_fraction,
+                        )
+                        if use_spw:
+                            params["scale_pos_weight"] = min(spw, spw_cap)
+                        lgbm = LGBMClassifier(**params)
+                        lgbm.fit(X_train, y_train, eval_set=[(X_valid, y_valid)], eval_metric="auc")
+                        probs = lgbm.predict_proba(X_valid)[:, 1]
+                        auc_lgbm = roc_auc_score(y_valid, probs)
+                        try:
+                            p_tr = lgbm.predict_proba(X_train)[:, 1]
+                            auc_tr = roc_auc_score(y_train, p_tr)
+                            gap = float(auc_tr - auc_lgbm)
+                        except Exception:
+                            gap = 0.0
+                        if gap > 0.05:
+                            reg_params = dict(
+                                random_state=seed,
+                                deterministic=True,
+                                n_jobs=1,
+                                n_estimators=400,
+                                learning_rate=learning_rate,
+                                num_leaves=max(15, int(num_leaves * 0.8)),
+                                min_data_in_leaf=int(min_data_in_leaf * 2),
+                                feature_fraction=max(0.5, feature_fraction * 0.9),
+                                bagging_fraction=max(0.5, bagging_fraction * 0.9),
+                            )
+                            if use_spw:
+                                reg_params["scale_pos_weight"] = min(spw, spw_cap)
+                            reg_clf = LGBMClassifier(**reg_params)
+                            reg_clf.fit(X_train, y_train, eval_set=[(X_valid, y_valid)], eval_metric="auc")
+                            p_reg = reg_clf.predict_proba(X_valid)[:, 1]
+                            auc_reg = roc_auc_score(y_valid, p_reg)
+                            if auc_reg >= auc_lgbm - 0.002:
+                                lgbm = reg_clf
+                                probs = p_reg
+                                auc_lgbm = auc_reg
+                                logger.info(
+                                    "Overfit guard applied: gap=%.3f -> using regularized params for LGBM",
+                                    gap,
+                                )
+                        if auc_lgbm > best_auc:
+                            best_auc = auc_lgbm
+                            best_lgbm = lgbm
+
+    if best_lgbm is None:
+        return None, {}
+
+    best_cal = None
+    best_brier = None
+    best_cal_method = "none"
+    best_cal_reason = None
+    for m in cal_methods:
+        cal, cm, reason = _calibrate(
+            best_lgbm,
+            X_train,
+            y_train,
+            X_valid,
+            m,
+            folds=getattr(modeling_cfg, "folds", 3),
+            sparse_isotonic_threshold_pos=getattr(modeling_cfg, "sparse_isotonic_threshold_pos", None),
+        )
+        if cal is None:
+            if best_cal is None and best_cal_reason is None:
+                best_cal_reason = reason
+            continue
+        p_cal = cal.predict_proba(X_valid)[:, 1]
+        brier = brier_score_loss(y_valid, p_cal)
+        if best_brier is None or brier < best_brier:
+            best_brier = brier
+            best_cal = cal
+            best_cal_method = cm
+            best_cal_reason = None
+
+    if best_cal is not None:
+        probs = best_cal.predict_proba(X_valid)[:, 1]
+    else:
+        probs = best_lgbm.predict_proba(X_valid)[:, 1]
+        try:
+            best_brier = brier_score_loss(y_valid, probs)
+        except Exception:
+            best_brier = None
+
+    lifts_dict, rev_lifts_dict, lift10 = _compute_topk_lifts(
+        y_valid,
+        probs,
+        weights_valid,
+        top_k_percents,
+    )
+
+    topn = _collect_topn_ids(probs, valid_index, df, top_k_percents)
+
+    result = {
+        "cutoff": cutoff,
+        "model": "lgbm",
+        "auc": float(best_auc),
+        "lift10": float(lift10) if lift10 is not None else None,
+        "brier": float(best_brier) if best_brier is not None else None,
+        "calibration": best_cal_method,
+        "calibration_reason": best_cal_reason,
+        "converged": True,
+        "positives": pos_count,
+        "prevalence": prevalence,
+    }
+    result.update({k: v for k, v in lifts_dict.items()})
+    result.update({k: v for k, v in rev_lifts_dict.items()})
+
+    return result, topn
+
+
 def _json_safe(value):
     if isinstance(value, dict):
         return {k: _json_safe(v) for k, v in value.items()}
@@ -438,7 +752,22 @@ def _calibrate(
 @click.option("--output-name", default=None, help="Optional custom model directory name under MODELS_DIR")
 @click.option("--cold-only/--no-cold-only", default=False, help="Train using only cold customer segment (no recent transactions but assets present)")
 @click.option("--dry-run/--no-dry-run", default=False, help="Skip training; only verify inputs and emit planned artifacts to manifest")
-def main(division: str, cutoffs: str, window_months: int, models: str, calibration: str, shap_sample: int, config: str, group_cv: bool, purge_days: int, label_buffer_days: int, safe_mode: bool, output_name: str | None, cold_only: bool, dry_run: bool) -> None:
+def main(
+    division: str,
+    cutoffs: str,
+    window_months: int,
+    models: str,
+    calibration: str,
+    shap_sample: int,
+    config: str,
+    group_cv: bool,
+    purge_days: int,
+    label_buffer_days: int,
+    safe_mode: bool,
+    output_name: str | None = None,
+    cold_only: bool = False,
+    dry_run: bool = False,
+) -> None:
     cfg = load_config(config)
     # Determine SAFE policy: CLI flag or per-division config override
     auto_safe = bool(safe_mode)
@@ -494,6 +823,7 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
     # Accumulate metrics across cutoffs per model
     model_names = [m.strip() for m in models.split(",") if m.strip()]
     cal_methods = [c.strip() for c in calibration.split(",") if c.strip()]
+    top_k_percents = [int(k) for k in getattr(cfg.modeling, 'top_k_percents', [10])]
 
     artifacts: dict[str, str] = {}
     results = []
@@ -702,264 +1032,59 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
                     raise
                 # Non-fatal for non-group splits; proceed
 
-        # Baseline LR (elastic-net via saga)
-        if 'logreg' in model_names:
-            lr_params = cfg.modeling.lr_grid
-            best_lr_pipe = None
-            best_lr_auc = -1
-            best_conv = True
-            # Expanded grid and higher iteration budget
-            grid_l1 = lr_params.get('l1_ratio', [0.0, 0.2, 0.5, 0.8])
-            grid_C = lr_params.get('C', [0.1, 0.5, 1.0])
-            # Class-weight control
-            cw_cfg = str(cfg.modeling.class_weight).lower() if getattr(cfg, 'modeling', None) else 'balanced'
-            class_weight = None if cw_cfg in ('none', 'null', '') else 'balanced'
-            for l1_ratio in grid_l1:
-                for C in grid_C:
-                    if float(l1_ratio) == 0.0:
-                        lr = LogisticRegression(
-                            penalty='l2', solver='lbfgs', C=C, max_iter=10000, tol=1e-3,
-                            class_weight=class_weight, random_state=cfg.modeling.seed
-                        )
-                    else:
-                        lr = LogisticRegression(
-                            penalty='elasticnet', solver='saga', l1_ratio=l1_ratio, C=C,
-                            max_iter=10000, tol=1e-3, class_weight=class_weight, random_state=cfg.modeling.seed
-                        )
-                    pipe = Pipeline([
-                        ('scaler', StandardScaler(with_mean=False)),
-                        ('model', lr),
-                    ])
-                    with warnings.catch_warnings(record=True) as ws:
-                        warnings.simplefilter("always", ConvergenceWarning)
-                        pipe.fit(X_train, y_train)
-                        conv_warn = any(isinstance(w.message, ConvergenceWarning) for w in ws)
-                    p = pipe.predict_proba(X_valid)[:, 1]
-                    auc_lr = roc_auc_score(y_valid, p)
-                    if auc_lr > best_lr_auc:
-                        best_lr_auc = auc_lr
-                        best_lr_pipe = pipe
-                        best_conv = not conv_warn
-            if best_lr_pipe is not None:
-                # Calibration on the entire pipeline (safe, per-cutoff)
-                best_cal = None
-                best_brier = None
-                best_cal_method = "none"
-                best_cal_reason = None
-                for m in cal_methods:
-                    cal, cm, reason = _calibrate(
-                        best_lr_pipe,
-                        X_train,
-                        y_train,
-                        X_valid,
-                        m,
-                        folds=getattr(getattr(cfg, 'modeling', object()), 'folds', 3),
-                        sparse_isotonic_threshold_pos=getattr(getattr(cfg, 'modeling', object()), 'sparse_isotonic_threshold_pos', None),
-                    )
-                    if cal is None:
-                        if best_cal is None and best_cal_reason is None:
-                            best_cal_reason = reason
-                        continue
-                    p_cal = cal.predict_proba(X_valid)[:, 1]
-                    brier = brier_score_loss(y_valid, p_cal)
-                    if best_brier is None or brier < best_brier:
-                        best_brier = brier
-                        best_cal = cal
-                        best_cal_method = cm
-                        best_cal_reason = None
+            if isinstance(X_valid, pd.DataFrame):
+                valid_index = X_valid.index
+            else:
+                valid_index = pd.Index(range(len(X_valid)))
+            try:
+                weights_valid = weights_series.loc[valid_index].astype(float).values
+            except Exception:
+                weights_valid = np.asarray(weights_series.iloc[: len(valid_index)].astype(float).values)
 
-                # Choose calibrated if available, else fallback to uncalibrated pipeline
-                if best_cal is not None:
-                    p = best_cal.predict_proba(X_valid)[:, 1]
-                else:
-                    p = best_lr_pipe.predict_proba(X_valid)[:, 1]
-                    try:
-                        best_brier = brier_score_loss(y_valid, p)
-                    except Exception:
-                        best_brier = None
-                weights_valid = weights_series.loc[X_valid.index].astype(float).values
-                lifts_dict: dict[str, float | None] = {}
-                rev_lifts_dict: dict[str, float | None] = {}
-                for k in getattr(cfg.modeling, 'top_k_percents', [10]):
-                    key = f"lift@{int(k)}"
-                    try:
-                        lifts_dict[key] = float(_lift_at_k(y_valid, p, int(k)))
-                    except Exception:
-                        lifts_dict[key] = None
-                    rev_key = f"rev_lift@{int(k)}"
-                    try:
-                        val = _weighted_lift_at_k(y_valid, p, weights_valid, int(k))
-                        rev_lifts_dict[rev_key] = float(val) if val == val else None
-                    except Exception:
-                        rev_lifts_dict[rev_key] = None
-                lift10 = lifts_dict.get('lift@10')
-                topn_registry[("logreg", cutoff)] = _collect_topn_ids(
-                    p,
-                    X_valid.index,
+            y_train_arr = y_train.values if hasattr(y_train, "values") else np.asarray(y_train)
+            y_valid_arr = y_valid.values if hasattr(y_valid, "values") else np.asarray(y_valid)
+
+            if 'logreg' in model_names:
+                logreg_result, logreg_topn = _train_logreg_for_cutoff(
+                    cfg,
+                    cal_methods,
+                    X_train,
+                    y_train_arr,
+                    X_valid,
+                    y_valid_arr,
+                    weights_valid,
+                    valid_index,
                     df,
-                    [int(k) for k in getattr(cfg.modeling, 'top_k_percents', [10])],
+                    cutoff,
+                    pos_count,
+                    prevalence,
+                    top_k_percents,
                 )
-                # Pull n_iter_ from underlying LR if available
-                try:
-                    lr_inner = best_lr_pipe.named_steps.get('model')
-                    n_iter_val = getattr(lr_inner, 'n_iter_', None)
-                    if isinstance(n_iter_val, (list, np.ndarray)):
-                        n_iter_val = [int(x) for x in np.ravel(n_iter_val).tolist()]
-                except Exception:
-                    n_iter_val = None
-                results.append({
-                    "cutoff": cutoff,
-                    "model": "logreg",
-                    "auc": float(best_lr_auc),
-                    "lift10": float(lift10) if lift10 is not None else None,
-                    "brier": float(best_brier) if best_brier is not None else None,
-                    "calibration": best_cal_method,
-                    "calibration_reason": best_cal_reason,
-                    "converged": bool(best_conv),
-                    "n_iter": n_iter_val,
-                    "positives": pos_count,
-                    "prevalence": prevalence,
-                    **{k: v for k, v in lifts_dict.items()},
-                    **{k: v for k, v in rev_lifts_dict.items()},
-                })
+                if logreg_result:
+                    results.append(logreg_result)
+                    if logreg_topn:
+                        topn_registry[("logreg", cutoff)] = logreg_topn
 
-        # LGBM challenger
-        if 'lgbm' in model_names:
-            # scale_pos_weight
-            pos = int(np.sum(y_train))
-            neg = int(len(y_train) - pos)
-            spw = (neg / max(1, pos))
-            use_spw = bool(getattr(cfg.modeling, 'use_scale_pos_weight', True))
-            spw_cap = float(getattr(cfg.modeling, 'scale_pos_weight_cap', 10.0))
-            grid = cfg.modeling.lgbm_grid
-            best_lgbm = None
-            best_auc = -1
-            for num_leaves in grid.get('num_leaves', [31]):
-                for min_data_in_leaf in grid.get('min_data_in_leaf', [50]):
-                    for learning_rate in grid.get('learning_rate', [0.05]):
-                        for feature_fraction in grid.get('feature_fraction', [0.9]):
-                            for bagging_fraction in grid.get('bagging_fraction', [0.9]):
-                                params = dict(
-                                    random_state=cfg.modeling.seed,
-                                    deterministic=True,
-                                    n_jobs=1,
-                                    n_estimators=400,
-                                    learning_rate=learning_rate,
-                                    num_leaves=num_leaves,
-                                    min_data_in_leaf=min_data_in_leaf,
-                                    feature_fraction=feature_fraction,
-                                    bagging_fraction=bagging_fraction,
-                                )
-                                if use_spw:
-                                    params['scale_pos_weight'] = min(spw, spw_cap)
-                                lgbm = LGBMClassifier(**params)
-                                lgbm.fit(X_train, y_train, eval_set=[(X_valid, y_valid)], eval_metric='auc')
-                                p = lgbm.predict_proba(X_valid)[:,1]
-                                auc_lgbm = roc_auc_score(y_valid, p)
-                                # Overfit guard: compare train vs valid AUC; if large gap, try stronger regularization once
-                                try:
-                                    p_tr = lgbm.predict_proba(X_train)[:,1]
-                                    auc_tr = roc_auc_score(y_train, p_tr)
-                                    gap = float(auc_tr - auc_lgbm)
-                                except Exception:
-                                    gap = 0.0
-                                if gap > 0.05:
-                                    reg_params = dict(
-                                        random_state=cfg.modeling.seed,
-                                        deterministic=True,
-                                        n_jobs=1,
-                                        n_estimators=400,
-                                        learning_rate=learning_rate,
-                                        num_leaves=max(15, int(num_leaves * 0.8)),
-                                        min_data_in_leaf=int(min_data_in_leaf * 2),
-                                        feature_fraction=max(0.5, feature_fraction * 0.9),
-                                        bagging_fraction=max(0.5, bagging_fraction * 0.9),
-                                    )
-                                    if use_spw:
-                                        reg_params['scale_pos_weight'] = min(spw, spw_cap)
-                                    reg_clf = LGBMClassifier(**reg_params)
-                                    reg_clf.fit(X_train, y_train, eval_set=[(X_valid, y_valid)], eval_metric='auc')
-                                    p_reg = reg_clf.predict_proba(X_valid)[:,1]
-                                    auc_reg = roc_auc_score(y_valid, p_reg)
-                                    if auc_reg >= auc_lgbm - 0.002:  # accept similar or better valid AUC with stronger regularization
-                                        lgbm = reg_clf
-                                        p = p_reg
-                                        auc_lgbm = auc_reg
-                                        logger.info(f"Overfit guard applied: gap={gap:.3f} -> using regularized params for LGBM")
-                                if auc_lgbm > best_auc:
-                                    best_auc = auc_lgbm
-                                    best_lgbm = lgbm
-            if best_lgbm is not None:
-                # Calibration (safe)
-                best_cal = None
-                best_brier = None
-                best_cal_method = "none"
-                best_cal_reason = None
-                for m in cal_methods:
-                    cal, cm, reason = _calibrate(
-                        best_lgbm,
-                        X_train,
-                        y_train,
-                        X_valid,
-                        m,
-                        folds=getattr(getattr(cfg, 'modeling', object()), 'folds', 3),
-                        sparse_isotonic_threshold_pos=getattr(getattr(cfg, 'modeling', object()), 'sparse_isotonic_threshold_pos', None),
-                    )
-                    if cal is None:
-                        if best_cal is None and best_cal_reason is None:
-                            best_cal_reason = reason
-                        continue
-                    p_cal = cal.predict_proba(X_valid)[:, 1]
-                    brier = brier_score_loss(y_valid, p_cal)
-                    if best_brier is None or brier < best_brier:
-                        best_brier = brier
-                        best_cal = cal
-                        best_cal_method = cm
-                        best_cal_reason = None
-
-                if best_cal is not None:
-                    p = best_cal.predict_proba(X_valid)[:, 1]
-                else:
-                    p = best_lgbm.predict_proba(X_valid)[:, 1]
-                    try:
-                        best_brier = brier_score_loss(y_valid, p)
-                    except Exception:
-                        best_brier = None
-                weights_valid = weights_series.loc[X_valid.index].astype(float).values
-                lifts_dict: dict[str, float | None] = {}
-                rev_lifts_dict: dict[str, float | None] = {}
-                for k in getattr(cfg.modeling, 'top_k_percents', [10]):
-                    key = f"lift@{int(k)}"
-                    try:
-                        lifts_dict[key] = float(_lift_at_k(y_valid, p, int(k)))
-                    except Exception:
-                        lifts_dict[key] = None
-                    rev_key = f"rev_lift@{int(k)}"
-                    try:
-                        val = _weighted_lift_at_k(y_valid, p, weights_valid, int(k))
-                        rev_lifts_dict[rev_key] = float(val) if val == val else None
-                    except Exception:
-                        rev_lifts_dict[rev_key] = None
-                lift10 = lifts_dict.get('lift@10')
-                topn_registry[("lgbm", cutoff)] = _collect_topn_ids(
-                    p,
-                    X_valid.index,
+            if 'lgbm' in model_names:
+                lgbm_result, lgbm_topn = _train_lgbm_for_cutoff(
+                    cfg,
+                    cal_methods,
+                    X_train,
+                    y_train_arr,
+                    X_valid,
+                    y_valid_arr,
+                    weights_valid,
+                    valid_index,
                     df,
-                    [int(k) for k in getattr(cfg.modeling, 'top_k_percents', [10])],
+                    cutoff,
+                    pos_count,
+                    prevalence,
+                    top_k_percents,
                 )
-                results.append({
-                    "cutoff": cutoff,
-                    "model": "lgbm",
-                    "auc": float(best_auc),
-                    "lift10": float(lift10) if lift10 is not None else None,
-                    "brier": float(best_brier) if best_brier is not None else None,
-                    "calibration": best_cal_method,
-                    "calibration_reason": best_cal_reason,
-                    "positives": pos_count,
-                    "prevalence": prevalence,
-                    **{k: v for k, v in lifts_dict.items()},
-                    **{k: v for k, v in rev_lifts_dict.items()},
-                })
+                if lgbm_result:
+                    results.append(lgbm_result)
+                    if lgbm_topn:
+                        topn_registry[("lgbm", cutoff)] = lgbm_topn
 
     # Aggregate and select winner by stability-adjusted revenue lift
     if not results:
@@ -968,7 +1093,7 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
     res_df = pd.DataFrame(results)
     agg, winner, stability_summary = _aggregate_stability(
         results,
-        [int(k) for k in getattr(cfg.modeling, 'top_k_percents', [10])],
+        top_k_percents,
         penalty_lambda,
         cv_guard,
     )
@@ -989,7 +1114,7 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
         bool(winner_summary.get("cv_guard_fail")),
     )
 
-    top_k_list = [int(k) for k in getattr(cfg.modeling, 'top_k_percents', [10])]
+    top_k_list = top_k_percents
     winner_rows = [r for r in results if str(r.get("model")) == str(winner)]
     last_cut = cut_list[-1]
     holdout_row = None

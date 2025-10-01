@@ -15,6 +15,7 @@ import copy
 from collections.abc import Iterable
 from pathlib import Path
 import joblib
+import math
 
 _MLFLOW_IMPORT_ERROR: Exception | None = None
 
@@ -1235,7 +1236,12 @@ def generate_scoring_outputs(
             pass
         logger.info(f"Saved ICP scores for {len(combined_scores)} customer-division combinations to {icp_scores_path}")
     else:
-        logger.warning("No models were available for scoring.")
+        message = (
+            "No models were available for scoring. Ensure trained models exist "
+            f"under {MODELS_DIR} or adjust target configuration."
+        )
+        logger.error(message)
+        raise RuntimeError(message)
     
     # Phase-4 ranker: replace legacy heuristic whitespace
     try:
@@ -1419,39 +1425,58 @@ def generate_scoring_outputs(
                         if len(ranked) > 0:
                             ksel = max(1, int(len(ranked) * (cfg.modeling.capacity_percent / 100.0)))
                             # Segment-aware allocation (optional)
-                            seg_alloc = getattr(getattr(cfg, 'whitespace', object()), 'segment_allocation', None)
-                            if seg_alloc and 'segment' in ranked.columns and sort_cols:
-                                try:
-                                    alloc = {k.lower(): float(v) for k, v in dict(seg_alloc).items()}
-                                except Exception:
-                                    alloc = {}
-                                # Normalize allocation and compute counts
-                                warm_r = max(0.0, alloc.get('warm', 0.0))
-                                cold_r = max(0.0, alloc.get('cold', 0.0))
-                                pros_r = max(0.0, alloc.get('prospect', 0.0))
-                                ssum = warm_r + cold_r + pros_r
-                                if ssum > 0:
-                                    warm_n = int(round(ksel * warm_r / ssum))
-                                    cold_n = int(round(ksel * cold_r / ssum))
-                                    pros_n = max(0, ksel - warm_n - cold_n)
-                                    # Take top-N per segment
-                                    def top_seg(name: str, n: int) -> pd.DataFrame:
-                                        if n <= 0:
-                                            return ranked.head(0)
-                                        sub = ranked[ranked['segment'].astype(str).str.lower() == name]
-                                        return sub.sort_values(by=sort_cols, ascending=False, na_position='last').head(n)
-                                    parts = [
-                                        top_seg('warm', warm_n),
-                                        top_seg('cold', cold_n),
-                                        top_seg('prospect', pros_n),
-                                    ]
-                                    initial = pd.concat(parts, ignore_index=True)
-                                    # Top-up to ksel with next best remaining if short
-                                    if len(initial) < ksel:
-                                        remaining = ranked.merge(initial[['customer_id','division_name']], on=['customer_id','division_name'], how='left', indicator=True)
-                                        remaining = remaining[remaining['_merge'] == 'left_only'].drop(columns=['_merge'])
-                                        top_up = remaining.sort_values(by=sort_cols, ascending=False, na_position='last').head(ksel - len(initial))
-                                        initial = pd.concat([initial, top_up], ignore_index=True)
+                            try:
+                                seg_alloc_cfg = dict(getattr(getattr(cfg, 'whitespace', object()), 'segment_allocation', {}) or {})
+                            except Exception:
+                                seg_alloc_cfg = {}
+                            if seg_alloc_cfg and 'segment' in ranked.columns and sort_cols:
+                                alloc: dict[str, float] = {}
+                                for raw_key, raw_val in seg_alloc_cfg.items():
+                                    key = str(raw_key).strip().lower()
+                                    if not key:
+                                        continue
+                                    if key == 'prospects':
+                                        key = 'prospect'
+                                    try:
+                                        val = float(raw_val)
+                                    except (TypeError, ValueError):
+                                        continue
+                                    if math.isfinite(val) and val > 0:
+                                        alloc[key] = val
+                                if alloc:
+                                    warm_r = alloc.get('warm', 0.0)
+                                    cold_r = alloc.get('cold', 0.0)
+                                    pros_r = alloc.get('prospect', 0.0)
+                                    ssum = warm_r + cold_r + pros_r
+                                    if ssum > 0:
+                                        warm_n = int(round(ksel * warm_r / ssum))
+                                        cold_n = int(round(ksel * cold_r / ssum))
+                                        pros_n = max(0, ksel - warm_n - cold_n)
+
+                                        def top_seg(name: str, n: int) -> pd.DataFrame:
+                                            if n <= 0:
+                                                return ranked.head(0)
+                                            sub = ranked[ranked['segment'].astype(str).str.lower() == name]
+                                            return sub.sort_values(by=sort_cols, ascending=False, na_position='last').head(n)
+
+                                        parts = [
+                                            top_seg('warm', warm_n),
+                                            top_seg('cold', cold_n),
+                                            top_seg('prospect', pros_n),
+                                        ]
+                                        initial = pd.concat(parts, ignore_index=True)
+                                        if len(initial) < ksel:
+                                            remaining = ranked.merge(
+                                                initial[['customer_id', 'division_name']],
+                                                on=['customer_id', 'division_name'],
+                                                how='left',
+                                                indicator=True,
+                                            )
+                                            remaining = remaining[remaining['_merge'] == 'left_only'].drop(columns=['_merge'])
+                                            top_up = remaining.sort_values(by=sort_cols, ascending=False, na_position='last').head(ksel - len(initial))
+                                            initial = pd.concat([initial, top_up], ignore_index=True)
+                                    else:
+                                        initial = ranked.sort_values(by=sort_cols, ascending=False, na_position='last').head(ksel).copy()
                                 else:
                                     initial = ranked.sort_values(by=sort_cols, ascending=False, na_position='last').head(ksel).copy()
                             else:

@@ -633,10 +633,23 @@ def _compute_assets_als_norm(df: pd.DataFrame, owner_centroid: np.ndarray | None
     - Else, compute from rows with owns_assets_div_<division> == True when available; else from owned_division_pre_cutoff; else global mean.
     - Falls back to global cached centroid (ASSETS_ALS_CENTROID_PATH) when division-specific unavailable.
     """
+    try:
+        from gosales.utils.config import load_config as _load_config
+
+        _cfg = _load_config()
+        assets_cfg = getattr(getattr(_cfg, "features", object()), "assets_als", None)
+        max_rows = int(getattr(assets_cfg, "max_rows", 20_000)) if assets_cfg is not None else 20_000
+        max_cols = int(getattr(assets_cfg, "max_cols", 200)) if assets_cfg is not None else 200
+    except Exception:
+        max_rows = 20_000
+        max_cols = 200
+
     cols = [c for c in df.columns if c.startswith("als_assets_f")]
     if not cols:
         return pd.Series(np.zeros(len(df)), index=df.index, dtype=float)
     if df.empty:
+        return pd.Series(np.zeros(len(df)), index=df.index, dtype=float)
+    if len(df) > max_rows or len(cols) > max_cols:
         return pd.Series(np.zeros(len(df)), index=df.index, dtype=float)
     # If no division column, do a global computation
     if 'division_name' not in df.columns:

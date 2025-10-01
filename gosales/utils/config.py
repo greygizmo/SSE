@@ -77,6 +77,15 @@ class Labels:
 
 
 @dataclass
+class AssetsALSConfig:
+    max_rows: int = 20_000
+    max_cols: int = 200
+    factors: int = 16
+    iters: int = 4
+    reg: float = 0.1
+
+
+@dataclass
 class Features:
     windows_months: list[int] = field(default_factory=lambda: [3, 6, 12, 24])
     gp_winsor_p: float = 0.99
@@ -85,6 +94,8 @@ class Features:
     use_market_basket: bool = True
     use_als_embeddings: bool = False
     als_lookback_months: int = 12
+    use_assets_als: bool = False
+    assets_als: AssetsALSConfig = field(default_factory=AssetsALSConfig)
     use_item2vec: bool = False
     use_text_tags: bool = False
     # Toggle Moneyball-based asset features at cutoff (rollups, expiring windows, subs shares)
@@ -146,6 +157,8 @@ class WhitespaceEligibilityConfig:
     exclude_if_recent_contact_days: int = 0
     exclude_if_open_deal: bool = False
     require_region_match: bool = False
+    exclude_if_active_assets: bool = False
+    reinclude_if_assets_expired_days: int = 0
 
 
 @dataclass
@@ -165,6 +178,10 @@ class WhitespaceConfig:
     challenger_model: str = "lr"  # currently only 'lr'
     # Shadow mode emits legacy heuristic whitespace for comparison
     shadow_mode: bool = False
+    # Optional segment-aware allocation during selection and weighting
+    segment_allocation: Dict[str, float] = field(default_factory=dict)
+    segment_columns: list[str] = field(default_factory=list)
+    segment_min_rows: int = 250
 
 
 @dataclass
@@ -347,6 +364,40 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
         raise ValueError("whitespace.weights must sum to a positive number")
     ws_weights = [w / total_w for w in ws_weights]
 
+    raw_seg_alloc = ws_cfg.get("segment_allocation") or {}
+    segment_allocation: Dict[str, float] = {}
+    if isinstance(raw_seg_alloc, dict):
+        for raw_key, raw_val in raw_seg_alloc.items():
+            key = str(raw_key).strip().lower()
+            if not key:
+                continue
+            try:
+                val = float(raw_val)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(val):
+                segment_allocation[key] = max(0.0, val)
+
+    raw_seg_cols = ws_cfg.get("segment_columns", [])
+    if isinstance(raw_seg_cols, str):
+        raw_seg_cols = [raw_seg_cols]
+    segment_columns: list[str] = []
+    if isinstance(raw_seg_cols, (list, tuple, set)):
+        for col in raw_seg_cols:
+            col_str = str(col).strip()
+            if col_str and col_str not in segment_columns:
+                segment_columns.append(col_str)
+
+    seg_min_rows_val = ws_cfg.get("segment_min_rows", 250)
+    try:
+        segment_min_rows = int(seg_min_rows_val)
+    except Exception:
+        segment_min_rows = 250
+    if segment_min_rows < 0:
+        segment_min_rows = 0
+
+    assets_als_cfg_raw = feat_cfg.get("assets_als")
+    assets_als_cfg = assets_als_cfg_raw if isinstance(assets_als_cfg_raw, dict) else {}
     cfg = Config(
         paths=_paths_from_dict(paths_dict),
         database=Database(
@@ -395,6 +446,14 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
             use_market_basket=bool(feat_cfg.get("use_market_basket", True)),
             use_als_embeddings=bool(feat_cfg.get("use_als_embeddings", False)),
             als_lookback_months=int(feat_cfg.get("als_lookback_months", 12)),
+            use_assets_als=bool(feat_cfg.get("use_assets_als", False)),
+            assets_als=AssetsALSConfig(
+                max_rows=int(assets_als_cfg.get("max_rows", 20_000)),
+                max_cols=int(assets_als_cfg.get("max_cols", 200)),
+                factors=int(assets_als_cfg.get("factors", 16)),
+                iters=int(assets_als_cfg.get("iters", 4)),
+                reg=float(assets_als_cfg.get("reg", 0.1)),
+            ),
             use_item2vec=bool(feat_cfg.get("use_item2vec", False)),
             use_text_tags=bool(feat_cfg.get("use_text_tags", False)),
             use_assets=bool(feat_cfg.get("use_assets", True)),
@@ -436,6 +495,10 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
                 exclude_if_recent_contact_days=int(ws_eligibility_cfg.get("exclude_if_recent_contact_days", 0)),
                 exclude_if_open_deal=bool(ws_eligibility_cfg.get("exclude_if_open_deal", False)),
                 require_region_match=bool(ws_eligibility_cfg.get("require_region_match", False)),
+                exclude_if_active_assets=bool(ws_eligibility_cfg.get("exclude_if_active_assets", False)),
+                reinclude_if_assets_expired_days=int(
+                    ws_eligibility_cfg.get("reinclude_if_assets_expired_days", 0) or 0
+                ),
             ),
             capacity_mode=str(ws_cfg.get("capacity_mode", "top_percent")),
             accounts_per_rep=int(ws_cfg.get("accounts_per_rep", 25)),
@@ -447,6 +510,9 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
             challenger_enabled=bool(ws_cfg.get("challenger_enabled", False)),
             challenger_model=str(ws_cfg.get("challenger_model", "lr")),
             shadow_mode=bool(ws_cfg.get("shadow_mode", False)),
+            segment_allocation=segment_allocation,
+            segment_columns=segment_columns,
+            segment_min_rows=segment_min_rows,
         ),
         validation=ValidationConfig(
             bootstrap_n=int(val_cfg.get("bootstrap_n", 1000)),

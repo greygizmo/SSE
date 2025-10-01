@@ -1,4 +1,5 @@
 pandas
+pyarrow
 polars
 numpy
 sqlalchemy>=2.0

@@ -6,6 +6,7 @@ import joblib
 import polars as pl
 import pytest
 
+import gosales.pipeline.score_customers as sc
 from gosales.pipeline.score_customers import (
     MissingModelMetadataError,
     score_customers_for_division,
@@ -86,3 +87,60 @@ def test_missing_metadata_fields_use_fallback_arguments(tmp_path):
     alert = alerts[0]
     assert alert["severity"] == "warning"
     assert "used fallback arguments" in alert["message"].lower()
+
+
+def test_generate_scoring_outputs_passes_pipeline_defaults(tmp_path, monkeypatch):
+    model_dir = tmp_path / "solidworks_model"
+    model_dir.mkdir()
+    (model_dir / "metadata.json").write_text(
+        json.dumps({"division": "Solidworks"}),
+        encoding="utf-8",
+    )
+
+    fallback_cutoff = "2023-05-31"
+    fallback_window = 4
+    run_manifest: dict = {}
+
+    monkeypatch.setattr(
+        sc,
+        "discover_available_models",
+        lambda: {"Solidworks": model_dir},
+    )
+    monkeypatch.setattr(
+        sc,
+        "_filter_models_by_targets",
+        lambda available, targets: available,
+    )
+
+    captured: dict[str, object] = {}
+
+    def _fake_score(
+        engine,
+        division_name,
+        model_path,
+        *,
+        run_manifest,
+        cutoff_date,
+        prediction_window_months,
+    ):
+        captured["engine"] = engine
+        captured["division_name"] = division_name
+        captured["model_path"] = model_path
+        captured["run_manifest"] = run_manifest
+        captured["cutoff_date"] = cutoff_date
+        captured["prediction_window_months"] = prediction_window_months
+        return pl.DataFrame({"division_name": []})
+
+    monkeypatch.setattr(sc, "score_customers_for_division", _fake_score)
+
+    sc.generate_scoring_outputs(
+        engine=None,
+        run_manifest=run_manifest,
+        cutoff_date=fallback_cutoff,
+        prediction_window_months=fallback_window,
+    )
+
+    assert captured["cutoff_date"] == fallback_cutoff
+    assert captured["prediction_window_months"] == fallback_window
+    assert captured["division_name"].lower() == "solidworks"
+    assert run_manifest.get("whitespace_artifact") is None
