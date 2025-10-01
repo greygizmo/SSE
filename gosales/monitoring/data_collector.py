@@ -8,8 +8,8 @@ render a holistic view of nightly runs.
 import json
 import time
 from datetime import datetime
-from pathlib import Path
 from typing import Dict, Any, List
+from textwrap import dedent
 try:
     import psutil
     PSUTIL_AVAILABLE = True
@@ -74,44 +74,49 @@ class MonitoringDataCollector:
         default_success_score = 98.5
         default_failure_score = 95.0
         try:
-            # Check database for type consistency
             engine = get_db_connection()
-            if engine:
-                sample_query = """
+            if not engine:
+                return default_failure_score
+
+            sample_query = dedent(
+                """
                 SELECT 'dim_customer' AS source_table, customer_id FROM dim_customer LIMIT 10
                 UNION ALL
                 SELECT 'fact_transactions' AS source_table, customer_id FROM fact_transactions LIMIT 10
                 """
-                df = pd.read_sql_query(sample_query, engine)
+            )
 
-                if df.empty or 'customer_id' not in df.columns:
-                    return default_success_score
+            with engine.connect() as connection:
+                df = pd.read_sql_query(sample_query, connection)
 
-                non_null = df[df['customer_id'].notna()].copy()
-                if non_null.empty:
-                    return default_success_score
+            if df.empty or 'customer_id' not in df.columns:
+                return default_success_score
 
-                non_null['value_type'] = non_null['customer_id'].map(lambda value: type(value).__name__)
+            non_null = df[df['customer_id'].notna()].copy()
+            if non_null.empty:
+                return default_success_score
 
-                type_counts = non_null['value_type'].value_counts()
-                majority_count = type_counts.iloc[0]
-                consistency_ratio = majority_count / len(non_null)
+            non_null['value_type'] = non_null['customer_id'].map(lambda value: type(value).__name__)
+            type_counts = non_null['value_type'].value_counts()
 
-                score = 90.0 + (10.0 * consistency_ratio)
+            consistency_ratio = type_counts.iloc[0] / len(non_null)
+            score_range = max(default_success_score - default_failure_score, 0)
+            score = default_failure_score + (score_range * consistency_ratio)
 
-                if 'source_table' in non_null.columns:
-                    mixed_sources = non_null.groupby('source_table')['value_type'].nunique()
-                    if mixed_sources.gt(1).any():
-                        score -= 5.0
+            unique_type_count = len(type_counts)
+            if unique_type_count > 1:
+                score -= min(5.0, 1.5 * (unique_type_count - 1))
 
-                score = max(min(score, 100.0), 60.0)
-                return round(score, 1)
+            if 'source_table' in non_null.columns:
+                mixed_sources = non_null.groupby('source_table')['value_type'].nunique()
+                if mixed_sources.gt(1).any():
+                    score -= 5.0
 
-            return default_success_score
+            score = max(min(score, default_success_score), 60.0)
+            return round(score, 1)
+
         except Exception:
             return default_failure_score
-
-        return default_success_score
 
     def _collect_performance_metrics(self) -> Dict[str, Any]:
         """Collect performance metrics from recent runs."""
