@@ -15,7 +15,8 @@ try:
     PSUTIL_AVAILABLE = True
 except ImportError:
     PSUTIL_AVAILABLE = False
-import sqlite3
+
+import pandas as pd
 
 from gosales.utils.paths import OUTPUTS_DIR
 from gosales.utils.db import get_db_connection
@@ -70,22 +71,47 @@ class MonitoringDataCollector:
 
     def _calculate_type_consistency_score(self) -> float:
         """Calculate type consistency score."""
+        default_success_score = 98.5
+        default_failure_score = 95.0
         try:
             # Check database for type consistency
             engine = get_db_connection()
             if engine:
-                # Query a sample of customer_ids to check types
                 sample_query = """
-                SELECT customer_id FROM dim_customer LIMIT 10
+                SELECT 'dim_customer' AS source_table, customer_id FROM dim_customer LIMIT 10
                 UNION ALL
-                SELECT customer_id FROM fact_transactions LIMIT 10
+                SELECT 'fact_transactions' AS source_table, customer_id FROM fact_transactions LIMIT 10
                 """
-                # This is a simplified check - in practice you'd do more thorough analysis
-                return 98.5
-        except Exception:
-            pass
+                df = pd.read_sql_query(sample_query, engine)
 
-        return 95.0
+                if df.empty or 'customer_id' not in df.columns:
+                    return default_success_score
+
+                non_null = df[df['customer_id'].notna()].copy()
+                if non_null.empty:
+                    return default_success_score
+
+                non_null['value_type'] = non_null['customer_id'].map(lambda value: type(value).__name__)
+
+                type_counts = non_null['value_type'].value_counts()
+                majority_count = type_counts.iloc[0]
+                consistency_ratio = majority_count / len(non_null)
+
+                score = 90.0 + (10.0 * consistency_ratio)
+
+                if 'source_table' in non_null.columns:
+                    mixed_sources = non_null.groupby('source_table')['value_type'].nunique()
+                    if mixed_sources.gt(1).any():
+                        score -= 5.0
+
+                score = max(min(score, 100.0), 60.0)
+                return round(score, 1)
+
+            return default_success_score
+        except Exception:
+            return default_failure_score
+
+        return default_success_score
 
     def _collect_performance_metrics(self) -> Dict[str, Any]:
         """Collect performance metrics from recent runs."""
