@@ -61,6 +61,11 @@ class Logging:
 
 
 @dataclass
+class PopulationConfig:
+    include_prospects: bool = True
+
+
+@dataclass
 class Labels:
     gp_min_threshold: float = 0.0
     denylist_skus_csv: Optional[Path] = None
@@ -197,6 +202,7 @@ class Config:
     run: Run = field(default_factory=Run)
     etl: ETL = field(default_factory=ETL)
     logging: Logging = field(default_factory=Logging)
+    population: PopulationConfig = field(default_factory=PopulationConfig)
     labels: Labels = field(default_factory=Labels)
     features: Features = field(default_factory=Features)
     modeling: ModelingConfig = field(default_factory=ModelingConfig)
@@ -218,6 +224,7 @@ class Config:
             "run": _convert(self.run),
             "etl": _convert(self.etl),
             "logging": _convert(self.logging),
+            "population": _convert(self.population),
             "labels": _convert(self.labels),
             "features": _convert(self.features),
             "modeling": _convert(self.modeling),
@@ -263,7 +270,7 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
     cfg_path_obj = Path(config_path)
     cfg_dict = _load_yaml(cfg_path_obj) if cfg_path_obj.exists() else {}
 
-    allowed_top = {"paths","database","run","etl","logging","labels","features","modeling","whitespace","validation"}
+    allowed_top = {"paths","database","run","etl","logging","labels","features","modeling","whitespace","validation","population"}
     unknown_top = set(cfg_dict.keys()) - allowed_top
     if unknown_top:
         raise ValueError(f"Unknown top-level config keys: {sorted(unknown_top)}. Allowed: {sorted(allowed_top)}")
@@ -321,6 +328,7 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
     mdl_cfg = cfg_dict.get("modeling", {})
     ws_cfg = cfg_dict.get("whitespace", {})
     val_cfg = cfg_dict.get("validation", {})
+    pop_cfg = cfg_dict.get("population", {})
 
     ws_eligibility_cfg = ws_cfg.get("eligibility", {})
 
@@ -368,6 +376,9 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
         logging=Logging(
             level=str(log_cfg.get("level", "INFO")),
             jsonl=bool(log_cfg.get("jsonl", True)),
+        ),
+        population=PopulationConfig(
+            include_prospects=bool(pop_cfg.get("include_prospects", True))
         ),
         labels=Labels(
             gp_min_threshold=float(labels_cfg.get("gp_min_threshold", 0.0)),

@@ -64,8 +64,11 @@ def _mlflow_unavailable(*_args, **_kwargs):
 if not MLFLOW_AVAILABLE:  # pragma: no cover - behavior validated via tests
     setattr(mlflow.sklearn, "load_model", _mlflow_unavailable)  # type: ignore[attr-defined]
 
-class MissingModelMetadataError(Exception):
-    pass
+try:
+    MissingModelMetadataError
+except NameError:
+    class MissingModelMetadataError(Exception):
+        pass
 
 _DIM_CUSTOMER_CACHE: pd.DataFrame | None = None
 
@@ -603,7 +606,7 @@ def _score_customers_batch(
         aligned = feature_values
         if train_cols:
             aligned = feature_values.reindex(columns=train_cols, fill_value=0.0)
-        aligned = aligned.astype(np.float32, copy=False)
+        aligned = _sanitize_features(aligned, dtype=np.float32)
         probs = _score_p_icp(model, aligned, dtype=np.float32)
 
         if cold_model is not None:
@@ -612,7 +615,7 @@ def _score_customers_batch(
                 cold_features = feature_values
                 if cold_train_cols:
                     cold_features = cold_features.reindex(columns=cold_train_cols, fill_value=0.0)
-                cold_features = cold_features.astype(np.float32, copy=False)
+                cold_features = _sanitize_features(cold_features, dtype=np.float32)
                 cold_scores = _score_p_icp(cold_model, cold_features, dtype=np.float32)
                 probs = np.asarray(probs, dtype=float)
                 probs[cold_mask.values] = np.asarray(cold_scores)[cold_mask.values]
@@ -763,6 +766,36 @@ def score_customers_for_division(
     train_cols = _load_feature_order(model_path, meta)
 
     feature_matrix = create_feature_matrix(engine, division_name, cutoff, window_months)
+    # Early customer-only filtering (warm or cold) in Polars to reduce compute
+    try:
+        cfg_all = load_config()
+        include_prospects = bool(getattr(getattr(cfg_all, 'population', object()), 'include_prospects', True))
+    except Exception:
+        include_prospects = True
+    if not include_prospects and not feature_matrix.is_empty():
+        try:
+            cols = set(feature_matrix.columns)
+            warm_expr = None
+            cold_expr = None
+            if 'rfm__all__tx_n__12m' in cols:
+                warm_expr = (pl.col('rfm__all__tx_n__12m').cast(pl.Float64).fill_null(0.0) > 0)
+            if 'assets_active_total' in cols or 'assets_on_subs_total' in cols:
+                aa = pl.col('assets_active_total').cast(pl.Float64).fill_null(0.0) if 'assets_active_total' in cols else pl.lit(0.0)
+                aos = pl.col('assets_on_subs_total').cast(pl.Float64).fill_null(0.0) if 'assets_on_subs_total' in cols else pl.lit(0.0)
+                cold_expr = ((~warm_expr) if warm_expr is not None else pl.lit(True)) & ((aa > 0) | (aos > 0))
+            if warm_expr is not None or cold_expr is not None:
+                mask = None
+                if warm_expr is not None and cold_expr is not None:
+                    mask = warm_expr | cold_expr
+                elif warm_expr is not None:
+                    mask = warm_expr
+                else:
+                    mask = cold_expr
+                pre_n = feature_matrix.height
+                feature_matrix = feature_matrix.filter(mask)
+                logger.info("Customer-only gating applied in-core: %d -> %d rows for %s", pre_n, feature_matrix.height, division_name)
+        except Exception as _e:
+            logger.warning(f"Customer-only in-core gating skipped due to error: {_e}")
     customer_names = _prepare_customer_names(_get_dim_customer(engine))
 
     # Prevalence guardrail: if labels present and zero prevalence while training had positives, skip
@@ -874,14 +907,53 @@ def score_customers_for_division(
             customer_names=customer_names,
         )
 
+        # SHAP: compute small sample only to avoid long runtimes
         try:
-            reasons = compute_shap_reasons(model, X, X.columns, top_k=3)
-            reasons.index = scores_df.index
+            shap_limit = 5000
+            if len(X) > shap_limit:
+                X_shap = X.iloc[:shap_limit].copy()
+                base_idx = scores_df.index[:shap_limit]
+            else:
+                X_shap = X
+                base_idx = scores_df.index
+            reasons = compute_shap_reasons(model, X_shap, X_shap.columns, top_k=3)
             for col in ["reason_1", "reason_2", "reason_3"]:
                 if col not in scores_df.columns:
-                    scores_df[col] = reasons[col]
+                    scores_df[col] = None
+            for i, ridx in enumerate(base_idx):
+                try:
+                    r = reasons.iloc[i]
+                    scores_df.at[ridx, 'reason_1'] = r.get('reason_1')
+                    scores_df.at[ridx, 'reason_2'] = r.get('reason_2')
+                    scores_df.at[ridx, 'reason_3'] = r.get('reason_3')
+                except Exception:
+                    continue
         except Exception:
             pass
+
+        # Optional gating: exclude prospect accounts (no recent tx and no assets)
+        # Only keep warm (recent tx) and cold (assets but no recent tx) customers when configured.
+        try:
+            cfg = load_config()
+            include_prospects = bool(getattr(getattr(cfg, 'population', object()), 'include_prospects', True))
+        except Exception:
+            include_prospects = True
+        if not include_prospects:
+            try:
+                warm = pd.to_numeric(scores_df.get('rfm__all__tx_n__12m', 0), errors='coerce').fillna(0.0) > 0
+                assets_active = pd.to_numeric(scores_df.get('assets_active_total', 0), errors='coerce').fillna(0.0) > 0
+                assets_on_subs = pd.to_numeric(scores_df.get('assets_on_subs_total', 0), errors='coerce').fillna(0.0) > 0
+                cold = (~warm) & (assets_active | assets_on_subs)
+                pre = len(scores_df)
+                scores_df = scores_df[warm | cold].reset_index(drop=True)
+                logger.info(
+                    "Filtered to customers (warm|cold): %d -> %d rows for %s",
+                    pre,
+                    len(scores_df),
+                    division_name,
+                )
+            except Exception as _e:
+                logger.warning(f"Customer-only gating skipped due to error: {_e}")
 
         logger.info(f"Successfully scored {len(scores_df)} customers for {division_name}")
         return pl.from_pandas(scores_df)
@@ -1518,3 +1590,5 @@ if __name__ == "__main__":
         cutoff_date=args.cutoff_date,
         prediction_window_months=args.window_months,
     )
+
+

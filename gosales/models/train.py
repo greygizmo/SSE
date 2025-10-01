@@ -291,6 +291,7 @@ def _maybe_export_shap(
     shap_sample: int,
     shap_max_rows: int,
     seed: int,
+    artifact_slug: str | None = None,
 ) -> dict[str, str]:
     """Compute and export SHAP summaries if enabled.
 
@@ -328,6 +329,7 @@ def _maybe_export_shap(
     X_sample = X_final.iloc[sample_idx]
     cust_ids = df_final.iloc[sample_idx]["customer_id"].values
 
+    slug = (artifact_slug or division).lower()
     try:
         if isinstance(base, LGBMClassifier):
             explainer = shap.TreeExplainer(base)
@@ -342,7 +344,7 @@ def _maybe_export_shap(
 
         OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
         mean_abs = np.mean(np.abs(vals), axis=0)
-        shap_global = OUTPUTS_DIR / f"shap_global_{division.lower()}.csv"
+        shap_global = OUTPUTS_DIR / f"shap_global_{slug}.csv"
         pd.DataFrame({"feature": feature_names, "mean_abs_shap": mean_abs})\
             .sort_values("mean_abs_shap", ascending=False)\
             .to_csv(shap_global, index=False)
@@ -350,7 +352,7 @@ def _maybe_export_shap(
 
         sample_df = pd.DataFrame(vals, columns=feature_names)
         sample_df.insert(0, "customer_id", cust_ids)
-        shap_sample_path = OUTPUTS_DIR / f"shap_sample_{division.lower()}.csv"
+        shap_sample_path = OUTPUTS_DIR / f"shap_sample_{slug}.csv"
         sample_df.to_csv(shap_sample_path, index=False)
         artifacts[shap_sample_path.name] = str(shap_sample_path)
     except Exception as e:
@@ -358,10 +360,10 @@ def _maybe_export_shap(
     return artifacts
 
 
-def _emit_diagnostics(out_dir: Path, division: str, context: dict) -> None:
+def _emit_diagnostics(out_dir: Path, artifact_slug: str, context: dict) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     try:
-        diag_path = OUTPUTS_DIR / f"diagnostics_{division.lower()}.json"
+        diag_path = OUTPUTS_DIR / f"diagnostics_{artifact_slug.lower()}.json"
         with open(diag_path, "w", encoding="utf-8") as f:
             json.dump(context, f, indent=2)
     except Exception:
@@ -433,8 +435,10 @@ def _calibrate(
 @click.option("--purge-days", default=0, type=int, help="Embargo/purge days between train and validation (time-aware splits)")
 @click.option("--label-buffer-days", default=0, type=int, help="Start labels at cutoff+buffer_days (horizon buffer)")
 @click.option("--safe-mode/--no-safe-mode", default=False, help="Apply SAFE feature policy (drop/lag high-risk adjacency feature families)")
+@click.option("--output-name", default=None, help="Optional custom model directory name under MODELS_DIR")
+@click.option("--cold-only/--no-cold-only", default=False, help="Train using only cold customer segment (no recent transactions but assets present)")
 @click.option("--dry-run/--no-dry-run", default=False, help="Skip training; only verify inputs and emit planned artifacts to manifest")
-def main(division: str, cutoffs: str, window_months: int, models: str, calibration: str, shap_sample: int, config: str, group_cv: bool, purge_days: int, label_buffer_days: int, safe_mode: bool, dry_run: bool) -> None:
+def main(division: str, cutoffs: str, window_months: int, models: str, calibration: str, shap_sample: int, config: str, group_cv: bool, purge_days: int, label_buffer_days: int, safe_mode: bool, output_name: str | None, cold_only: bool, dry_run: bool) -> None:
     cfg = load_config(config)
     # Determine SAFE policy: CLI flag or per-division config override
     auto_safe = bool(safe_mode)
@@ -444,6 +448,14 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
             auto_safe = True
     except Exception:
         pass
+
+    division_slug = str(division).lower()
+    if output_name:
+        model_dir_name = output_name.strip()
+    else:
+        model_dir_name = f"{division_slug}_model"
+    artifact_slug = model_dir_name[:-6] if model_dir_name.lower().endswith("_model") else model_dir_name
+    artifact_slug = artifact_slug.lower()
 
     stability_cfg = getattr(getattr(cfg, 'modeling', object()), 'stability', object())
     coverage_floor = float(getattr(stability_cfg, 'coverage_floor', 0.0) or 0.0)
@@ -462,6 +474,7 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
     cut_list = [c.strip() for c in cutoffs.split(",") if c.strip()]
     OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    out_dir = MODELS_DIR / model_dir_name
     # Prefer curated connection where fact tables exist; fallback to primary DB
     try:
         engine = get_curated_connection()
@@ -487,15 +500,14 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
     with run_context("phase3_train") as ctx:
         if dry_run:
             # Plan artifacts without training
-            out_dir = MODELS_DIR / f"{division.lower()}_model"
             artifacts.update({
                 "planned_model.pkl": str(out_dir / "model.pkl"),
                 "planned_feature_list.json": str(out_dir / "feature_list.json"),
-                f"planned_metrics_{division.lower()}.json": str(OUTPUTS_DIR / f"metrics_{division.lower()}.json"),
-                f"planned_gains_{division.lower()}.csv": str(OUTPUTS_DIR / f"gains_{division.lower()}.csv"),
-                f"planned_calibration_{division.lower()}.csv": str(OUTPUTS_DIR / f"calibration_{division.lower()}.csv"),
-                f"planned_thresholds_{division.lower()}.csv": str(OUTPUTS_DIR / f"thresholds_{division.lower()}.csv"),
-                f"planned_model_card_{division.lower()}.json": str(OUTPUTS_DIR / f"model_card_{division.lower()}.json"),
+                f"planned_metrics_{artifact_slug}.json": str(OUTPUTS_DIR / f"metrics_{artifact_slug}.json"),
+                f"planned_gains_{artifact_slug}.csv": str(OUTPUTS_DIR / f"gains_{artifact_slug}.csv"),
+                f"planned_calibration_{artifact_slug}.csv": str(OUTPUTS_DIR / f"calibration_{artifact_slug}.csv"),
+                f"planned_thresholds_{artifact_slug}.csv": str(OUTPUTS_DIR / f"thresholds_{artifact_slug}.csv"),
+                f"planned_model_card_{artifact_slug}.json": str(OUTPUTS_DIR / f"model_card_{artifact_slug}.json"),
             })
             try:
                 ctx["write_manifest"](artifacts)
@@ -531,7 +543,7 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
             # Persist features parquet for validation phase (Phase 5) compatibility
             try:
                 from gosales.utils.paths import OUTPUTS_DIR as _OUT
-                out_path = _OUT / f"features_{division.lower()}_{cutoff}.parquet"
+                out_path = _OUT / f"features_{artifact_slug}_{cutoff}.parquet"
                 fm.write_parquet(out_path)
             except Exception:
                 pass
@@ -539,6 +551,33 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
                 logger.warning(f"Empty feature matrix for cutoff {cutoff}")
                 continue
             df = fm.to_pandas()
+            # Optional gating: exclude prospect accounts; optionally keep only cold customers.
+            try:
+                include_prospects = bool(getattr(getattr(cfg, 'population', object()), 'include_prospects', True))
+            except Exception:
+                include_prospects = True
+            try:
+                warm = pd.to_numeric(df.get('rfm__all__tx_n__12m', 0), errors='coerce').fillna(0.0) > 0
+                assets_active = pd.to_numeric(df.get('assets_active_total', 0), errors='coerce').fillna(0.0) > 0
+                assets_on_subs = pd.to_numeric(df.get('assets_on_subs_total', 0), errors='coerce').fillna(0.0) > 0
+                cold = (~warm) & (assets_active | assets_on_subs)
+                mask = None
+                msg = None
+                if cold_only:
+                    mask = cold
+                    msg = "Training population filtered to cold customers"
+                elif not include_prospects:
+                    mask = warm | cold
+                    msg = "Training population filtered (warm|cold)"
+                if mask is not None:
+                    pre = len(df)
+                    df = df[mask].reset_index(drop=True)
+                    logger.info("%s @ %s: %d -> %d rows", msg, cutoff, pre, len(df))
+                    if df.empty:
+                        logger.warning("No eligible customer rows after population filter for cutoff %s", cutoff)
+                        continue
+            except Exception as _e:
+                logger.warning(f"Customer-only gating (train) skipped due to error: {_e}")
             if 'bought_in_division' not in df.columns:
                 logger.warning("Missing target column for cutoff %s", cutoff)
                 continue
@@ -652,7 +691,7 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
                 valid_ids = set(df.iloc[X_valid.index]['customer_id'].astype(str))
                 overlap = sorted(train_ids.intersection(valid_ids))
                 from gosales.utils.paths import OUTPUTS_DIR as _OUT
-                overlap_path = _OUT / f"fold_customer_overlap_{division.lower()}_{cutoff}.csv"
+                overlap_path = _OUT / f"fold_customer_overlap_{artifact_slug}_{cutoff}.csv"
                 import pandas as _pd
                 _pd.DataFrame({"customer_id": overlap}).to_csv(overlap_path, index=False)
                 overlap_csv = str(overlap_path)
@@ -1146,7 +1185,6 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
         feature_names = list(X_final.columns)
 
     # Save artifacts
-    out_dir = MODELS_DIR / f"{division.lower()}_model"
     out_dir.mkdir(parents=True, exist_ok=True)
     # Save model pickle via joblib
     try:
@@ -1182,6 +1220,9 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
                 "scale_pos_weight": spw,
             },
         }
+        _metadata["population"] = "cold_only" if cold_only else "customer"
+        if cold_only:
+            _metadata["model_variant"] = "cold"
     except Exception:
         _metadata = None
     # Final predictions and guardrails
@@ -1206,7 +1247,7 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
         # Persist train-time p_hat snapshot for Phase 5 drift comparison
         try:
             if p_final is not None:
-                ts_path = OUTPUTS_DIR / f"train_scores_{division.lower()}_{last_cut}.csv"
+                ts_path = OUTPUTS_DIR / f"train_scores_{artifact_slug}_{last_cut}.csv"
                 pd.DataFrame({"customer_id": df_final['customer_id'].values, "p_hat": p_final}).to_csv(
                     ts_path, index=False
                 )
@@ -1217,7 +1258,7 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
                 sample_df = df_final[['customer_id'] + num_cols].copy()
                 if len(sample_df) > 5000:
                     sample_df = sample_df.sample(n=5000, random_state=cfg.modeling.seed)
-                fs_path = OUTPUTS_DIR / f"train_feature_sample_{division.lower()}_{last_cut}.parquet"
+                fs_path = OUTPUTS_DIR / f"train_feature_sample_{artifact_slug}_{last_cut}.parquet"
                 sample_df.to_parquet(fs_path, index=False)
                 artifacts[fs_path.name] = str(fs_path)
             except Exception:
@@ -1240,14 +1281,14 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
         gains_df["decile"] = (np.floor((idx / max(1, len(gains_df)-1)) * 10) + 1)
         gains_df["decile"] = np.clip(gains_df["decile"].astype(int), 1, 10)
         gains = gains_df.groupby("decile").agg(bought_in_division_mean=("y","mean"), count=("y","size"), p_mean=("p","mean")).reset_index()
-        gains_path = OUTPUTS_DIR / f"gains_{division.lower()}.csv"
+        gains_path = OUTPUTS_DIR / f"gains_{artifact_slug}.csv"
         gains.to_csv(gains_path, index=False)
         artifacts[gains_path.name] = str(gains_path)
 
         # Calibration bins & MAE (and plot)
         try:
             calib = calibration_bins(y_final, p_final, n_bins=10)
-            calib_path = OUTPUTS_DIR / f"calibration_{division.lower()}.csv"
+            calib_path = OUTPUTS_DIR / f"calibration_{artifact_slug}.csv"
             calib.to_csv(calib_path, index=False)
             artifacts[calib_path.name] = str(calib_path)
             cal_mae = calibration_mae(calib, weighted=True)
@@ -1264,7 +1305,7 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
                 ax.set_title(f'Calibration Curve - {division} (@ {last_cut})')
                 ax.legend(loc='best')
                 fig.tight_layout()
-                png_path = OUTPUTS_DIR / f"calibration_plot_{division.lower()}.png"
+                png_path = OUTPUTS_DIR / f"calibration_plot_{artifact_slug}.png"
                 fig.savefig(png_path)
                 plt.close(fig)
                 artifacts[png_path.name] = str(png_path)
@@ -1295,7 +1336,7 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
                 "capture": capture,
                 "threshold": float(thr),
             })
-        thr_path = OUTPUTS_DIR / f"thresholds_{division.lower()}.csv"
+        thr_path = OUTPUTS_DIR / f"thresholds_{artifact_slug}.csv"
         pd.DataFrame(thr_rows).to_csv(thr_path, index=False)
         artifacts[thr_path.name] = str(thr_path)
 
@@ -1314,7 +1355,7 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
                 pass
             if isinstance(base, LogisticRegression) and hasattr(base, "coef_"):
                 coef = pd.DataFrame({"feature": feature_names, "coef": base.coef_.ravel().tolist()})
-                coef.to_csv(OUTPUTS_DIR / f"coef_{division.lower()}.csv", index=False)
+                coef.to_csv(OUTPUTS_DIR / f"coef_{artifact_slug}.csv", index=False)
         except Exception:
             pass
 
@@ -1328,6 +1369,7 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
                 shap_sample,
                 cfg.modeling.shap_max_rows,
                 cfg.modeling.seed,
+                artifact_slug=artifact_slug,
             )
         )
 
@@ -1368,7 +1410,7 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
             "window_months": int(window_months),
             "stability": stability_export,
         }
-        metrics_path = OUTPUTS_DIR / f"metrics_{division.lower()}.json"
+        metrics_path = OUTPUTS_DIR / f"metrics_{artifact_slug}.json"
         with open(metrics_path, "w", encoding="utf-8") as f:
             json.dump(metrics, f, indent=2)
         artifacts[metrics_path.name] = str(metrics_path)
@@ -1400,13 +1442,13 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
             "artifacts": {
                 "model_pickle": str(out_dir / "model.pkl"),
                 "feature_list": str(out_dir / "feature_list.json"),
-                "metrics_json": str(OUTPUTS_DIR / f"metrics_{division.lower()}.json"),
-                "gains_csv": str(OUTPUTS_DIR / f"gains_{division.lower()}.csv"),
-                "calibration_csv": str(OUTPUTS_DIR / f"calibration_{division.lower()}.csv"),
-                "thresholds_csv": str(OUTPUTS_DIR / f"thresholds_{division.lower()}.csv"),
+                "metrics_json": str(OUTPUTS_DIR / f"metrics_{artifact_slug}.json"),
+                "gains_csv": str(OUTPUTS_DIR / f"gains_{artifact_slug}.csv"),
+                "calibration_csv": str(OUTPUTS_DIR / f"calibration_{artifact_slug}.csv"),
+                "thresholds_csv": str(OUTPUTS_DIR / f"thresholds_{artifact_slug}.csv"),
             },
         }
-        model_card = OUTPUTS_DIR / f"model_card_{division.lower()}.json"
+        model_card = OUTPUTS_DIR / f"model_card_{artifact_slug}.json"
         with open(model_card, "w", encoding="utf-8") as f:
             json.dump(card, f, indent=2)
         artifacts[model_card.name] = str(model_card)
@@ -1427,7 +1469,7 @@ def main(division: str, cutoffs: str, window_months: int, models: str, calibrati
             "prevalence": prevalence_stats,
             "stability": stability_export,
         }
-        _emit_diagnostics(OUTPUTS_DIR, division, diag_ctx)
+        _emit_diagnostics(OUTPUTS_DIR, artifact_slug, diag_ctx)
         # If any LR result shows non-convergence, log a warning
         if any((r.get('model') == 'logreg' and r.get('converged') is False) for r in results):
             logger.warning("Logistic Regression did not fully converge for some grid settings. See diagnostics JSON for details.")

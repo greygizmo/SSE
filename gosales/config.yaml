@@ -57,6 +57,11 @@ etl:
 logging:
   level: INFO
   jsonl: true
+population:
+  # When false, exclude prospect accounts (no recent tx and no assets)
+  # from both training and scoring. Only warm (recent tx) and cold
+  # (own assets but no recent tx) customers will be included.
+  include_prospects: false
 labels:
   gp_min_threshold: 0.0
   denylist_skus_csv: gosales/data/lookup/label_denylist_skus.csv
@@ -72,7 +77,7 @@ features:
   als_lookback_months: 12
   use_item2vec: false
   # Optional: run ALS over assets rollups (guarded sizes)
-  use_assets_als: false
+  use_assets_als: true
   assets_als:
     max_rows: 20000
     max_cols: 200
@@ -124,7 +129,7 @@ modeling:
   use_scale_pos_weight: true    # LightGBM scale_pos_weight toggle
   scale_pos_weight_cap: 10.0
   # Adopt SAFE feature policy for specific divisions (drops adjacency-heavy/short-window families)
-  safe_divisions: ["Solidworks"]
+  safe_divisions: []
   stability:
     min_positive_rate: 0.005
     min_positive_count: 200

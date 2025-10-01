@@ -14,7 +14,7 @@ import click
 import pandas as pd
 
 from gosales.utils.config import load_config
-from gosales.utils.db import get_db_connection
+from gosales.utils.db import get_db_connection, get_curated_connection, validate_connection
 from gosales.utils.paths import OUTPUTS_DIR
 from gosales.utils.logger import get_logger
 from gosales.labels.targets import LabelParams, build_labels_for_division, prevalence_report
@@ -33,7 +33,13 @@ logger = get_logger(__name__)
 def main(division: str, cutoff: str, window_months: int, mode: str, gp_min_threshold: float, config: str) -> None:
     cfg = load_config(config)
     OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
-    engine = get_db_connection()
+    # Prefer curated connection (e.g., SQLite) so labels align with built fact tables
+    try:
+        engine = get_curated_connection()
+    except Exception:
+        engine = get_db_connection()
+    if not validate_connection(engine):
+        raise RuntimeError("Database connection for label building is unhealthy")
 
     cutoffs = [c.strip() for c in cutoff.split(",") if c.strip()]
     for cut in cutoffs:

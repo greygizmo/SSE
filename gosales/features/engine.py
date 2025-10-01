@@ -1124,6 +1124,17 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
             return feature_matrix
 
     # Fill nulls for all other columns in pandas for easier handling
+    # Drop datetime columns before materializing to Pandas to limit memory footprint
+    date_columns = [col for col, dtype in feature_matrix.schema.items() if dtype in (pl.Date, pl.Datetime)]
+    if date_columns:
+        feature_matrix = feature_matrix.drop(date_columns)
+
+    # Downcast wide numeric blocks to float32/int32 to reduce memory usage prior to pandas conversion
+    feature_matrix = feature_matrix.with_columns([
+        pl.col(pl.Float64).cast(pl.Float32),
+        pl.col(pl.Int64).cast(pl.Int32),
+    ])
+
     feature_matrix_pd = feature_matrix.to_pandas()
 
     # Optional: augment with cutoff-safe NetSuite customer features (territory/contact/etc.)
@@ -1147,7 +1158,8 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
     
     # Drop the date columns that are no longer needed for ML
     date_columns = [col for col in feature_matrix_pd.columns if 'date' in col.lower()]
-    feature_matrix_pd = feature_matrix_pd.drop(columns=date_columns)
+    if date_columns:
+        feature_matrix_pd.drop(columns=date_columns, inplace=True, errors="ignore")
     
     # Note: Defer global fill until after missingness flags are added
     # so `_missing` indicators reflect original NaNs.

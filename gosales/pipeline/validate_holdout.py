@@ -19,7 +19,7 @@ from sklearn import metrics as skm
 from sklearn.metrics import roc_auc_score, classification_report, confusion_matrix
 from sqlalchemy import text
 
-from gosales.utils.db import get_db_connection
+from gosales.utils.db import get_db_connection, get_curated_connection, validate_connection
 from gosales.etl.load_csv import load_csv_to_db
 from gosales.etl.cleaners import clean_currency_value
 from gosales.etl.sku_map import get_sku_mapping
@@ -143,7 +143,13 @@ def validate_against_holdout():
     logger.info("Starting holdout validation against 2025 YTD data...")
     
     # Get database connection
-    db_engine = get_db_connection()
+    try:
+        db_engine = get_curated_connection()
+    except Exception:
+        db_engine = get_db_connection()
+
+    if not validate_connection(db_engine):
+        raise RuntimeError("Holdout validation database connection is unhealthy")
     
     # --- Phase 1: Load 2025 YTD Holdout Data ---
     logger.info("--- Phase 1: Loading 2025 YTD holdout data ---")

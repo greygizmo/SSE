@@ -1,8 +1,0 @@
-{
-  "division": "Solidworks",
-  "model_type": "sklearn_dummy",
-  "trained_at": "2025-01-01T00:00:00Z",
-  "cutoff_date": "2024-12-31",
-  "prediction_window_months": 6,
-  "feature_names": []
-}
