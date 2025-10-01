@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GoSales Engine - Analytics Dashboard</title>
+    <link rel="icon" type="image/svg+xml" href="favicon.svg">
+    <link rel="stylesheet" href="styles/main.css">
+    <link rel="stylesheet" href="styles/components.css">
+    <link rel="stylesheet" href="styles/charts.css">
+    <!-- Chart.js for visualizations -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <!-- D3.js for advanced visualizations -->
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <!-- Alpine.js for interactivity -->
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+</head>
+<body x-data="dashboardApp()" x-init="init()">
+    <!-- Navigation Sidebar -->
+    <nav class="sidebar">
+        <div class="sidebar-header">
+            <div class="logo">
+                <div class="logo-icon">GS</div>
+                <div class="logo-text">
+                    <h1>GoSales Engine</h1>
+                    <p>AI-Powered Sales Intelligence</p>
+                </div>
+            </div>
+        </div>
+
+        <div class="nav-section">
+            <h3>Analytics</h3>
+            <button @click="currentView = 'overview'" :class="currentView === 'overview' ? 'active' : ''" class="nav-item">
+                <span class="nav-icon">📊</span>
+                <span>Overview</span>
+            </button>
+            <button @click="currentView = 'metrics'" :class="currentView === 'metrics' ? 'active' : ''" class="nav-item">
+                <span class="nav-icon">📈</span>
+                <span>Model Metrics</span>
+            </button>
+            <button @click="currentView = 'whitespace'" :class="currentView === 'whitespace' ? 'active' : ''" class="nav-item">
+                <span class="nav-icon">🔍</span>
+                <span>Whitespace Analysis</span>
+            </button>
+            <button @click="currentView = 'prospects'" :class="currentView === 'prospects' ? 'active' : ''" class="nav-item">
+                <span class="nav-icon">👥</span>
+                <span>Prospects</span>
+            </button>
+        </div>
+
+        <div class="nav-section">
+            <h3>Model Management</h3>
+            <button @click="currentView = 'validation'" :class="currentView === 'validation' ? 'active' : ''" class="nav-item">
+                <span class="nav-icon">✅</span>
+                <span>Validation</span>
+            </button>
+            <button @click="currentView = 'explainability'" :class="currentView === 'explainability' ? 'active' : ''" class="nav-item">
+                <span class="nav-icon">🎯</span>
+                <span>Explainability</span>
+            </button>
+            <button @click="currentView = 'monitoring'" :class="currentView === 'monitoring' ? 'active' : ''" class="nav-item">
+                <span class="nav-icon">📡</span>
+                <span>Monitoring</span>
+            </button>
+        </div>
+
+        <div class="nav-section">
+            <h3>System</h3>
+            <button @click="currentView = 'architecture'" :class="currentView === 'architecture' ? 'active' : ''" class="nav-item">
+                <span class="nav-icon">🏗️</span>
+                <span>Architecture</span>
+            </button>
+            <button @click="currentView = 'qa'" :class="currentView === 'qa' ? 'active' : ''" class="nav-item">
+                <span class="nav-icon">🛡️</span>
+                <span>Quality Assurance</span>
+            </button>
+        </div>
+
+        <div class="sidebar-footer">
+            <div class="status-indicator">
+                <span class="status-dot"></span>
+                <span>All Systems Operational</span>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Main Content Area -->
+    <main class="main-content">
+        <!-- Top Header Bar -->
+        <header class="top-header">
+            <div class="header-left">
+                <h2 x-text="getViewTitle()"></h2>
+                <p class="breadcrumb">Dashboard / <span x-text="currentView"></span></p>
+            </div>
+            <div class="header-right">
+                <button class="icon-button" @click="refreshData()">
+                    <span>🔄</span>
+                </button>
+                <button class="icon-button" @click="toggleTheme()">
+                    <span x-text="darkMode ? '☀️' : '🌙'"></span>
+                </button>
+                <div class="user-menu">
+                    <span class="user-avatar">👤</span>
+                </div>
+            </div>
+        </header>
+
+        <!-- Dynamic Content Views -->
+        <div class="content-container">
+            <!-- Overview View -->
+            <div x-show="currentView === 'overview'" x-transition class="view">
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-icon">💰</div>
+                        <div class="stat-content">
+                            <p class="stat-label">Total Revenue</p>
+                            <h3 class="stat-value" x-text="formatCurrency(stats.revenue)"></h3>
+                            <p class="stat-change positive">↑ 18.2% from last month</p>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon">🤖</div>
+                        <div class="stat-content">
+                            <p class="stat-label">Active Models</p>
+                            <h3 class="stat-value" x-text="stats.activeModels"></h3>
+                            <p class="stat-change positive">↑ 2 new this week</p>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon">🎯</div>
+                        <div class="stat-content">
+                            <p class="stat-label">Avg Accuracy</p>
+                            <h3 class="stat-value" x-text="stats.accuracy + '%'"></h3>
+                            <p class="stat-change positive">↑ 1.3% improvement</p>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon">📊</div>
+                        <div class="stat-content">
+                            <p class="stat-label">Predictions</p>
+                            <h3 class="stat-value" x-text="formatNumber(stats.predictions)"></h3>
+                            <p class="stat-change positive">↑ 12.4% increase</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="grid-2">
+                    <div class="card">
+                        <div class="card-header">
+                            <h3>Revenue Trend</h3>
+                            <div class="card-actions">
+                                <button @click="setTimeRange('7d')" :class="timeRange === '7d' ? 'active' : ''" class="btn-sm">7D</button>
+                                <button @click="setTimeRange('30d')" :class="timeRange === '30d' ? 'active' : ''" class="btn-sm">30D</button>
+                                <button @click="setTimeRange('90d')" :class="timeRange === '90d' ? 'active' : ''" class="btn-sm">90D</button>
+                            </div>
+                        </div>
+                        <div class="card-body">
+                            <canvas id="revenueChart"></canvas>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-header">
+                            <h3>Model Performance</h3>
+                        </div>
+                        <div class="card-body">
+                            <template x-for="model in modelPerformance" :key="model.name">
+                                <div class="progress-item">
+                                    <div class="progress-header">
+                                        <span x-text="model.name"></span>
+                                        <span class="progress-value" x-text="model.accuracy + '%'"></span>
+                                    </div>
+                                    <div class="progress-bar">
+                                        <div class="progress-fill" :style="`width: ${model.accuracy}%`"></div>
+                                    </div>
+                                </div>
+                            </template>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="grid-2">
+                    <div class="card">
+                        <div class="card-header">
+                            <h3>Recent Activity</h3>
+                        </div>
+                        <div class="card-body">
+                            <div class="activity-feed">
+                                <template x-for="activity in recentActivity" :key="activity.id">
+                                    <div class="activity-item">
+                                        <div class="activity-icon" x-text="activity.icon"></div>
+                                        <div class="activity-content">
+                                            <p class="activity-title" x-text="activity.title"></p>
+                                            <p class="activity-time" x-text="activity.time"></p>
+                                        </div>
+                                    </div>
+                                </template>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-header">
+                            <h3>Top Opportunities</h3>
+                            <button class="btn-sm">View All</button>
+                        </div>
+                        <div class="card-body">
+                            <div class="table-responsive">
+                                <table class="data-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Customer</th>
+                                            <th>Division</th>
+                                            <th>Score</th>
+                                            <th>Status</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        <template x-for="opp in topOpportunities" :key="opp.id">
+                                            <tr>
+                                                <td x-text="opp.customer"></td>
+                                                <td><span class="badge neutral" x-text="opp.division"></span></td>
+                                                <td x-text="opp.score"></td>
+                                                <td><span class="badge" :class="opp.status.toLowerCase()" x-text="opp.status"></span></td>
+                                            </tr>
+                                        </template>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Model Metrics View -->
+            <div x-show="currentView === 'metrics'" x-transition class="view">
+                <div class="card">
+                    <div class="card-header">
+                        <h3>Model Performance Metrics</h3>
+                        <select x-model="selectedModel" class="form-select">
+                            <template x-for="model in models" :key="model">
+                                <option :value="model" x-text="model"></option>
+                            </template>
+                        </select>
+                    </div>
+                    <div class="card-body">
+                        <div class="metrics-grid">
+                            <div class="metric-box">
+                                <p class="metric-label">AUC Score</p>
+                                <h2 class="metric-value">0.923</h2>
+                            </div>
+                            <div class="metric-box">
+                                <p class="metric-label">Precision</p>
+                                <h2 class="metric-value">0.887</h2>
+                            </div>
+                            <div class="metric-box">
+                                <p class="metric-label">Recall</p>
+                                <h2 class="metric-value">0.854</h2>
+                            </div>
+                            <div class="metric-box">
+                                <p class="metric-label">F1 Score</p>
+                                <h2 class="metric-value">0.870</h2>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="grid-2">
+                    <div class="card">
+                        <div class="card-header">
+                            <h3>ROC Curve</h3>
+                        </div>
+                        <div class="card-body">
+                            <canvas id="rocChart"></canvas>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-header">
+                            <h3>Feature Importance</h3>
+                        </div>
+                        <div class="card-body">
+                            <canvas id="featureChart"></canvas>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Whitespace Analysis View -->
+            <div x-show="currentView === 'whitespace'" x-transition class="view">
+                <div class="card">
+                    <div class="card-header">
+                        <h3>Whitespace Opportunities</h3>
+                        <div class="header-actions">
+                            <input type="search" placeholder="Search customers..." class="search-input">
+                            <button class="btn-primary">Export</button>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <div class="table-responsive">
+                            <table class="data-table">
+                                <thead>
+                                    <tr>
+                                        <th>Customer</th>
+                                        <th>Territory</th>
+                                        <th>Score</th>
+                                        <th>Rank</th>
+                                        <th>Top Reason</th>
+                                        <th>Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <tr>
+                                        <td>Acme Corporation</td>
+                                        <td>West</td>
+                                        <td><span class="score-high">0.96</span></td>
+                                        <td>#1</td>
+                                        <td>High transaction volume</td>
+                                        <td><button class="btn-sm">View Details</button></td>
+                                    </tr>
+                                    <tr>
+                                        <td>TechStart Inc</td>
+                                        <td>East</td>
+                                        <td><span class="score-high">0.92</span></td>
+                                        <td>#2</td>
+                                        <td>Growing account</td>
+                                        <td><button class="btn-sm">View Details</button></td>
+                                    </tr>
+                                    <tr>
+                                        <td>Global Systems</td>
+                                        <td>Central</td>
+                                        <td><span class="score-medium">0.88</span></td>
+                                        <td>#3</td>
+                                        <td>Recent engagement</td>
+                                        <td><button class="btn-sm">View Details</button></td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Validation View -->
+            <div x-show="currentView === 'validation'" x-transition class="view">
+                <div class="validation-status-grid">
+                    <div class="validation-card success">
+                        <div class="validation-icon">✅</div>
+                        <div class="validation-content">
+                            <h4>Calibration MAE</h4>
+                            <p class="validation-value">0.0234</p>
+                            <p class="validation-status">Within threshold</p>
+                        </div>
+                    </div>
+                    <div class="validation-card success">
+                        <div class="validation-icon">✅</div>
+                        <div class="validation-content">
+                            <h4>PSI (EV vs GP)</h4>
+                            <p class="validation-value">0.145</p>
+                            <p class="validation-status">No drift detected</p>
+                        </div>
+                    </div>
+                    <div class="validation-card warning">
+                        <div class="validation-icon">⚠️</div>
+                        <div class="validation-content">
+                            <h4>KS Statistic</h4>
+                            <p class="validation-value">0.178</p>
+                            <p class="validation-status">Review recommended</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
+                        <h3>Validation History</h3>
+                    </div>
+                    <div class="card-body">
+                        <canvas id="validationChart"></canvas>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Other views can be added similarly -->
+            <div x-show="!['overview', 'metrics', 'whitespace', 'validation'].includes(currentView)" x-transition class="view">
+                <div class="empty-state">
+                    <div class="empty-icon">🚧</div>
+                    <h3>Coming Soon</h3>
+                    <p>This section is under development. Check back soon!</p>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <script src="scripts/app.js"></script>
+    <script src="scripts/charts.js"></script>
+</body>
+</html>
+

@@ -1347,12 +1347,12 @@
     "is_mold_tool_and_die_x_growth",
     "is_education_and_research_x_growth"
   ],
-  "trained_at": "2025-10-01T12:16:16.111993Z",
-  "best_model": "LightGBM",
-  "best_auc": null,
+  "trained_at": "2025-10-01T13:23:54.698288Z",
+  "best_model": "Logistic Regression",
+  "best_auc": 0.9849693558220898,
   "calibration_method": "sigmoid",
-  "calibration_mae": null,
-  "brier_score": null,
+  "calibration_mae": 0.0010475555883803448,
+  "brier_score": 0.0014435047442684376,
   "class_balance": {
     "positives": 789,
     "negatives": 493901,

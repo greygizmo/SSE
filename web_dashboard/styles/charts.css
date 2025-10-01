@@ -1,0 +1,14 @@
+/* Charts Styling */
+
+canvas {
+    max-height: 300px;
+    width: 100% !important;
+}
+
+/* Chart containers */
+.chart-container {
+    position: relative;
+    height: 300px;
+    margin-bottom: var(--spacing-md);
+}
+
