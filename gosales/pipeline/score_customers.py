@@ -8,14 +8,28 @@ our customer scorecards and whitespace reports current.
 """
 import polars as pl
 import pandas as pd
-import mlflow
-import mlflow.sklearn
+from types import SimpleNamespace
 import json
 import os
 import copy
 from collections.abc import Iterable
 from pathlib import Path
 import joblib
+
+_MLFLOW_IMPORT_ERROR: Exception | None = None
+
+try:  # pragma: no cover - exercised indirectly via tests
+    import mlflow  # type: ignore[import]
+    import mlflow.sklearn  # type: ignore[import]
+    MLFLOW_AVAILABLE = True
+except Exception as exc:  # pragma: no cover - depends on environment
+    mlflow = SimpleNamespace()  # type: ignore[assignment]
+    mlflow.sklearn = SimpleNamespace()  # type: ignore[attr-defined]
+    _MLFLOW_IMPORT_ERROR = exc
+    MLFLOW_AVAILABLE = False
+else:
+    _MLFLOW_IMPORT_ERROR = None
+    MLFLOW_AVAILABLE = True
 
 from gosales.utils.db import get_db_connection, get_curated_connection, validate_connection
 from gosales.utils.logger import get_logger
@@ -32,6 +46,23 @@ from gosales.monitoring.drift import check_drift_and_emit_alerts
 from gosales.utils.config import load_config
 
 logger = get_logger(__name__)
+
+
+def _mlflow_unavailable(*_args, **_kwargs):
+    """Warn and raise when MLflow functionality is requested but unavailable."""
+
+    message = (
+        "MLflow is not installed but MLflow-dependent functionality was requested. "
+        "Install mlflow to enable this behavior."
+    )
+    logger.warning(message)
+    if _MLFLOW_IMPORT_ERROR is not None:
+        raise RuntimeError(message) from _MLFLOW_IMPORT_ERROR
+    raise RuntimeError(message)
+
+
+if not MLFLOW_AVAILABLE:  # pragma: no cover - behavior validated via tests
+    setattr(mlflow.sklearn, "load_model", _mlflow_unavailable)  # type: ignore[attr-defined]
 
 class MissingModelMetadataError(Exception):
     pass
