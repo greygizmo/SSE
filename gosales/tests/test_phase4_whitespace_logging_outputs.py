@@ -1,4 +1,5 @@
 import json
+import os
 import types
 
 import pandas as pd
@@ -185,11 +186,13 @@ def test_generate_scoring_outputs_records_whitespace_artifact(tmp_path, monkeypa
 
     monkeypatch.setattr(sc, "_emit_capacity_and_logs", fake_emit)
 
-    sc.generate_scoring_outputs(engine=None, run_manifest=run_manifest)
+    returned_icp = sc.generate_scoring_outputs(engine=None, run_manifest=run_manifest)
 
     whitespace_path = outputs_dir / "whitespace_20240630.csv"
     assert whitespace_path.exists()
     assert run_manifest["whitespace_artifact"] == str(whitespace_path)
+    assert run_manifest["icp_scores"] == str(outputs_dir / "icp_scores.csv")
+    assert returned_icp == outputs_dir / "icp_scores.csv"
 
 
 def test_generate_scoring_outputs_raises_when_no_models(tmp_path, monkeypatch):
@@ -288,7 +291,105 @@ def test_generate_scoring_outputs_applies_segment_allocation(tmp_path, monkeypat
     assert "selected" in captured
     selected = captured["selected"]
     assert len(selected) == 3
-    # Segment allocation should ensure at least one cold account is retained
     assert any(selected["customer_id"] == "c4")
     assert (selected["segment"].str.lower() == "cold").sum() >= 1
     assert (selected["segment"].str.lower() == "warm").sum() >= 1
+
+
+def test_generate_scoring_outputs_records_fallback_icp_path(tmp_path, monkeypatch):
+    monkeypatch.setattr(sc, "OUTPUTS_DIR", tmp_path)
+    monkeypatch.setattr(rw, "OUTPUTS_DIR", tmp_path)
+
+    run_manifest = default_manifest()
+    run_manifest["run_id"] = "fallback-run"
+    run_manifest["cutoff"] = "2024-06-30"
+
+    model_dir = tmp_path / "A_model"
+    model_dir.mkdir()
+    monkeypatch.setattr(sc, "discover_available_models", lambda: {"A": model_dir})
+    monkeypatch.setattr(sc, "_filter_models_by_targets", lambda available, targets: available)
+
+    scores_df = pl.DataFrame(
+        {
+            "division_name": ["A"],
+            "customer_id": ["1"],
+            "customer_name": ["Acme"],
+            "icp_score": [0.9],
+            "rfm__all__gp_sum__12m": [1.0],
+            "affinity__div__lift_topk__12m": [0.2],
+            "bought_in_division": [0],
+            "rfm__all__tx_n__12m": [0],
+            "assets_active_total": [0],
+            "assets_on_subs_total": [0],
+        }
+    )
+    monkeypatch.setattr(sc, "score_customers_for_division", lambda *a, **k: scores_df)
+    monkeypatch.setattr(sc, "generate_whitespace_opportunities", lambda engine: pl.DataFrame())
+    monkeypatch.setattr(sc, "validate_whitespace_schema", lambda path: {})
+    monkeypatch.setattr(sc, "write_schema_report", lambda report, path: None)
+
+    cfg = types.SimpleNamespace(
+        whitespace=types.SimpleNamespace(
+            shadow_mode=False,
+            capacity_mode="top_percent",
+            segment_allocation=None,
+            bias_division_max_share_topN=1.0,
+        ),
+        modeling=types.SimpleNamespace(capacity_percent=10),
+    )
+    monkeypatch.setattr(sc, "load_config", lambda: cfg)
+
+    def fake_rank(inputs):
+        base = inputs.scores.copy()
+        return base.assign(
+            score=0.9,
+            score_challenger=0.8,
+            p_icp=0.7,
+            p_icp_pct=0.6,
+            lift_norm=0.5,
+            als_norm=0.4,
+            EV_norm=0.3,
+            nba_reason="Reason",
+        )
+
+    monkeypatch.setattr(sc, "rank_whitespace", fake_rank)
+
+    def fake_emit(ranked, selected, cutoff_tag=None):
+        return pd.DataFrame({"division_name": ["A"], "selected_count": [len(selected)]})
+
+    monkeypatch.setattr(sc, "_emit_capacity_and_logs", fake_emit)
+
+    write_calls = {"attempts": 0}
+    original_write_csv = pl.DataFrame.write_csv
+
+    def flaky_write_csv(self, file, *args, **kwargs):
+        if (
+            isinstance(file, (str, bytes, os.PathLike))
+            and str(file).endswith("icp_scores.csv")
+            and write_calls["attempts"] == 0
+        ):
+            write_calls["attempts"] += 1
+            raise OSError("locked")
+        write_calls["attempts"] += 1
+        return original_write_csv(self, file, *args, **kwargs)
+
+    monkeypatch.setattr(pl.DataFrame, "write_csv", flaky_write_csv, raising=False)
+
+    read_calls: list[os.PathLike | str] = []
+    real_read_csv = sc.pd.read_csv
+
+    def tracking_read_csv(path, *args, **kwargs):
+        read_calls.append(path)
+        return real_read_csv(path, *args, **kwargs)
+
+    monkeypatch.setattr(sc.pd, "read_csv", tracking_read_csv)
+
+    returned_icp = sc.generate_scoring_outputs(engine=None, run_manifest=run_manifest)
+
+    fallback_files = sorted(tmp_path.glob("icp_scores_*.csv"))
+    assert fallback_files, "Expected fallback ICP scores file to be created"
+    fallback_path = fallback_files[-1]
+    assert returned_icp == fallback_path
+    assert run_manifest["icp_scores"] == str(fallback_path)
+    assert any(str(p).endswith(fallback_path.name) for p in read_calls)
+    assert write_calls["attempts"] >= 2

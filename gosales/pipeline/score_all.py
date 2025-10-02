@@ -237,7 +237,7 @@ def score_all():
         run_manifest["window_months"] = int(prediction_window_months)
 
         # Generate outputs; function will update manifest details (divisions scored, alerts)
-        generate_scoring_outputs(
+        icp_scores_path = generate_scoring_outputs(
             curated_engine,
             run_manifest=run_manifest,
             cutoff_date=cutoff_date,
@@ -256,10 +256,15 @@ def score_all():
                 whitespace_str = str(ws_path)
             else:
                 whitespace_str = str(OUTPUTS_DIR / "whitespace.csv")
+            icp_entry = run_manifest.get("icp_scores")
+            if icp_entry:
+                icp_path = Path(icp_entry)
+            else:
+                icp_path = icp_scores_path if icp_scores_path is not None else OUTPUTS_DIR / "icp_scores.csv"
             ctx["write_manifest"](
                 {
                     "run_manifest": str(manifest_path),
-                    "icp_scores": str(OUTPUTS_DIR / "icp_scores.csv"),
+                    "icp_scores": str(icp_path),
                     "whitespace": whitespace_str,
                 }
             )
@@ -279,7 +284,7 @@ def score_all():
 
         # --- 7. Hold-out validation & gates (Phase 5) ---
         try:
-            icp_path = OUTPUTS_DIR / "icp_scores.csv"
+            icp_path = Path(run_manifest.get("icp_scores") or (icp_scores_path or OUTPUTS_DIR / "icp_scores.csv"))
             if icp_path.exists():
                 # Derive a year tag from cutoff (simple heuristic: cutoff year + 1)
                 year_tag = None

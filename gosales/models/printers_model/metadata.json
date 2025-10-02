@@ -1345,7 +1345,7 @@
     "is_mold_tool_and_die_x_growth",
     "is_education_and_research_x_growth"
   ],
-  "trained_at": "2025-10-01T11:00:59.619048Z",
+  "trained_at": "2025-10-02T03:49:10.078058Z",
   "best_model": "Logistic Regression",
   "best_auc": null,
   "calibration_method": "sigmoid",

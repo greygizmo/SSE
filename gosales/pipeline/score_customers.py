@@ -1075,6 +1075,7 @@ def generate_scoring_outputs(
         # Clear any prior whitespace artifact entry so downstream callers rely on
         # the path emitted by this execution.
         run_manifest["whitespace_artifact"] = None
+        run_manifest.pop("icp_scores", None)
     
     # Discover available models by folder convention *_model
     available_models = discover_available_models()
@@ -1090,6 +1091,7 @@ def generate_scoring_outputs(
         logger.warning(f"Could not prune legacy models: {e}")
     
     all_scores: list[pl.DataFrame] = []
+    icp_scores_path: Path | None = None
     for division_name, model_path in available_models.items():
         if not model_path.exists():
             logger.warning(f"Model not found for {division_name}: {model_path}")
@@ -1235,6 +1237,8 @@ def generate_scoring_outputs(
         except Exception:
             pass
         logger.info(f"Saved ICP scores for {len(combined_scores)} customer-division combinations to {icp_scores_path}")
+        if run_manifest is not None:
+            run_manifest["icp_scores"] = str(icp_scores_path)
     else:
         message = (
             "No models were available for scoring. Ensure trained models exist "
@@ -1252,7 +1256,16 @@ def generate_scoring_outputs(
         except Exception:
             cutoff_tag = None
 
-        icp_path = OUTPUTS_DIR / "icp_scores.csv"
+        icp_path: Path | None = icp_scores_path
+        if icp_path is None and run_manifest is not None:
+            try:
+                manifest_icp = run_manifest.get("icp_scores")
+                if manifest_icp:
+                    icp_path = Path(manifest_icp)
+            except Exception:
+                icp_path = None
+        if icp_path is None:
+            icp_path = OUTPUTS_DIR / "icp_scores.csv"
         if icp_path.exists():
             # Load only necessary columns for ranking to reduce memory
             try:
@@ -1301,6 +1314,8 @@ def generate_scoring_outputs(
             path = save_ranked_whitespace(ranked, cutoff_tag=cutoff_tag)
             if run_manifest is not None:
                 run_manifest["whitespace_artifact"] = str(path)
+                if "icp_scores" not in run_manifest:
+                    run_manifest["icp_scores"] = str(icp_path)
             logger.info(f"Saved Phase-4 ranked whitespace to {path}")
             # Also save segmented ranked outputs for warm/cold/prospect
             try:
@@ -1577,6 +1592,7 @@ def generate_scoring_outputs(
         logger.warning(f"Phase-4 ranker failed; skipping whitespace ranking: {e}")
 
     logger.info("Scoring pipeline completed successfully!")
+    return icp_scores_path
 
 if __name__ == "__main__":
     import argparse
