@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pandas as pd
-from datetime import datetime
 from dateutil.relativedelta import relativedelta
 
 from gosales.utils.logger import get_logger
@@ -9,6 +10,35 @@ from gosales.utils.paths import OUTPUTS_DIR
 from gosales.etl.sku_map import get_model_targets
 
 logger = get_logger(__name__)
+
+SUMMARY_FILENAME = "labels_summary.csv"
+SUMMARY_KEY_COLUMNS = ["division", "cutoff_date", "window_months"]
+
+
+def _append_summary(summary: pd.DataFrame, destination: Path) -> None:
+    """Persist a one-row summary without clobbering prior divisions."""
+
+    if destination.exists():
+        try:
+            existing = pd.read_csv(destination)
+        except pd.errors.EmptyDataError:
+            existing = pd.DataFrame(columns=summary.columns)
+
+        if not existing.empty and "division" in existing.columns:
+            # Guard against prior runs that accidentally appended headers as rows.
+            existing = existing[existing["division"].astype(str) != "division"]
+
+        combined = pd.concat([existing, summary], ignore_index=True)
+        key_cols = [col for col in SUMMARY_KEY_COLUMNS if col in combined.columns]
+        if key_cols:
+            combined = combined.drop_duplicates(subset=key_cols, keep="last")
+        else:
+            combined = combined.drop_duplicates()
+    else:
+        combined = summary.copy()
+
+    combined = combined.reindex(columns=summary.columns, fill_value=pd.NA)
+    combined.to_csv(destination, index=False)
 
 
 def compute_label_audit(
@@ -116,12 +146,16 @@ def compute_label_audit(
 
     # Persist artifacts
     try:
-        summary.to_csv(OUTPUTS_DIR / "labels_summary.csv", index=False)
+        _append_summary(summary, OUTPUTS_DIR / SUMMARY_FILENAME)
         pd.DataFrame({"customer_id": buyers}).to_csv(
             OUTPUTS_DIR / f"labels_positive_{division_name.lower()}.csv", index=False
         )
         logger.info(
-            f"Wrote labels_summary.csv (prevalence={prevalence:.4f}, positives={positives}/{total_customers})"
+            "Appended label audit summary for %s (prevalence=%.4f, positives=%s/%s)",
+            division_name,
+            prevalence,
+            positives,
+            total_customers,
         )
     except Exception as e:
         logger.warning(f"Failed to persist label audit artifacts: {e}")
