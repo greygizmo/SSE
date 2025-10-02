@@ -101,6 +101,24 @@ def build_star_schema(engine, config_path: str | Path | None = None, rebuild: bo
     sales_log_src = db_sources.get('sales_log', 'sales_log')
     ind_src = db_sources.get('industry_enrichment', 'industry_enrichment')
 
+    backend = getattr(getattr(engine, 'dialect', None), 'name', '')
+    is_azure_like = backend in {'mssql'}
+    if not is_azure_like:
+        if isinstance(sales_log_src, str) and sales_log_src.lower() != 'csv' and sales_log_src != 'sales_log':
+            logger.info(
+                "Local engine '%s' detected; using fallback Sales Log table 'sales_log' instead of configured '%s'.",
+                backend or 'unknown',
+                sales_log_src,
+            )
+            sales_log_src = 'sales_log'
+        if isinstance(ind_src, str) and ind_src.lower() != 'csv' and ind_src != 'industry_enrichment':
+            logger.info(
+                "Local engine '%s' detected; using fallback industry enrichment table 'industry_enrichment' instead of '%s'.",
+                backend or 'unknown',
+                ind_src,
+            )
+            ind_src = 'industry_enrichment'
+
     # Engines: source (raw) and curated (write target)
     curated_engine = get_curated_connection()
 

@@ -127,6 +127,13 @@ def score_all():
     with run_context("pipeline_score_all") as ctx:
         # --- 1. Setup ---
         db_engine = get_db_connection()          # source (Azure)
+        backend = getattr(getattr(db_engine, "dialect", None), "name", "")
+        is_azure_like = backend in {"mssql"}
+        if not is_azure_like:
+            logger.info(
+                "Primary database engine '%s' detected; forcing CSV ingest for local sample tables.",
+                backend or "unknown",
+            )
         from gosales.utils.db import get_curated_connection
         curated_engine = get_curated_connection()  # curated (local sqlite)
         # Connection health checks
@@ -153,10 +160,16 @@ def score_all():
         cfg = load_config()
         src = getattr(getattr(cfg, 'database', object()), 'source_tables', {}) or {}
         sl_src = str(src.get('sales_log', '')).strip()
-        use_db_source = bool(sl_src and sl_src.lower() != 'csv')
+        use_db_source = bool(sl_src and sl_src.lower() != 'csv' and is_azure_like)
         if use_db_source:
             logger.info("Sales Log source is mapped to DB object '%s'; skipping local CSV ingest.", sl_src)
         else:
+            if not is_azure_like and sl_src and sl_src.lower() != 'csv':
+                logger.info(
+                    "Overriding configured Sales Log source '%s' for local engine '%s'; loading sample CSVs.",
+                    sl_src,
+                    backend or "unknown",
+                )
             # Define the CSV files and their corresponding table names
             csv_files = {
                 "Sales_Log.csv": "sales_log",
