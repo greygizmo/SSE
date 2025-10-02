@@ -13,6 +13,7 @@ from gosales.etl.load_csv import load_csv_to_db
 from gosales.etl.build_star import build_star_schema
 import sys
 import subprocess
+from sqlalchemy import inspect
 from gosales.pipeline.label_audit import compute_label_audit
 from gosales.pipeline.score_customers import generate_scoring_outputs
 from gosales.utils.logger import get_logger
@@ -112,6 +113,47 @@ def _prune_legacy_model_dirs(targets, models_dir, log=logger):
         except Exception as err:
             log.warning(f"Failed to prune {path}: {err}")
 
+
+def _record_run_failure(ctx, message: str) -> None:
+    """Persist run metadata indicating the pipeline terminated with an error."""
+
+    logger.error(message)
+    try:
+        ctx["write_manifest"]({"status": "error", "message": message})
+    except Exception as manifest_err:
+        logger.warning(f"Unable to write failure manifest: {manifest_err}")
+    try:
+        ctx["append_registry"]({
+            "phase": "pipeline_score_all",
+            "status": "error",
+            "error": message,
+            "artifact_count": 0,
+        })
+    except Exception as registry_err:
+        logger.warning(f"Unable to append failure entry to registry: {registry_err}")
+
+
+def _star_build_successful(result, curated_engine) -> bool:
+    """Best-effort check whether the star schema build succeeded."""
+
+    if isinstance(result, dict):
+        if "status" in result:
+            return str(result["status"]).lower() in {"ok", "success"}
+        if "success" in result:
+            return bool(result["success"])
+    if isinstance(result, bool):
+        return result
+
+    # Fallback: inspect curated database for required tables
+    try:
+        inspector = inspect(curated_engine)
+        tables = set(inspector.get_table_names())
+    except Exception:
+        return False
+
+    required_tables = {"dim_customer", "fact_transactions"}
+    return required_tables.issubset(tables)
+
 def score_all():
     """
     Orchestrates the entire GoSales pipeline from data ingestion to final scoring.
@@ -179,7 +221,18 @@ def score_all():
                 file_path = DATA_DIR / "database_samples" / file_name
                 load_csv_to_db(file_path, table_name, db_engine)
 
-        build_star_schema(db_engine)
+        try:
+            star_result = build_star_schema(db_engine)
+        except Exception as exc:
+            message = f"Star schema build raised an exception: {exc}"
+            logger.exception(message)
+            _record_run_failure(ctx, message)
+            raise
+        if not _star_build_successful(star_result, curated_engine):
+            detail = star_result if star_result is not None else "missing curated tables"
+            message = f"Star schema build failed: {detail}"
+            _record_run_failure(ctx, message)
+            raise RuntimeError(message)
         # Build invoice-level events for leakage-safe feature engineering
         try:
             from gosales.etl.events import build_fact_events
