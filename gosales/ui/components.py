@@ -8,12 +8,12 @@ import streamlit as st
 import pandas as pd
 
 
-# Color palette (Grayscale + #BAD532)
+# Color palette (Grayscale + Professional Blue)
 class Colors:
-    # Primary colors - #BAD532
-    PRIMARY = "#BAD532"
-    PRIMARY_DARK = "#9BB828"
-    PRIMARY_LIGHT = "#C9E05C"
+    # Primary colors - Professional Blue
+    PRIMARY = "#2a5298"
+    PRIMARY_DARK = "#1e3c72"
+    PRIMARY_LIGHT = "#4a6fa5"
     
     # Secondary colors - Grayscale
     SECONDARY = "#D9D9D9"
@@ -21,7 +21,7 @@ class Colors:
     SECONDARY_LIGHT = "#EDEDED"
     
     # Semantic colors
-    SUCCESS = "#BAD532"  # Use brand color for success
+    SUCCESS = "#2a5298"  # Use brand color for success
     WARNING = "#E6C229"
     ERROR = "#DC2626"
     INFO = "#666666"
@@ -158,7 +158,7 @@ def metric_card(
     
     help_html = f'<div style="color: {Colors.TEXT_MUTED}; font-size: 0.7rem; margin-top: 4px;" title="{help_text}">ℹ️</div>' if help_text else ""
     
-    # Compact, modern metric card with grayscale + #BAD532 accent
+    # Compact, modern metric card with grayscale + professional blue accent
     metric_html = f'''<div style="background: {Colors.SURFACE}; border: 1px solid {Colors.BORDER}; border-radius: 6px; padding: 12px 16px; margin: 8px 0; transition: all 0.2s;">
         {icon_html}
         <div style="color: {Colors.TEXT_MUTED}; font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px;">{label}</div>

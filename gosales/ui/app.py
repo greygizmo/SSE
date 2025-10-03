@@ -31,7 +31,7 @@ from gosales.ui.components import (
     card, metric_card, alert, badge, stat_grid,
     data_table_enhanced, progress_bar, skeleton_loader
 )
-from gosales.ui.styles import get_shadcn_styles, get_dark_mode_toggle
+from gosales.ui.styles import get_shadcn_styles
 
 
 def _fmt_mtime(path: Path) -> str:
@@ -58,29 +58,10 @@ st.set_page_config(
 
 # Apply ShadCN-inspired styling
 st.markdown(get_shadcn_styles(), unsafe_allow_html=True)
-st.markdown(get_dark_mode_toggle(), unsafe_allow_html=True)
 
 # Custom CSS for professional styling (legacy - will be phased out)
 st.markdown("""
 <style>
-    /* Main title styling */
-    .main-title {
-        background: linear-gradient(135deg, #1e3c72, #2a5298);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        background-clip: text;
-        font-size: 3rem !important;
-        font-weight: 700 !important;
-        margin-bottom: 0.5rem !important;
-    }
-
-    /* Subtitle styling */
-    .subtitle {
-        color: #666;
-        font-size: 1.1rem;
-        margin-bottom: 2rem;
-        font-style: italic;
-    }
 
     /* Section headers */
     .section-header {
@@ -187,27 +168,6 @@ st.markdown("""
     }
 </style>
 """, unsafe_allow_html=True)
-
-# Professional header with logo and branding
-col1, col2, col3 = st.columns([1, 3, 1])
-
-with col1:
-    st.image("https://via.placeholder.com/80x80/1e3c72/ffffff?text=GS", width=60)
-
-with col2:
-    st.markdown('<h1 class="main-title">GoSales Engine</h1>', unsafe_allow_html=True)
-    st.markdown('<p class="subtitle">AI-Powered Sales Intelligence Platform</p>', unsafe_allow_html=True)
-
-with col3:
-    # Dark mode toggle button
-    if st.button("🌓 Theme", key="theme_toggle", help="Toggle dark/light mode"):
-        st.markdown("<script>toggleDarkMode();</script>", unsafe_allow_html=True)
-    
-    # System status indicator
-    import time
-    current_time = time.strftime("%H:%M:%S")
-    st.caption(f"🟢 Online | {current_time}")
-
 
 # Enhanced cache helpers with loading states and error handling
 @st.cache_data(show_spinner="Loading data...")
@@ -1005,7 +965,8 @@ elif tab == "Explainability":
         if stats_candidates:
             st.subheader("Feature Stats")
             st.caption("Includes per-column coverage; optional winsor caps for gp_sum features; checksum ensures determinism of the feature parquet.")
-            st.code(_read_text(stats_candidates[0]))
+            with st.expander("View Feature Stats Details", expanded=False):
+                st.code(_read_text(stats_candidates[0]))
         if sg.exists():
             with st.expander("SHAP Global — what it means", expanded=True):
                 st.markdown("- Mean absolute SHAP reflects average feature influence magnitude across customers. Higher = more impact on predictions.")
@@ -3103,7 +3064,7 @@ elif tab == "🌟 Experimental":
     import streamlit.components.v1 as components
     
     st.markdown("### 🌟 Experimental Dashboard")
-    st.caption("A modern, dark-themed dashboard with custom HTML/CSS and #BAD532 highlights")
+    st.caption("A modern, dark-themed dashboard with custom HTML/CSS and #2a5298 highlights")
     
     # Custom HTML/CSS/JS Dashboard
     dashboard_html = """
@@ -3155,7 +3116,7 @@ elif tab == "🌟 Experimental":
             .logo-icon {
                 width: 48px;
                 height: 48px;
-                background: linear-gradient(135deg, #BAD532 0%, #9BB828 100%);
+                background: linear-gradient(135deg, #2a5298 0%, #1e3c72 100%);
                 border-radius: 12px;
                 display: flex;
                 align-items: center;
@@ -3168,7 +3129,7 @@ elif tab == "🌟 Experimental":
             .logo-text h1 {
                 font-size: 1.5rem;
                 font-weight: 700;
-                background: linear-gradient(135deg, #BAD532 0%, #ffffff 100%);
+                background: linear-gradient(135deg, #2a5298 0%, #ffffff 100%);
                 -webkit-background-clip: text;
                 -webkit-text-fill-color: transparent;
                 background-clip: text;
@@ -3200,7 +3161,7 @@ elif tab == "🌟 Experimental":
             .status-dot {
                 width: 8px;
                 height: 8px;
-                background: #BAD532;
+                background: #2a5298;
                 border-radius: 50%;
                 animation: pulse 2s infinite;
             }
@@ -3241,7 +3202,7 @@ elif tab == "🌟 Experimental":
                 left: 0;
                 right: 0;
                 height: 2px;
-                background: linear-gradient(90deg, transparent, #BAD532, transparent);
+                background: linear-gradient(90deg, transparent, #2a5298, transparent);
                 opacity: 0;
                 transition: opacity 0.3s;
             }
@@ -3307,7 +3268,7 @@ elif tab == "🌟 Experimental":
 
             .metric-change.positive {
                 background: rgba(186, 213, 50, 0.15);
-                color: #BAD532;
+                color: #2a5298;
             }
 
             .metric-change.negative {
@@ -3352,13 +3313,13 @@ elif tab == "🌟 Experimental":
             .chart-button:hover {
                 background: rgba(186, 213, 50, 0.1);
                 border-color: rgba(186, 213, 50, 0.3);
-                color: #BAD532;
+                color: #2a5298;
             }
 
             .chart-button.active {
                 background: rgba(186, 213, 50, 0.15);
                 border-color: rgba(186, 213, 50, 0.4);
-                color: #BAD532;
+                color: #2a5298;
             }
 
             /* Simple Bar Chart */
@@ -3372,7 +3333,7 @@ elif tab == "🌟 Experimental":
 
             .bar {
                 flex: 1;
-                background: linear-gradient(180deg, #BAD532 0%, rgba(186, 213, 50, 0.5) 100%);
+                background: linear-gradient(180deg, #2a5298 0%, rgba(186, 213, 50, 0.5) 100%);
                 border-radius: 6px 6px 0 0;
                 position: relative;
                 transition: all 0.3s;
@@ -3380,7 +3341,7 @@ elif tab == "🌟 Experimental":
             }
 
             .bar:hover {
-                background: linear-gradient(180deg, #C9E05C 0%, #BAD532 100%);
+                background: linear-gradient(180deg, #4a6fa5 0%, #2a5298 100%);
                 transform: scaleY(1.05);
             }
 
@@ -3441,7 +3402,7 @@ elif tab == "🌟 Experimental":
 
             .table-badge.success {
                 background: rgba(186, 213, 50, 0.15);
-                color: #BAD532;
+                color: #2a5298;
             }
 
             .table-badge.warning {
@@ -3476,7 +3437,7 @@ elif tab == "🌟 Experimental":
 
             .progress-fill {
                 height: 100%;
-                background: linear-gradient(90deg, #BAD532 0%, #9BB828 100%);
+                background: linear-gradient(90deg, #2a5298 0%, #1e3c72 100%);
                 border-radius: 4px;
                 transition: width 1s ease-out;
             }
@@ -3494,7 +3455,7 @@ elif tab == "🌟 Experimental":
                 padding: 1rem;
                 background: rgba(255, 255, 255, 0.02);
                 border-radius: 10px;
-                border-left: 3px solid #BAD532;
+                border-left: 3px solid #2a5298;
                 transition: all 0.2s;
             }
 
@@ -3671,7 +3632,7 @@ elif tab == "🌟 Experimental":
                     <div class="progress-container">
                         <div class="progress-header">
                             <span>Solidworks</span>
-                            <span style="color: #BAD532;">96.2%</span>
+                            <span style="color: #2a5298;">96.2%</span>
                         </div>
                         <div class="progress-bar">
                             <div class="progress-fill" style="width: 96.2%;"></div>
@@ -3680,7 +3641,7 @@ elif tab == "🌟 Experimental":
                     <div class="progress-container">
                         <div class="progress-header">
                             <span>Services</span>
-                            <span style="color: #BAD532;">94.8%</span>
+                            <span style="color: #2a5298;">94.8%</span>
                         </div>
                         <div class="progress-bar">
                             <div class="progress-fill" style="width: 94.8%;"></div>
@@ -3689,7 +3650,7 @@ elif tab == "🌟 Experimental":
                     <div class="progress-container">
                         <div class="progress-header">
                             <span>Hardware</span>
-                            <span style="color: #BAD532;">92.5%</span>
+                            <span style="color: #2a5298;">92.5%</span>
                         </div>
                         <div class="progress-bar">
                             <div class="progress-fill" style="width: 92.5%;"></div>
@@ -3698,7 +3659,7 @@ elif tab == "🌟 Experimental":
                     <div class="progress-container">
                         <div class="progress-header">
                             <span>Training</span>
-                            <span style="color: #BAD532;">89.3%</span>
+                            <span style="color: #2a5298;">89.3%</span>
                         </div>
                         <div class="progress-bar">
                             <div class="progress-fill" style="width: 89.3%;"></div>

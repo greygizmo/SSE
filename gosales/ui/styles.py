@@ -12,16 +12,16 @@ def get_shadcn_styles() -> str:
     /* Import Inter font */
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
     
-    /* ==================== ROOT VARIABLES (Grayscale + #BAD532) ==================== */
+    /* ==================== ROOT VARIABLES (Grayscale + Professional Blue) ==================== */
     :root {
-        /* Colors - Light Mode - Grayscale with #BAD532 highlights */
+        /* Colors - Light Mode - Grayscale with Professional Blue highlights */
         --background: 0 0% 100%;
         --foreground: 0 0% 10%;
         --card: 0 0% 98%;
         --card-foreground: 0 0% 10%;
         --popover: 0 0% 100%;
         --popover-foreground: 0 0% 10%;
-        --primary: 66 72% 51%;  /* #BAD532 */
+        --primary: 217 91% 60%;  /* #2a5298 */
         --primary-foreground: 0 0% 10%;
         --secondary: 0 0% 85%;
         --secondary-foreground: 0 0% 20%;
@@ -33,11 +33,11 @@ def get_shadcn_styles() -> str:
         --destructive-foreground: 0 0% 100%;
         --border: 0 0% 88%;
         --input: 0 0% 88%;
-        --ring: 66 72% 51%;  /* #BAD532 */
+        --ring: 217 91% 60%;  /* #2a5298 */
         --radius: 0.375rem;  /* More compact */
         
         /* Success/Warning/Info colors - Grayscale friendly */
-        --success: 66 72% 51%;  /* #BAD532 for success */
+        --success: 217 91% 60%;  /* #2a5298 for success */
         --success-foreground: 0 0% 10%;
         --warning: 45 93% 47%;  /* Warm gray-yellow */
         --warning-foreground: 0 0% 10%;
@@ -52,7 +52,7 @@ def get_shadcn_styles() -> str:
         --shadow-xl: 0 20px 25px -5px rgb(0 0 0 / 0.1), 0 8px 10px -6px rgb(0 0 0 / 0.1);
     }
     
-    /* Dark Mode Variables - Grayscale with #BAD532 */
+    /* Dark Mode Variables - Grayscale with Professional Blue */
     [data-theme="dark"] {
         --background: 0 0% 8%;
         --foreground: 0 0% 95%;
@@ -60,7 +60,7 @@ def get_shadcn_styles() -> str:
         --card-foreground: 0 0% 95%;
         --popover: 0 0% 10%;
         --popover-foreground: 0 0% 95%;
-        --primary: 66 72% 51%;  /* #BAD532 */
+        --primary: 217 91% 60%;  /* #2a5298 */
         --primary-foreground: 0 0% 10%;
         --secondary: 0 0% 18%;
         --secondary-foreground: 0 0% 90%;
@@ -70,7 +70,7 @@ def get_shadcn_styles() -> str:
         --accent-foreground: 0 0% 95%;
         --border: 0 0% 22%;
         --input: 0 0% 22%;
-        --success: 66 72% 51%;  /* #BAD532 */
+        --success: 217 91% 60%;  /* #2a5298 */
         --success-foreground: 0 0% 10%;
     }
     

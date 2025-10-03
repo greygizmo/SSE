@@ -1,6 +1,6 @@
 """
 Experimental Dashboard - Pure HTML/CSS/JS
-A beautiful, modern dashboard with dark theme and #BAD532 highlights
+A beautiful, modern dashboard with dark theme and #2a5298 highlights
 """
 import streamlit as st
 import streamlit.components.v1 as components
@@ -63,7 +63,7 @@ dashboard_html = """
         .logo-icon {
             width: 48px;
             height: 48px;
-            background: linear-gradient(135deg, #BAD532 0%, #9BB828 100%);
+            background: linear-gradient(135deg, #2a5298 0%, #1e3c72 100%);
             border-radius: 12px;
             display: flex;
             align-items: center;
@@ -76,7 +76,7 @@ dashboard_html = """
         .logo-text h1 {
             font-size: 1.5rem;
             font-weight: 700;
-            background: linear-gradient(135deg, #BAD532 0%, #ffffff 100%);
+            background: linear-gradient(135deg, #2a5298 0%, #ffffff 100%);
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
             background-clip: text;
@@ -108,7 +108,7 @@ dashboard_html = """
         .status-dot {
             width: 8px;
             height: 8px;
-            background: #BAD532;
+            background: #2a5298;
             border-radius: 50%;
             animation: pulse 2s infinite;
         }
@@ -149,7 +149,7 @@ dashboard_html = """
             left: 0;
             right: 0;
             height: 2px;
-            background: linear-gradient(90deg, transparent, #BAD532, transparent);
+            background: linear-gradient(90deg, transparent, #2a5298, transparent);
             opacity: 0;
             transition: opacity 0.3s;
         }
@@ -215,7 +215,7 @@ dashboard_html = """
 
         .metric-change.positive {
             background: rgba(186, 213, 50, 0.15);
-            color: #BAD532;
+            color: #2a5298;
         }
 
         .metric-change.negative {
@@ -260,13 +260,13 @@ dashboard_html = """
         .chart-button:hover {
             background: rgba(186, 213, 50, 0.1);
             border-color: rgba(186, 213, 50, 0.3);
-            color: #BAD532;
+            color: #2a5298;
         }
 
         .chart-button.active {
             background: rgba(186, 213, 50, 0.15);
             border-color: rgba(186, 213, 50, 0.4);
-            color: #BAD532;
+            color: #2a5298;
         }
 
         /* Simple Bar Chart */
@@ -280,7 +280,7 @@ dashboard_html = """
 
         .bar {
             flex: 1;
-            background: linear-gradient(180deg, #BAD532 0%, rgba(186, 213, 50, 0.5) 100%);
+            background: linear-gradient(180deg, #2a5298 0%, rgba(42, 82, 152, 0.5) 100%);
             border-radius: 6px 6px 0 0;
             position: relative;
             transition: all 0.3s;
@@ -288,7 +288,7 @@ dashboard_html = """
         }
 
         .bar:hover {
-            background: linear-gradient(180deg, #C9E05C 0%, #BAD532 100%);
+            background: linear-gradient(180deg, #4a6fa5 0%, #2a5298 100%);
             transform: scaleY(1.05);
         }
 
@@ -349,7 +349,7 @@ dashboard_html = """
 
         .table-badge.success {
             background: rgba(186, 213, 50, 0.15);
-            color: #BAD532;
+            color: #2a5298;
         }
 
         .table-badge.warning {
@@ -384,7 +384,7 @@ dashboard_html = """
 
         .progress-fill {
             height: 100%;
-            background: linear-gradient(90deg, #BAD532 0%, #9BB828 100%);
+            background: linear-gradient(90deg, #2a5298 0%, #1e3c72 100%);
             border-radius: 4px;
             transition: width 1s ease-out;
         }
@@ -402,7 +402,7 @@ dashboard_html = """
             padding: 1rem;
             background: rgba(255, 255, 255, 0.02);
             border-radius: 10px;
-            border-left: 3px solid #BAD532;
+            border-left: 3px solid #2a5298;
             transition: all 0.2s;
         }
 
@@ -579,7 +579,7 @@ dashboard_html = """
                 <div class="progress-container">
                     <div class="progress-header">
                         <span>Solidworks</span>
-                        <span style="color: #BAD532;">96.2%</span>
+                        <span style="color: #2a5298;">96.2%</span>
                     </div>
                     <div class="progress-bar">
                         <div class="progress-fill" style="width: 96.2%;"></div>
@@ -588,7 +588,7 @@ dashboard_html = """
                 <div class="progress-container">
                     <div class="progress-header">
                         <span>Services</span>
-                        <span style="color: #BAD532;">94.8%</span>
+                        <span style="color: #2a5298;">94.8%</span>
                     </div>
                     <div class="progress-bar">
                         <div class="progress-fill" style="width: 94.8%;"></div>
@@ -597,7 +597,7 @@ dashboard_html = """
                 <div class="progress-container">
                     <div class="progress-header">
                         <span>Hardware</span>
-                        <span style="color: #BAD532;">92.5%</span>
+                        <span style="color: #2a5298;">92.5%</span>
                     </div>
                     <div class="progress-bar">
                         <div class="progress-fill" style="width: 92.5%;"></div>
@@ -606,7 +606,7 @@ dashboard_html = """
                 <div class="progress-container">
                     <div class="progress-header">
                         <span>Training</span>
-                        <span style="color: #BAD532;">89.3%</span>
+                        <span style="color: #2a5298;">89.3%</span>
                     </div>
                     <div class="progress-bar">
                         <div class="progress-fill" style="width: 89.3%;"></div>
