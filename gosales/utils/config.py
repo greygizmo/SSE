@@ -63,6 +63,13 @@ class Logging:
 @dataclass
 class PopulationConfig:
     include_prospects: bool = False
+    # Window in months to define 'warm' customers (transactions in the last N months)
+    warm_window_months: int = 12
+    # If true, prospects are excluded as early as feature-build time to reduce compute
+    # (keeps only warm and cold in the roster before heavy joins)
+    exclude_prospects_in_features: bool = False
+    # Which segments to build in features: ['warm'], ['cold'], or ['warm','cold']
+    build_segments: list[str] = field(default_factory=lambda: ["warm", "cold"])
 
 
 @dataclass
@@ -127,6 +134,8 @@ class Features:
     # Memory guard thresholds (set very high by default; see engine for behavior)
     sqlite_skip_advanced_rows: int = 10_000_000
     fastpath_minimal_return_rows: int = 10_000_000
+    # Segment-specific feature allowlists (substring patterns to keep per segment)
+    segment_feature_allowlist: Dict[str, list[str]] = field(default_factory=dict)
 
 
 @dataclass
@@ -143,6 +152,12 @@ class ModelingConfig:
     sparse_isotonic_threshold_pos: int = 1000
     # Max rows allowed for SHAP computation; skip if exceeded
     shap_max_rows: int = 50000
+    # LightGBM threading (kept at 1 for determinism by default)
+    n_jobs: int = 1
+    # Guard to avoid very expensive final CV calibration on huge populations.
+    # When > 0 and final training population exceeds this, calibration uses a stratified
+    # sample of at most this many rows for CalibratedClassifierCV.fit().
+    final_calibration_max_rows: int = 0
     # Class imbalance controls
     class_weight: str = "balanced"  # 'balanced' or 'none'
     use_scale_pos_weight: bool = True
@@ -300,6 +315,7 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
     env_force_assets_sqlite = os.getenv("GOSALES_FEATURES_FORCE_ASSETS_ON_SQLITE")
     env_exp_guard = os.getenv("GOSALES_FEATURES_EXPIRING_GUARD_DAYS")
     env_rec_floor = os.getenv("GOSALES_FEATURES_RECENCY_FLOOR_DAYS")
+    env_pop_build_segments = os.getenv("GOSALES_POP_BUILD_SEGMENTS")
     if env_db_engine:
         cfg_dict.setdefault("database", {})["engine"] = env_db_engine
     if env_sqlite_path:
@@ -325,6 +341,13 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
     if env_rec_floor is not None:
         try:
             cfg_dict.setdefault("features", {})["recency_floor_days"] = int(env_rec_floor)
+        except Exception:
+            pass
+    if env_pop_build_segments is not None:
+        try:
+            segs = [s.strip().lower() for s in str(env_pop_build_segments).split(',') if s.strip()]
+            if segs:
+                cfg_dict.setdefault("population", {})["build_segments"] = segs
         except Exception:
             pass
 
@@ -443,7 +466,10 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
             jsonl=bool(log_cfg.get("jsonl", True)),
         ),
         population=PopulationConfig(
-            include_prospects=bool(pop_cfg.get("include_prospects", False))
+            include_prospects=bool(pop_cfg.get("include_prospects", False)),
+            warm_window_months=int(pop_cfg.get("warm_window_months", 12)),
+            exclude_prospects_in_features=bool(pop_cfg.get("exclude_prospects_in_features", False)),
+            build_segments=[str(s).strip().lower() for s in (pop_cfg.get("build_segments") or ["warm", "cold"]) if str(s).strip()],
         ),
         labels=Labels(
             gp_min_threshold=float(labels_cfg.get("gp_min_threshold", 0.0)),
@@ -485,6 +511,7 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
             silence_pooled_encoder_warnings=bool(feat_cfg.get("silence_pooled_encoder_warnings", False)),
             sqlite_skip_advanced_rows=int(feat_cfg.get("sqlite_skip_advanced_rows", 10_000_000)),
             fastpath_minimal_return_rows=int(feat_cfg.get("fastpath_minimal_return_rows", 10_000_000)),
+            segment_feature_allowlist=dict(feat_cfg.get("segment_feature_allowlist", {})),
         ),
         modeling=ModelingConfig(
             seed=int(mdl_cfg.get("seed", 42)),
@@ -496,6 +523,8 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
             top_k_percents=list(mdl_cfg.get("top_k_percents", [5, 10, 20])),
             capacity_percent=int(mdl_cfg.get("capacity_percent", 10)),
             sparse_isotonic_threshold_pos=int(mdl_cfg.get("sparse_isotonic_threshold_pos", 1000)),
+            n_jobs=int(mdl_cfg.get("n_jobs", 1) or 1),
+            final_calibration_max_rows=int(mdl_cfg.get("final_calibration_max_rows", 0) or 0),
             class_weight=str(mdl_cfg.get("class_weight", "balanced")),
             use_scale_pos_weight=bool(mdl_cfg.get("use_scale_pos_weight", True)),
             scale_pos_weight_cap=float(mdl_cfg.get("scale_pos_weight_cap", 10.0)),

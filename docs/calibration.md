@@ -9,14 +9,20 @@ This guide explains how Phase 3 training calibrates probabilities, how the new a
   - Final model fit (winner) over the last cutoff.
 - Goals: well-calibrated probabilities for downstream planning (capacity, top‑K thresholds, yield).
 
-## Adaptive Behavior (per‑cutoff and final)
+## Adaptive Behavior (per-cutoff and final)
 - Dynamic CV: `n_splits = min(modeling.folds, #pos_train, #neg_train)`.
   - If `n_splits < 2`, calibration is skipped and the uncalibrated probabilities are used.
   - Diagnostics record `calibration='none'` and a reason (`insufficient_per_class` or `single_class_train`).
 - Sparse downgrade: when positives in the training fold are very sparse, isotonic is automatically downgraded to Platt.
   - Threshold: `modeling.sparse_isotonic_threshold_pos`.
-- Selection metric during per‑cutoff fitting: lowest Brier score on the validation fold (tiebreakers by existing logic).
+- Selection metric during per-cutoff fitting: lowest Brier score on the validation fold (tiebreakers by existing logic).
 
+### Degeneracy Fallback (final fit)
+- If calibrated probabilities are degenerate (`std(p)<0.01`) on the final fit:
+  - Trainer falls back to uncalibrated base estimator probabilities.
+  - If those are still degenerate, it uses a constant prevalence baseline (`p = mean(y)`).
+  - Metadata records `calibration_fallback` with one of: `uncalibrated`, `constant_prevalence`, or `constant_prevalence_error`.
+  - The `calibration` method reported in the model card becomes `none` when a fallback is applied.
 ## Diagnostics & Artifacts
 - File: `gosales/outputs/diagnostics_<division>.json`.
   - `results_grid`: one row per cutoff per model with: `cutoff`, `model`, `auc`, `lift10`, `brier`, `calibration` (`platt`|`isotonic`|`none`), `calibration_reason` (when skipped), plus LR details (`converged`, `n_iter`).
@@ -136,3 +142,4 @@ Tips:
 - If you regularly see `insufficient_per_class`, try increasing the label window or reducing `folds`.
 - If reliability curves look piecewise/steppy, increase `folds` and prefer isotonic (when positives allow).
 - Track Brier and `cal_mae` when comparing recipes; prefer the configuration with lower values on validation.
+

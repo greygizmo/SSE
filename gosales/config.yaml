@@ -60,6 +60,13 @@ logging:
 population:
   # Default: exclude prospects from training and scoring pipelines
   include_prospects: false
+  # Define 'warm' as transactions within the last N months (train/scoring gating)
+  warm_window_months: 18
+  # If true, exclude prospects before heavy feature engineering to cut compute
+  # (keeps only warm+cold customers in the roster during feature build)
+  exclude_prospects_in_features: true
+  # Which segments to include during feature-build: [warm], [cold], or [warm, cold]
+  build_segments: [warm]
 labels:
   gp_min_threshold: 0.0
   denylist_skus_csv: gosales/data/lookup/label_denylist_skus.csv
@@ -69,11 +76,11 @@ features:
   add_missingness_flags: true
   use_eb_smoothing: true
   use_market_basket: true
-  use_als_embeddings: true
+  use_als_embeddings: false
   als_lookback_months: 24
   use_item2vec: false
   # Optional: run ALS over assets rollups (guarded sizes)
-  use_assets_als: true
+  use_assets_als: false
   assets_als:
     max_rows: 80000
     max_cols: 200
@@ -95,10 +102,41 @@ features:
   pooled_alpha_industry: 50.0
   pooled_alpha_sub: 50.0
   silence_pooled_encoder_warnings: true
+  # Segment-specific feature allowlists (substring patterns). Kept alongside essentials
+  # like customer_id and bought_in_division. Adjust as you iterate.
+  segment_feature_allowlist:
+    warm:
+      - rfm__
+      - recency
+      - log_recency
+      - decay
+      - margin__
+      - total_
+      - avg_
+      - tx_
+      - gp_
+      - xdiv__
+      - diversity
+      - enc__
+      - is_
+      - assets_
+    cold:
+      - assets_
+      - enc__
+      - is_
+      - cust_cat_
+      - cust_feat_
+      - region
+      - territory
+      - industry
 modeling:
   seed: 42
   folds: 3
   models: [lgbm, logreg]
+  # Parallelism (LightGBM). Keep at 1 for strict determinism; LightGBM's
+  # deterministic=true typically preserves determinism with >1 as well, but
+  # tests assume single-thread unless you override here.
+  n_jobs: 1
   lr_grid:
     l1_ratio: [0.0, 0.2, 0.5]
     C: [0.1, 1.0, 10.0]
@@ -112,6 +150,10 @@ modeling:
   top_k_percents: [5, 10, 20]
   capacity_percent: 10
   shap_max_rows: 50000
+  # Cap rows used for final CV calibration to avoid multi-hour runs on huge
+  # populations. 0 disables sampling (use all rows). When >0 and population
+  # exceeds the cap, calibration runs on a stratified sample of this size.
+  final_calibration_max_rows: 50000
   # Class imbalance controls
   class_weight: balanced        # balanced | none
   use_scale_pos_weight: true    # LightGBM scale_pos_weight toggle

@@ -7,6 +7,8 @@ our production DAG.
 """
 
 from pathlib import Path
+import os
+import argparse
 
 from gosales.utils.db import get_db_connection, validate_connection
 from gosales.etl.load_csv import load_csv_to_db
@@ -30,6 +32,17 @@ logger = get_logger(__name__)
 
 
 _ACTIVE_MODEL_ALIASES: tuple[str, ...] = ("", "_cold")
+
+
+def _segment_arg_to_list(segment: str | None) -> list[str] | None:
+    if not segment:
+        return None
+    seg = str(segment).strip().lower()
+    if seg == "both":
+        return ["warm", "cold"]
+    if seg in {"warm", "cold"}:
+        return [seg]
+    return None
 
 
 def _derive_targets():
@@ -154,7 +167,7 @@ def _star_build_successful(result, curated_engine) -> bool:
     required_tables = {"dim_customer", "fact_transactions"}
     return required_tables.issubset(tables)
 
-def score_all():
+def score_all(segment: str | None = None):
     """
     Orchestrates the entire GoSales pipeline from data ingestion to final scoring.
 
@@ -166,113 +179,124 @@ def score_all():
     """
     logger.info("Starting the full GoSales scoring pipeline...")
 
-    with run_context("pipeline_score_all") as ctx:
-        # --- 1. Setup ---
-        db_engine = get_db_connection()          # source (Azure)
-        backend = getattr(getattr(db_engine, "dialect", None), "name", "")
-        is_azure_like = backend in {"mssql"}
-        if not is_azure_like:
-            logger.info(
-                "Primary database engine '%s' detected; forcing CSV ingest for local sample tables.",
-                backend or "unknown",
-            )
-        from gosales.utils.db import get_curated_connection
-        curated_engine = get_curated_connection()  # curated (local sqlite)
-        # Connection health checks
-        try:
-            cfg = load_config()
-            strict = bool(getattr(getattr(cfg, 'database', object()), 'strict_db', False))
-        except Exception:
-            strict = False
-        if not validate_connection(db_engine):
-            msg = "Primary database connection is unhealthy."
-            if strict:
-                raise RuntimeError(msg)
-            logger.warning(msg + " Proceeding with best-effort fallback where applicable.")
-        if not validate_connection(curated_engine):
-            msg2 = "Curated database connection is unhealthy."
-            if strict:
-                raise RuntimeError(msg2)
-            logger.warning(msg2)
-        targets = _derive_targets()
+    seg_list = _segment_arg_to_list(segment)
+    prev_segment_env = os.environ.get("GOSALES_POP_BUILD_SEGMENTS")
+    if seg_list is not None:
+        os.environ["GOSALES_POP_BUILD_SEGMENTS"] = ",".join(seg_list)
+        logger.info("Segment override for pipeline: %s", ",".join(seg_list))
 
-        # --- 2. ETL Phase ---
-        logger.info("--- Phase 1: ETL ---")
-        # Skip local CSV ingest when a database source is configured
-        cfg = load_config()
-        src = getattr(getattr(cfg, 'database', object()), 'source_tables', {}) or {}
-        sl_src = str(src.get('sales_log', '')).strip()
-        use_db_source = bool(sl_src and sl_src.lower() != 'csv' and is_azure_like)
-        if use_db_source:
-            logger.info("Sales Log source is mapped to DB object '%s'; skipping local CSV ingest.", sl_src)
-        else:
-            if not is_azure_like and sl_src and sl_src.lower() != 'csv':
+    try:
+        with run_context("pipeline_score_all") as ctx:
+            # --- 1. Setup ---
+            db_engine = get_db_connection()          # source (Azure)
+            backend = getattr(getattr(db_engine, "dialect", None), "name", "")
+            is_azure_like = backend in {"mssql"}
+            if not is_azure_like:
                 logger.info(
-                    "Overriding configured Sales Log source '%s' for local engine '%s'; loading sample CSVs.",
-                    sl_src,
+                    "Primary database engine '%s' detected; forcing CSV ingest for local sample tables.",
                     backend or "unknown",
                 )
-            # Define the CSV files and their corresponding table names
-            csv_files = {
-                "Sales_Log.csv": "sales_log",
-                "TR - Industry Enrichment.csv": "industry_enrichment",
-            }
-            for file_name, table_name in csv_files.items():
-                file_path = DATA_DIR / "database_samples" / file_name
-                load_csv_to_db(file_path, table_name, db_engine)
-
-        try:
-            star_result = build_star_schema(db_engine)
-        except Exception as exc:
-            message = f"Star schema build raised an exception: {exc}"
-            logger.exception(message)
-            _record_run_failure(ctx, message)
-            raise
-        if not _star_build_successful(star_result, curated_engine):
-            detail = star_result if star_result is not None else "missing curated tables"
-            message = f"Star schema build failed: {detail}"
-            _record_run_failure(ctx, message)
-            raise RuntimeError(message)
-        # Build invoice-level events for leakage-safe feature engineering
-        try:
-            from gosales.etl.events import build_fact_events
-            build_fact_events()
-        except Exception as e:
-            logger.warning(f"Eventization step failed (non-blocking): {e}")
-        logger.info("--- ETL Phase Complete ---")
-
-        # --- 3. Label Audit (Phase 2) ---
-        logger.info("--- Phase 2: Label audit (leakage-safe targets) ---")
-        # Training cutoff chosen so the 6-month target window is within training data (Jul-Dec 2024)
-        cutoff_date = "2024-06-30"
-        prediction_window_months = 6
-        for div in targets:
+            from gosales.utils.db import get_curated_connection
+            curated_engine = get_curated_connection()  # curated (local sqlite)
+            # Connection health checks
             try:
-                compute_label_audit(curated_engine, div, cutoff_date, prediction_window_months)
+                cfg = load_config()
+                strict = bool(getattr(getattr(cfg, 'database', object()), 'strict_db', False))
+            except Exception:
+                strict = False
+            if not validate_connection(db_engine):
+                msg = "Primary database connection is unhealthy."
+                if strict:
+                    raise RuntimeError(msg)
+                logger.warning(msg + " Proceeding with best-effort fallback where applicable.")
+            if not validate_connection(curated_engine):
+                msg2 = "Curated database connection is unhealthy."
+                if strict:
+                    raise RuntimeError(msg2)
+                logger.warning(msg2)
+            targets = _derive_targets()
+            env_override = None
+            if seg_list is not None:
+                env_override = os.environ.copy()
+                env_override["GOSALES_POP_BUILD_SEGMENTS"] = ",".join(seg_list)
+    
+            # --- 2. ETL Phase ---
+            logger.info("--- Phase 1: ETL ---")
+            # Skip local CSV ingest when a database source is configured
+            cfg = load_config()
+            src = getattr(getattr(cfg, 'database', object()), 'source_tables', {}) or {}
+            sl_src = str(src.get('sales_log', '')).strip()
+            use_db_source = bool(sl_src and sl_src.lower() != 'csv' and is_azure_like)
+            if use_db_source:
+                logger.info("Sales Log source is mapped to DB object '%s'; skipping local CSV ingest.", sl_src)
+            else:
+                if not is_azure_like and sl_src and sl_src.lower() != 'csv':
+                    logger.info(
+                        "Overriding configured Sales Log source '%s' for local engine '%s'; loading sample CSVs.",
+                        sl_src,
+                        backend or "unknown",
+                    )
+                # Define the CSV files and their corresponding table names
+                csv_files = {
+                    "Sales_Log.csv": "sales_log",
+                    "TR - Industry Enrichment.csv": "industry_enrichment",
+                }
+                for file_name, table_name in csv_files.items():
+                    file_path = DATA_DIR / "database_samples" / file_name
+                    load_csv_to_db(file_path, table_name, db_engine)
+    
+            try:
+                star_result = build_star_schema(db_engine)
+            except Exception as exc:
+                message = f"Star schema build raised an exception: {exc}"
+                logger.exception(message)
+                _record_run_failure(ctx, message)
+                raise
+            if not _star_build_successful(star_result, curated_engine):
+                detail = star_result if star_result is not None else "missing curated tables"
+                message = f"Star schema build failed: {detail}"
+                _record_run_failure(ctx, message)
+                raise RuntimeError(message)
+            # Build invoice-level events for leakage-safe feature engineering
+            try:
+                from gosales.etl.events import build_fact_events
+                build_fact_events()
             except Exception as e:
-                logger.warning(f"Label audit failed for {div}: {e}")
-        logger.info("--- Label audit complete ---")
-
-        # --- 4. Feature Library emission (catalog) ---
-        # Build a feature matrix per division to emit the feature catalog before training
-        try:
-            from gosales.features.engine import create_feature_matrix
+                logger.warning(f"Eventization step failed (non-blocking): {e}")
+            logger.info("--- ETL Phase Complete ---")
+    
+            # --- 3. Label Audit (Phase 2) ---
+            logger.info("--- Phase 2: Label audit (leakage-safe targets) ---")
+            # Training cutoff chosen so the 6-month target window is within training data (Jul-Dec 2024)
+            cutoff_date = "2024-06-30"
+            prediction_window_months = 6
             for div in targets:
                 try:
-                    create_feature_matrix(curated_engine, div, cutoff_date, prediction_window_months)
+                    compute_label_audit(curated_engine, div, cutoff_date, prediction_window_months)
                 except Exception as e:
-                    logger.warning(f"Feature catalog emission failed for {div} (non-blocking): {e}")
-            logger.info("--- Feature catalogs emitted ---")
-        except Exception as e:
-            logger.warning(f"Feature catalog emission failed (non-blocking): {e}")
-
-        # --- 5. Model Training Phase ---
-        logger.info("--- Phase 3: Training models for all targets (robust trainer) ---")
-        cut_list = ["2023-03-31", "2023-09-30", "2024-03-31", "2024-06-30"]
-        cutoffs_arg = ",".join(cut_list)
-        for div in targets:
+                    logger.warning(f"Label audit failed for {div}: {e}")
+            logger.info("--- Label audit complete ---")
+    
+            # --- 4. Feature Library emission (catalog) ---
+            # Build a feature matrix per division to emit the feature catalog before training
             try:
-                logger.info(f"Training model for target: {div} (cutoffs={cutoffs_arg})")
+                from gosales.features.engine import create_feature_matrix
+                for div in targets:
+                    try:
+                        create_feature_matrix(curated_engine, div, cutoff_date, prediction_window_months)
+                    except Exception as e:
+                        logger.warning(f"Feature catalog emission failed for {div} (non-blocking): {e}")
+                logger.info("--- Feature catalogs emitted ---")
+            except Exception as e:
+                logger.warning(f"Feature catalog emission failed (non-blocking): {e}")
+    
+            # --- 5. Model Training Phase ---
+            logger.info("--- Phase 3: Training models for all targets (robust trainer) ---")
+            cut_list = ["2023-03-31", "2023-09-30", "2024-03-31", "2024-06-30"]
+            cutoffs_arg = ",".join(cut_list)
+            for div in targets:
+                try:
+                    logger.info(f"Training model for target: {div} (cutoffs={cutoffs_arg})")
                 cmd = [
                     sys.executable,
                     "-m",
@@ -284,87 +308,103 @@ def score_all():
                     "--window-months",
                     str(prediction_window_months),
                 ]
-                subprocess.run(cmd, check=True)
+                if segment:
+                    cmd.extend(["--segment", segment])
+                subprocess.run(cmd, check=True, env=env_override)
+                except Exception as e:
+                    logger.warning(f"Training failed for {div}: {e}")
+            logger.info("--- Model Training Phase Complete ---")
+    
+            # Prune legacy model directories not in current targets
+            try:
+                _prune_legacy_model_dirs(targets, MODELS_DIR, log=logger)
             except Exception as e:
-                logger.warning(f"Training failed for {div}: {e}")
-        logger.info("--- Model Training Phase Complete ---")
-
-        # Prune legacy model directories not in current targets
-        try:
-            _prune_legacy_model_dirs(targets, MODELS_DIR, log=logger)
-        except Exception as e:
-            logger.warning(f"Model pruning step failed: {e}")
-
-        # --- 6. Scoring Phase ---
-        logger.info("--- Phase 4: Generating Scores and Whitespace ---")
-        # Create run manifest and record high-level context
-        run_manifest = default_manifest(pipeline_version="0.1.0")
-        run_manifest["cutoff"] = cutoff_date
-        run_manifest["window_months"] = int(prediction_window_months)
-
-        # Generate outputs; function will update manifest details (divisions scored, alerts)
-        icp_scores_path = generate_scoring_outputs(
-            curated_engine,
-            run_manifest=run_manifest,
-            cutoff_date=cutoff_date,
-            prediction_window_months=prediction_window_months,
-        )
-
-        # Persist manifest alongside outputs and append to registry via run_context
-        try:
-            manifest_path = emit_manifest(OUTPUTS_DIR, run_manifest["run_id"], run_manifest)
-            logger.info(f"Wrote run manifest to {manifest_path}")
-            whitespace_entry = run_manifest.get("whitespace_artifact")
-            if whitespace_entry:
-                ws_path = Path(whitespace_entry)
-                if not ws_path.exists():
-                    ws_path = OUTPUTS_DIR / "whitespace.csv"
-                whitespace_str = str(ws_path)
-            else:
-                whitespace_str = str(OUTPUTS_DIR / "whitespace.csv")
-            icp_entry = run_manifest.get("icp_scores")
-            if icp_entry:
-                icp_path = Path(icp_entry)
-            else:
-                icp_path = icp_scores_path if icp_scores_path is not None else OUTPUTS_DIR / "icp_scores.csv"
-            ctx["write_manifest"](
-                {
-                    "run_manifest": str(manifest_path),
-                    "icp_scores": str(icp_path),
-                    "whitespace": whitespace_str,
-                }
+                logger.warning(f"Model pruning step failed: {e}")
+    
+            # --- 6. Scoring Phase ---
+            logger.info("--- Phase 4: Generating Scores and Whitespace ---")
+            # Create run manifest and record high-level context
+            run_manifest = default_manifest(pipeline_version="0.1.0")
+            run_manifest["cutoff"] = cutoff_date
+            run_manifest["window_months"] = int(prediction_window_months)
+    
+            # Generate outputs; function will update manifest details (divisions scored, alerts)
+            icp_scores_path = generate_scoring_outputs(
+                curated_engine,
+                run_manifest=run_manifest,
+                cutoff_date=cutoff_date,
+                prediction_window_months=prediction_window_months,
+                segment=segment,
             )
-            ctx["append_registry"](
-                {
-                    "phase": "pipeline_score_all",
-                    "divisions": targets,
-                    "cutoff": cutoff_date,
-                    "window_months": int(prediction_window_months),
-                    "artifact_count": 3,
-                    "status": "finished",
-                }
-            )
-        except Exception as e:
-            logger.warning(f"Failed to write run manifest/registry: {e}")
-        logger.info("--- Scoring Phase Complete ---")
-
-        # --- 7. Hold-out validation & gates (Phase 5) ---
-        try:
-            icp_path = Path(run_manifest.get("icp_scores") or (icp_scores_path or OUTPUTS_DIR / "icp_scores.csv"))
-            if icp_path.exists():
-                # Derive a year tag from cutoff (simple heuristic: cutoff year + 1)
-                year_tag = None
-                try:
-                    y = int(str(run_manifest.get("cutoff", "")).split("-")[0]) if isinstance(run_manifest, dict) else None
-                    if y:
-                        year_tag = str(y + 1)
-                except Exception:
+    
+            # Persist manifest alongside outputs and append to registry via run_context
+            try:
+                manifest_path = emit_manifest(OUTPUTS_DIR, run_manifest["run_id"], run_manifest)
+                logger.info(f"Wrote run manifest to {manifest_path}")
+                whitespace_entry = run_manifest.get("whitespace_artifact")
+                if whitespace_entry:
+                    ws_path = Path(whitespace_entry)
+                    if not ws_path.exists():
+                        ws_path = OUTPUTS_DIR / "whitespace.csv"
+                    whitespace_str = str(ws_path)
+                else:
+                    whitespace_str = str(OUTPUTS_DIR / "whitespace.csv")
+                icp_entry = run_manifest.get("icp_scores")
+                if icp_entry:
+                    icp_path = Path(icp_entry)
+                else:
+                    icp_path = icp_scores_path if icp_scores_path is not None else OUTPUTS_DIR / "icp_scores.csv"
+                ctx["write_manifest"](
+                    {
+                        "run_manifest": str(manifest_path),
+                        "icp_scores": str(icp_path),
+                        "whitespace": whitespace_str,
+                    }
+                )
+                ctx["append_registry"](
+                    {
+                        "phase": "pipeline_score_all",
+                        "divisions": targets,
+                        "cutoff": cutoff_date,
+                        "window_months": int(prediction_window_months),
+                        "artifact_count": 3,
+                        "status": "finished",
+                    }
+                )
+            except Exception as e:
+                logger.warning(f"Failed to write run manifest/registry: {e}")
+            logger.info("--- Scoring Phase Complete ---")
+    
+            # --- 7. Hold-out validation & gates (Phase 5) ---
+            try:
+                icp_path = Path(run_manifest.get("icp_scores") or (icp_scores_path or OUTPUTS_DIR / "icp_scores.csv"))
+                if icp_path.exists():
+                    # Derive a year tag from cutoff (simple heuristic: cutoff year + 1)
                     year_tag = None
-                validate_holdout(icp_scores_csv=str(icp_path), year_tag=year_tag)
-        except Exception as e:
-            logger.warning(f"Hold-out validation step failed (non-blocking): {e}")
-
-        logger.info("GoSales scoring pipeline finished successfully!")
+                    try:
+                        y = int(str(run_manifest.get("cutoff", "")).split("-")[0]) if isinstance(run_manifest, dict) else None
+                        if y:
+                            year_tag = str(y + 1)
+                    except Exception:
+                        year_tag = None
+                    validate_holdout(icp_scores_csv=str(icp_path), year_tag=year_tag)
+            except Exception as e:
+                logger.warning(f"Hold-out validation step failed (non-blocking): {e}")
+    
+            logger.info("GoSales scoring pipeline finished successfully!")
+    finally:
+        if seg_list is not None:
+            if prev_segment_env is None:
+                os.environ.pop("GOSALES_POP_BUILD_SEGMENTS", None)
+            else:
+                os.environ["GOSALES_POP_BUILD_SEGMENTS"] = prev_segment_env
 
 if __name__ == "__main__":
-    score_all()
+    parser = argparse.ArgumentParser(description="Run the full GoSales scoring pipeline")
+    parser.add_argument(
+        "--segment",
+        choices=["warm", "cold", "both"],
+        help="Override population.build_segments for this pipeline run",
+    )
+    args = parser.parse_args()
+    score_all(segment=args.segment)

@@ -74,6 +74,17 @@ except NameError:
 _DIM_CUSTOMER_CACHE: pd.DataFrame | None = None
 
 
+def _segment_arg_to_list(segment: str | None) -> list[str] | None:
+    if not segment:
+        return None
+    seg = str(segment).strip().lower()
+    if seg == "both":
+        return ["warm", "cold"]
+    if seg in {"warm", "cold"}:
+        return [seg]
+    return None
+
+
 def _get_dim_customer(engine) -> pd.DataFrame:
     """Read dim_customer once per run and cache in-process.
 
@@ -669,6 +680,7 @@ def score_customers_for_division(
     run_manifest: dict | None = None,
     cutoff_date: str | None = None,
     prediction_window_months: int | None = None,
+    segment: str | None = None,
 ):
     """Score all customers for a specific division using a trained ML model.
 
@@ -776,36 +788,73 @@ def score_customers_for_division(
     train_cols = _load_feature_order(model_path, meta)
 
     feature_matrix = create_feature_matrix(engine, division_name, cutoff, window_months)
-    # Early customer-only filtering (warm or cold) in Polars to reduce compute
     try:
         cfg_all = load_config()
         include_prospects = bool(getattr(getattr(cfg_all, 'population', object()), 'include_prospects', False))
+        warm_window = int(getattr(getattr(cfg_all, 'population', object()), 'warm_window_months', 12) or 12)
+        cfg_segments = [str(s).strip().lower() for s in getattr(getattr(cfg_all, 'population', object()), 'build_segments', ["warm", "cold"]) if str(s).strip()]
     except Exception:
         include_prospects = False
-    if not include_prospects and not feature_matrix.is_empty():
+        warm_window = 12
+        cfg_segments = ["warm", "cold"]
+
+    segments_override = _segment_arg_to_list(segment)
+    build_segments = segments_override or cfg_segments or ["warm", "cold"]
+    build_segments = [s for s in build_segments if s in ("warm", "cold")]
+    if not build_segments:
+        build_segments = ["warm", "cold"]
+
+    if not feature_matrix.is_empty():
         try:
             cols = set(feature_matrix.columns)
             warm_expr = None
             cold_expr = None
-            if 'rfm__all__tx_n__12m' in cols:
-                warm_expr = (pl.col('rfm__all__tx_n__12m').cast(pl.Float64).fill_null(0.0) > 0)
-            if 'assets_active_total' in cols or 'assets_on_subs_total' in cols:
+            if 'rfm__all__recency_days__life' in cols:
+                warm_expr = (pl.col('rfm__all__recency_days__life').cast(pl.Float64).fill_null(1e9) <= warm_window * 30.0)
+            else:
+                warm_col = f'rfm__all__tx_n__{warm_window}m'
+                if warm_col in cols:
+                    warm_expr = (pl.col(warm_col).cast(pl.Float64).fill_null(0.0) > 0)
+                elif warm_window == 18 and {'rfm__all__tx_n__24m','rfm__all__tx_n__6m'} <= cols:
+                    warm_expr = ((pl.col('rfm__all__tx_n__24m').cast(pl.Float64).fill_null(0.0) - pl.col('rfm__all__tx_n__6m').cast(pl.Float64).fill_null(0.0)) > 0)
+                elif 'rfm__all__tx_n__12m' in cols:
+                    warm_expr = (pl.col('rfm__all__tx_n__12m').cast(pl.Float64).fill_null(0.0) > 0)
+
+            if 'assets_ever_total' in cols:
+                cold_expr = pl.col('assets_ever_total').cast(pl.Float64).fill_null(0.0) > 0.0
+            else:
                 aa = pl.col('assets_active_total').cast(pl.Float64).fill_null(0.0) if 'assets_active_total' in cols else pl.lit(0.0)
                 aos = pl.col('assets_on_subs_total').cast(pl.Float64).fill_null(0.0) if 'assets_on_subs_total' in cols else pl.lit(0.0)
-                cold_expr = ((~warm_expr) if warm_expr is not None else pl.lit(True)) & ((aa > 0) | (aos > 0))
-            if warm_expr is not None or cold_expr is not None:
-                mask = None
-                if warm_expr is not None and cold_expr is not None:
-                    mask = warm_expr | cold_expr
-                elif warm_expr is not None:
-                    mask = warm_expr
-                else:
-                    mask = cold_expr
-                pre_n = feature_matrix.height
+                cold_expr = (aa > 0) | (aos > 0)
+            if warm_expr is not None and cold_expr is not None:
+                cold_expr = cold_expr & (~warm_expr)
+
+            mask_exprs: list[pl.Expr] = []
+            if 'warm' in build_segments and warm_expr is not None:
+                mask_exprs.append(warm_expr)
+            if 'cold' in build_segments and cold_expr is not None:
+                mask_exprs.append(cold_expr)
+
+            apply_mask = bool(mask_exprs) and (segments_override is not None or not include_prospects)
+            if apply_mask:
+                mask = mask_exprs[0]
+                for expr in mask_exprs[1:]:
+                    mask = mask | expr
+                pre_rows = feature_matrix.height
                 feature_matrix = feature_matrix.filter(mask)
-                logger.info("Customer-only gating applied in-core: %d -> %d rows for %s", pre_n, feature_matrix.height, division_name)
+                warm_after = feature_matrix.filter(warm_expr).height if warm_expr is not None else 'n/a'
+                cold_after = feature_matrix.filter(cold_expr).height if cold_expr is not None else 'n/a'
+                logger.info(
+                    "Segment gating applied (%s): %d -> %d rows (warm=%s, cold=%s)",
+                    ",".join(build_segments),
+                    pre_rows,
+                    feature_matrix.height,
+                    warm_after,
+                    cold_after,
+                )
         except Exception as _e:
-            logger.warning(f"Customer-only in-core gating skipped due to error: {_e}")
+            logger.warning(f"Segment gating skipped due to error: {_e}")
+
     customer_names = _prepare_customer_names(_get_dim_customer(engine))
 
     # Prevalence guardrail: if labels present and zero prevalence while training had positives, skip
@@ -987,7 +1036,7 @@ def generate_whitespace_opportunities(engine):
         if "order_date" in tx_pd.columns:
             tx_pd["order_date"] = pd.to_datetime(tx_pd["order_date"], errors="coerce")
         else:
-            # Provide a neutral recency anchor if date not available
+        # Provide a neutral recency anchor if date not available
             tx_pd["order_date"] = pd.Timestamp("1970-01-01")
         transactions = pl.from_pandas(tx_pd)
         customers = pl.from_pandas(_get_dim_customer(engine))
@@ -1072,6 +1121,7 @@ def generate_scoring_outputs(
     run_manifest: dict | None = None,
     cutoff_date: str | None = None,
     prediction_window_months: int | None = None,
+    segment: str | None = None,
 ):
     """Generate and save ICP scores and whitespace analysis.
 
@@ -1080,529 +1130,547 @@ def generate_scoring_outputs(
     """
     logger.info("Starting customer scoring and whitespace analysis...")
     OUTPUTS_DIR.mkdir(exist_ok=True)
+
+    seg_list = _segment_arg_to_list(segment)
+    prev_segment_env = os.environ.get("GOSALES_POP_BUILD_SEGMENTS")
+    if seg_list is not None:
+        os.environ["GOSALES_POP_BUILD_SEGMENTS"] = ",".join(seg_list)
+        logger.info("Segment override for scoring run: %s", ",".join(seg_list))
+
     if run_manifest is not None:
         # Clear any prior whitespace artifact entry so downstream callers rely on
         # the path emitted by this execution.
         run_manifest["whitespace_artifact"] = None
         run_manifest.pop("icp_scores", None)
+        if seg_list is not None:
+            run_manifest["segments"] = list(seg_list)
     
-    # Discover available models by folder convention *_model
-    available_models = discover_available_models()
-    # Filter to supported targets only (divisions minus excluded + logical models)
     try:
-        from gosales.etl.sku_map import get_supported_models, division_set as _division_set
-        exclude = {"Hardware", "Maintenance"}
-        targets = sorted({d for d in _division_set() if d not in exclude} | set(get_supported_models()))
-        available_models = _filter_models_by_targets(available_models, targets)
-        if not available_models:
-            logger.warning("No supported models found for scoring after pruning legacy models.")
-    except Exception as e:
-        logger.warning(f"Could not prune legacy models: {e}")
-    
-    all_scores: list[pl.DataFrame] = []
-    icp_scores_path: Path | None = None
-    for division_name, model_path in available_models.items():
-        if not model_path.exists():
-            logger.warning(f"Model not found for {division_name}: {model_path}")
-            continue
+        # Discover available models by folder convention *_model
+        available_models = discover_available_models()
+        # Filter to supported targets only (divisions minus excluded + logical models)
         try:
-            scores = score_customers_for_division(
-                engine,
-                division_name,
-                model_path,
-                run_manifest=run_manifest,
-                cutoff_date=cutoff_date,
-                prediction_window_months=prediction_window_months,
-            )
-        except MissingModelMetadataError:
-            # Already logged and alerted; skip this division
-            continue
-        if not scores.is_empty():
-            if run_manifest is not None:
-                run_manifest.setdefault("divisions_scored", []).append(division_name)
-            all_scores.append(scores)
-            
-    def _align_score_frames(frames: list[pl.DataFrame]) -> pl.DataFrame:
-        if not frames:
-            return pl.DataFrame()
-        # Union of columns across frames
-        cols: list[str] = []
-        seen = set()
-        for df in frames:
-            for c in df.columns:
-                if c not in seen:
-                    seen.add(c)
-                    cols.append(c)
-        # Normalize key columns' dtypes where present
-        normed: list[pl.DataFrame] = []
-        for df in frames:
-            d = df
-            if "customer_id" in d.columns:
-                try:
-                    d = d.with_columns(pl.col("customer_id").cast(pl.Utf8))
-                except Exception:
-                    pass
-            if "division_name" in d.columns:
-                try:
-                    d = d.with_columns(pl.col("division_name").cast(pl.Utf8))
-                except Exception:
-                    pass
-            if "icp_score" in d.columns:
-                try:
-                    d = d.with_columns(pl.col("icp_score").cast(pl.Float64))
-                except Exception:
-                    pass
-            # Add any missing columns as Nulls
-            missing = [c for c in cols if c not in d.columns]
-            if missing:
-                d = d.with_columns([pl.lit(None).alias(c) for c in missing])
-            # Reorder to common column order
-            d = d.select(cols)
-            normed.append(d)
-        return pl.concat(normed, how="vertical_relaxed")
-
-    if all_scores:
-        combined_scores = _align_score_frames(all_scores)
-        # Whitespace-only wiring for divisions without models (e.g., Post_Processing)
-        try:
-            from gosales.etl.sku_map import division_set as _division_set
-            known_divisions = {normalize_division(d) for d in _division_set()}
-            available_keys = {normalize_division(name) for name in available_models}
-            need_pp = (
-                normalize_division("Post_Processing") in known_divisions
-                and normalize_division("Post_Processing") not in available_keys
-            )
-            if need_pp:
-                ws_df = generate_whitespace_opportunities(engine)
-                if not ws_df.is_empty():
-                    ws_pp = ws_df.filter(
-                        pl.col("whitespace_division")
-                        .cast(pl.Utf8)
-                        .str.strip_chars()
-                        .str.to_lowercase()
-                        == normalize_division("Post_Processing")
-                    )
-                    if not ws_pp.is_empty():
-                        cols = [c for c in ["customer_id","whitespace_division","whitespace_score","customer_name"] if c in ws_pp.columns]
-                        ws_min = ws_pp.select(cols)
-                        # Rename to match ICP schema: division_name, icp_score
-                        rename_map = {}
-                        if "whitespace_division" in ws_min.columns:
-                            ws_min = ws_min.rename({"whitespace_division": "division_name"})
-                        if "whitespace_score" in ws_min.columns:
-                            ws_min = ws_min.rename({"whitespace_score": "icp_score"})
-                        # Cast types
-                        if "customer_id" in ws_min.columns:
-                            ws_min = ws_min.with_columns(pl.col("customer_id").cast(pl.Int64, strict=False))
-                        combined_scores = pl.concat([combined_scores, ws_min], how="vertical")
-                        logger.info("Added heuristic Post_Processing p_icp for whitespace (no model present)")
-        except Exception as _e:
-            logger.warning(f"Post_Processing whitespace backfill failed: {_e}")
-        # Append run_id if available for provenance
-        try:
-            if run_manifest is not None and isinstance(run_manifest.get("run_id"), str):
-                if "run_id" not in combined_scores.columns:
-                    combined_scores = combined_scores.with_columns(pl.lit(run_manifest["run_id"]).alias("run_id"))
-        except Exception:
-            pass
-        icp_scores_path = OUTPUTS_DIR / "icp_scores.csv"
-        # Add per-division percentile and letter grade to core artifact
-        try:
-            import polars as _pl
-            if {'division_name','icp_score'}.issubset(set(combined_scores.columns)):
-                combined_scores = combined_scores.with_columns([
-                    ((_pl.col('icp_score').rank('average').over('division_name') / _pl.len().over('division_name'))).alias('icp_percentile')
-                ])
-                combined_scores = combined_scores.with_columns([
-                    _pl.when(_pl.col('icp_percentile') >= 0.90).then(_pl.lit('A'))
-                       .when(_pl.col('icp_percentile') >= 0.70).then(_pl.lit('B'))
-                       .when(_pl.col('icp_percentile') >= 0.40).then(_pl.lit('C'))
-                       .when(_pl.col('icp_percentile') >= 0.20).then(_pl.lit('D'))
-                       .otherwise(_pl.lit('F'))
-                       .alias('icp_grade')
-                ])
-        except Exception as _e:
-            logger.warning(f"Failed to compute ICP percentile/grade in-core: {_e}")
-
-        # Robust write: attempt primary path; on Windows lock, write a run_id-suffixed file
-        try:
-            combined_scores.write_csv(str(icp_scores_path))
-        except OSError as e:
+            from gosales.etl.sku_map import get_supported_models, division_set as _division_set
+            exclude = {"Hardware", "Maintenance"}
+            targets = sorted({d for d in _division_set() if d not in exclude} | set(get_supported_models()))
+            available_models = _filter_models_by_targets(available_models, targets)
+            if not available_models:
+                logger.warning("No supported models found for scoring after pruning legacy models.")
+        except Exception as e:
+            logger.warning(f"Could not prune legacy models: {e}")
+        
+        all_scores: list[pl.DataFrame] = []
+        icp_scores_path: Path | None = None
+        for division_name, model_path in available_models.items():
+            if not model_path.exists():
+                logger.warning(f"Model not found for {division_name}: {model_path}")
+                continue
             try:
-                # Fallback: write to a unique file (non-destructive) and log
-                import datetime as _dt
-                ts = _dt.datetime.utcnow().strftime('%Y%m%d%H%M%S')
-                fallback = OUTPUTS_DIR / f"icp_scores_{ts}.csv"
-                combined_scores.write_csv(str(fallback))
-                logger.warning(f"icp_scores.csv locked or unavailable ({e}); wrote fallback file: {fallback}")
-                icp_scores_path = fallback
-            except Exception as ee:
-                logger.error(f"Failed to write ICP scores due to file lock and fallback failed: {ee}")
-                raise
-        # Lightweight schema validation
-        try:
-            report = validate_icp_scores_schema(icp_scores_path)
-            write_schema_report(report, OUTPUTS_DIR / "schema_icp_scores.json")
-        except Exception:
-            pass
-        logger.info(f"Saved ICP scores for {len(combined_scores)} customer-division combinations to {icp_scores_path}")
-        if run_manifest is not None:
-            run_manifest["icp_scores"] = str(icp_scores_path)
-    else:
-        message = (
-            "No models were available for scoring. Ensure trained models exist "
-            f"under {MODELS_DIR} or adjust target configuration."
-        )
-        logger.error(message)
-        raise RuntimeError(message)
-    
-    # Phase-4 ranker: replace legacy heuristic whitespace
-    try:
-        cutoff_tag = None
-        try:
-            if run_manifest is not None:
-                cutoff_tag = str(run_manifest.get('cutoff', '')).replace('-', '') or None
-        except Exception:
-            cutoff_tag = None
-
-        icp_path: Path | None = icp_scores_path
-        if icp_path is None and run_manifest is not None:
-            try:
-                manifest_icp = run_manifest.get("icp_scores")
-                if manifest_icp:
-                    icp_path = Path(manifest_icp)
-            except Exception:
-                icp_path = None
-        if icp_path is None:
-            icp_path = OUTPUTS_DIR / "icp_scores.csv"
-        if icp_path.exists():
-            # Load only necessary columns for ranking to reduce memory
-            try:
-                use_cols = [
-                    'division_name','customer_id','customer_name','icp_score',
-                    'rfm__all__gp_sum__12m','affinity__div__lift_topk__12m',
-                    'bought_in_division',
-                    # Segment context
-                    'rfm__all__tx_n__12m','assets_active_total','assets_on_subs_total'
-                ]
-                def _usecols(c: str) -> bool:
-                    return (
-                        (c in use_cols)
-                        or c.startswith('als_f')
-                        or c.startswith('als_assets_f')
-                        or c.startswith('mb_lift_')
-                        or c.startswith('affinity__div__lift_topk__12m')
-                        or c == 'owned_division_pre_cutoff'
-                    )
-                icp_df = pd.read_csv(icp_path, usecols=_usecols)
-            except Exception:
-                icp_df = pd.read_csv(icp_path)
-            ranked = rank_whitespace(RankInputs(scores=icp_df))
-            # Derive segment labels (warm/cold/prospect) and attach to ranked
-            try:
-                seg_df = icp_df.copy()
-                warm = pd.to_numeric(seg_df.get('rfm__all__tx_n__12m', 0), errors='coerce').fillna(0.0) > 0
-                has_assets = (
-                    pd.to_numeric(seg_df.get('assets_active_total', 0), errors='coerce').fillna(0.0) > 0
-                ) | (
-                    pd.to_numeric(seg_df.get('assets_on_subs_total', 0), errors='coerce').fillna(0.0) > 0
+                scores = score_customers_for_division(
+                    engine,
+                    division_name,
+                    model_path,
+                    run_manifest=run_manifest,
+                    cutoff_date=cutoff_date,
+                    prediction_window_months=prediction_window_months,
+                    segment=segment,
                 )
-                cold = (~warm) & has_assets
-                segment = pd.Series(np.where(warm, 'warm', np.where(cold, 'cold', 'prospect')), index=seg_df.index)
-                seg_data = seg_df[['customer_id','division_name']].copy()
-                seg_data['segment'] = segment.astype(str)
-                ranked = ranked.merge(seg_data, on=['customer_id','division_name'], how='left')
+            except MissingModelMetadataError:
+                # Already logged and alerted; skip this division
+                continue
+            if not scores.is_empty():
+                if run_manifest is not None:
+                    run_manifest.setdefault("divisions_scored", []).append(division_name)
+                all_scores.append(scores)
+                
+        def _align_score_frames(frames: list[pl.DataFrame]) -> pl.DataFrame:
+            if not frames:
+                return pl.DataFrame()
+        # Union of columns across frames
+            cols: list[str] = []
+            seen = set()
+            for df in frames:
+                for c in df.columns:
+                    if c not in seen:
+                        seen.add(c)
+                        cols.append(c)
+        # Normalize key columns' dtypes where present
+            normed: list[pl.DataFrame] = []
+            for df in frames:
+                d = df
+                if "customer_id" in d.columns:
+                    try:
+                        d = d.with_columns(pl.col("customer_id").cast(pl.Utf8))
+                    except Exception:
+                        pass
+                if "division_name" in d.columns:
+                    try:
+                        d = d.with_columns(pl.col("division_name").cast(pl.Utf8))
+                    except Exception:
+                        pass
+                if "icp_score" in d.columns:
+                    try:
+                        d = d.with_columns(pl.col("icp_score").cast(pl.Float64))
+                    except Exception:
+                        pass
+                # Add any missing columns as Nulls
+                missing = [c for c in cols if c not in d.columns]
+                if missing:
+                    d = d.with_columns([pl.lit(None).alias(c) for c in missing])
+                # Reorder to common column order
+                d = d.select(cols)
+                normed.append(d)
+            return pl.concat(normed, how="vertical_relaxed")
+    
+        if all_scores:
+            combined_scores = _align_score_frames(all_scores)
+        # Whitespace-only wiring for divisions without models (e.g., Post_Processing)
+            try:
+                from gosales.etl.sku_map import division_set as _division_set
+                known_divisions = {normalize_division(d) for d in _division_set()}
+                available_keys = {normalize_division(name) for name in available_models}
+                need_pp = (
+                    normalize_division("Post_Processing") in known_divisions
+                    and normalize_division("Post_Processing") not in available_keys
+                )
+                if need_pp:
+                    ws_df = generate_whitespace_opportunities(engine)
+                    if not ws_df.is_empty():
+                        ws_pp = ws_df.filter(
+                            pl.col("whitespace_division")
+                            .cast(pl.Utf8)
+                            .str.strip_chars()
+                            .str.to_lowercase()
+                            == normalize_division("Post_Processing")
+                        )
+                        if not ws_pp.is_empty():
+                            cols = [c for c in ["customer_id","whitespace_division","whitespace_score","customer_name"] if c in ws_pp.columns]
+                            ws_min = ws_pp.select(cols)
+                            # Rename to match ICP schema: division_name, icp_score
+                            rename_map = {}
+                            if "whitespace_division" in ws_min.columns:
+                                ws_min = ws_min.rename({"whitespace_division": "division_name"})
+                            if "whitespace_score" in ws_min.columns:
+                                ws_min = ws_min.rename({"whitespace_score": "icp_score"})
+                            # Cast types
+                            if "customer_id" in ws_min.columns:
+                                ws_min = ws_min.with_columns(pl.col("customer_id").cast(pl.Int64, strict=False))
+                            combined_scores = pl.concat([combined_scores, ws_min], how="vertical")
+                            logger.info("Added heuristic Post_Processing p_icp for whitespace (no model present)")
+            except Exception as _e:
+                logger.warning(f"Post_Processing whitespace backfill failed: {_e}")
+        # Append run_id if available for provenance
+            try:
+                if run_manifest is not None and isinstance(run_manifest.get("run_id"), str):
+                    if "run_id" not in combined_scores.columns:
+                        combined_scores = combined_scores.with_columns(pl.lit(run_manifest["run_id"]).alias("run_id"))
             except Exception:
                 pass
-            # Attach run_id for schema contract if available
+            icp_scores_path = OUTPUTS_DIR / "icp_scores.csv"
+        # Add per-division percentile and letter grade to core artifact
             try:
-                if run_manifest is not None and isinstance(run_manifest.get('run_id'), str):
-                    if 'run_id' not in ranked.columns:
-                        ranked.insert(0, 'run_id', run_manifest['run_id'])
-            except Exception:
-                pass
-            path = save_ranked_whitespace(ranked, cutoff_tag=cutoff_tag)
-            if run_manifest is not None:
-                run_manifest["whitespace_artifact"] = str(path)
-                if "icp_scores" not in run_manifest:
-                    run_manifest["icp_scores"] = str(icp_path)
-            logger.info(f"Saved Phase-4 ranked whitespace to {path}")
-            # Also save segmented ranked outputs for warm/cold/prospect
+                import polars as _pl
+                if {'division_name','icp_score'}.issubset(set(combined_scores.columns)):
+                    combined_scores = combined_scores.with_columns([
+                        ((_pl.col('icp_score').rank('average').over('division_name') / _pl.len().over('division_name'))).alias('icp_percentile')
+                    ])
+                    combined_scores = combined_scores.with_columns([
+                        _pl.when(_pl.col('icp_percentile') >= 0.90).then(_pl.lit('A'))
+                           .when(_pl.col('icp_percentile') >= 0.70).then(_pl.lit('B'))
+                           .when(_pl.col('icp_percentile') >= 0.40).then(_pl.lit('C'))
+                           .when(_pl.col('icp_percentile') >= 0.20).then(_pl.lit('D'))
+                           .otherwise(_pl.lit('F'))
+                           .alias('icp_grade')
+                    ])
+            except Exception as _e:
+                logger.warning(f"Failed to compute ICP percentile/grade in-core: {_e}")
+    
+        # Robust write: attempt primary path; on Windows lock, write a run_id-suffixed file
             try:
-                if 'segment' in ranked.columns:
-                    for seg_name in ['warm','cold','prospect']:
-                        seg_out = ranked[ranked['segment'] == seg_name]
-                        seg_namefile = f"whitespace_{seg_name}_{cutoff_tag}.csv" if cutoff_tag else f"whitespace_{seg_name}.csv"
-                        seg_out.to_csv(OUTPUTS_DIR / seg_namefile, index=False)
-            except Exception:
-                pass
-
-            # Shadow mode: emit legacy heuristic whitespace for comparison and report overlap metrics
-            try:
-                cfg = load_config()
-                if bool(getattr(cfg.whitespace, 'shadow_mode', False)):
-                    legacy = generate_whitespace_opportunities(engine)
-                    if not legacy.is_empty():
-                        legacy_pd = legacy.to_pandas()
-                        legacy_pd.rename(columns={"whitespace_division": "division_name", "whitespace_score": "score"}, inplace=True)
-                        # Standardize required columns for comparison
-                        legacy_pd = legacy_pd[[c for c in ["customer_id", "division_name", "score", "customer_name"] if c in legacy_pd.columns]]
-                        legacy_name = f"whitespace_legacy_{cutoff_tag}.csv" if cutoff_tag else "whitespace_legacy.csv"
-                        legacy_path = OUTPUTS_DIR / legacy_name
-                        legacy_pd.to_csv(legacy_path, index=False)
-                        # Overlap metrics: Jaccard of top-N between champion and legacy
-                        try:
-                            topn = max(1, int(len(ranked) * 0.10))
-                            sort_champ = [c for c in ['score','p_icp'] if c in ranked.columns]
-                            champ_sel = ranked.sort_values(by=sort_champ, ascending=False, na_position='last').head(topn)
-                            leg_sel = legacy_pd.sort_values(by=['score'], ascending=False, na_position='last').head(topn)
-                            champ_top = set(champ_sel['customer_id'].astype(str).tolist())
-                            leg_top = set(leg_sel['customer_id'].astype(str).tolist())
-                            inter = len(champ_top & leg_top)
-                            union = len(champ_top | leg_top)
-                            jacc = float(inter) / max(1, union)
-                            overlap = {"top_percent": 10, "intersection": int(inter), "union": int(union), "jaccard": jacc}
-                            ov_name = f"whitespace_overlap_{cutoff_tag}.json" if cutoff_tag else "whitespace_overlap.json"
-                            import json as _json
-                            (OUTPUTS_DIR / ov_name).write_text(_json.dumps(overlap, indent=2), encoding='utf-8')
-                        except Exception:
-                            pass
-            except Exception as e:
-                logger.warning(f"Shadow mode failed: {e}")
-
-            # Challenger overlap (champion vs score_challenger) at top-10%
-            try:
-                if 'score_challenger' in ranked.columns and len(ranked) > 0:
-                    topn = max(1, int(len(ranked) * 0.10))
-                    # Build numeric sort keys only to avoid dtype issues
-                    sort_champ = [c for c in ['score','p_icp'] if c in ranked.columns]
-                    sort_chall = [c for c in ['score_challenger','p_icp'] if c in ranked.columns]
-                    champ_sel = ranked.sort_values(by=sort_champ, ascending=False, na_position='last').head(topn)
-                    chall_sel = ranked.sort_values(by=sort_chall, ascending=False, na_position='last').head(topn)
-                    champ_top = set(champ_sel['customer_id'].astype(str).tolist())
-                    chall_top = set(chall_sel['customer_id'].astype(str).tolist())
-                    inter = len(champ_top & chall_top)
-                    union = len(champ_top | chall_top)
-                    jacc = float(inter) / max(1, union)
-                    overlap = {"top_percent": 10, "intersection": int(inter), "union": int(union), "jaccard": jacc}
-                    ov_name = f"whitespace_challenger_overlap_{cutoff_tag}.json" if cutoff_tag else "whitespace_challenger_overlap.json"
-                    import json as _json
-                    (OUTPUTS_DIR / ov_name).write_text(_json.dumps(overlap, indent=2), encoding='utf-8')
-            except Exception as e:
-                logger.warning(f"Failed challenger overlap export: {e}")
-
-            # Additional Phase-4 artifacts: explanations, thresholds, metrics
-            try:
-                # Explanations export
-                expl_cols = [c for c in ['customer_id','division_name','score','p_icp','p_icp_pct','lift_norm','als_norm','EV_norm','nba_reason'] if c in ranked.columns]
-                if expl_cols:
-                    expl_name = f"whitespace_explanations_{cutoff_tag}.csv" if cutoff_tag else "whitespace_explanations.csv"
-                    ranked[expl_cols].to_csv(OUTPUTS_DIR / expl_name, index=False)
-
-                # Thresholds for grid
-                thresholds = []
-                if len(ranked) > 0 and 'score' in ranked.columns:
-                    scores_num = pd.to_numeric(ranked['score'], errors='coerce').dropna().values
-                    for k in [5, 10, 20]:
-                        thresholds.append({"mode": "top_percent", "k_percent": k, "threshold": None, "count": 0})
-                    if scores_num.size > 0:
-                        sort_cols = [c for c in ['score', 'p_icp', 'EV_norm'] if c in ranked.columns]
-                        for i, k in enumerate([5, 10, 20]):
-                            kk = max(1, int(scores_num.size * (k / 100.0)))
-                            pos = scores_num.size - kk
-                            thr = float(np.partition(scores_num, pos)[pos])
-                            count = int((pd.to_numeric(ranked['score'], errors='coerce') >= thr).sum())
-                            thresholds[i]["threshold"] = thr
-                            thresholds[i]["count"] = int(count)
-                thr_name = f"thresholds_whitespace_{cutoff_tag}.csv" if cutoff_tag else "thresholds_whitespace.csv"
-                pd.DataFrame(thresholds).to_csv(OUTPUTS_DIR / thr_name, index=False)
-
-                # Metrics summary
-                checksum = int(pd.util.hash_pandas_object(ranked[['customer_id','division_name','score']]).sum()) if len(ranked) else 0
-                top10_n = max(1, int(len(ranked) * 0.10)) if len(ranked) > 0 else 0
-                top10 = ranked.sort_values(by=[c for c in ['score','p_icp'] if c in ranked.columns], ascending=False, na_position='last').head(top10_n) if top10_n > 0 else ranked.head(0)
-                shares = top10.groupby('division_name')['customer_id'].size().sort_values(ascending=False) if top10_n > 0 and 'division_name' in top10.columns else pd.Series(dtype=int)
-                share_map = {str(k): float(v) / max(1, int(len(top10))) for k, v in shares.items()} if top10_n > 0 else {}
-                metrics = {
-                    "rows": int(len(ranked)),
-                    "checksum": checksum,
-                    "division_shares_top10pct": share_map,
-                }
-                met_name = f"whitespace_metrics_{cutoff_tag}.json" if cutoff_tag else "whitespace_metrics.json"
-                import json as _json
-                (OUTPUTS_DIR / met_name).write_text(_json.dumps(metrics, indent=2), encoding='utf-8')
-
-                # Lightweight schema validation for whitespace
+                combined_scores.write_csv(str(icp_scores_path))
+            except OSError as e:
                 try:
-                    ws_report = validate_whitespace_schema(path)
-                    ws_out = OUTPUTS_DIR / (f"schema_whitespace_{cutoff_tag}.json" if cutoff_tag else "schema_whitespace.json")
-                    write_schema_report(ws_report, ws_out)
+                    # Fallback: write to a unique file (non-destructive) and log
+                    import datetime as _dt
+                    ts = _dt.datetime.utcnow().strftime('%Y%m%d%H%M%S')
+                    fallback = OUTPUTS_DIR / f"icp_scores_{ts}.csv"
+                    combined_scores.write_csv(str(fallback))
+                    logger.warning(f"icp_scores.csv locked or unavailable ({e}); wrote fallback file: {fallback}")
+                    icp_scores_path = fallback
+                except Exception as ee:
+                    logger.error(f"Failed to write ICP scores due to file lock and fallback failed: {ee}")
+                    raise
+        # Lightweight schema validation
+            try:
+                report = validate_icp_scores_schema(icp_scores_path)
+                write_schema_report(report, OUTPUTS_DIR / "schema_icp_scores.json")
+            except Exception:
+                pass
+            logger.info(f"Saved ICP scores for {len(combined_scores)} customer-division combinations to {icp_scores_path}")
+            if run_manifest is not None:
+                run_manifest["icp_scores"] = str(icp_scores_path)
+        else:
+            message = (
+                "No models were available for scoring. Ensure trained models exist "
+                f"under {MODELS_DIR} or adjust target configuration."
+            )
+            logger.error(message)
+            raise RuntimeError(message)
+        
+        # Phase-4 ranker: replace legacy heuristic whitespace
+        try:
+            cutoff_tag = None
+            try:
+                if run_manifest is not None:
+                    cutoff_tag = str(run_manifest.get('cutoff', '')).replace('-', '') or None
+            except Exception:
+                cutoff_tag = None
+    
+            icp_path: Path | None = icp_scores_path
+            if icp_path is None and run_manifest is not None:
+                try:
+                    manifest_icp = run_manifest.get("icp_scores")
+                    if manifest_icp:
+                        icp_path = Path(manifest_icp)
+                except Exception:
+                    icp_path = None
+            if icp_path is None:
+                icp_path = OUTPUTS_DIR / "icp_scores.csv"
+            if icp_path.exists():
+                # Load only necessary columns for ranking to reduce memory
+                try:
+                    use_cols = [
+                        'division_name','customer_id','customer_name','icp_score',
+                        'rfm__all__gp_sum__12m','affinity__div__lift_topk__12m',
+                        'bought_in_division',
+                        # Segment context
+                        'rfm__all__tx_n__12m','assets_active_total','assets_on_subs_total'
+                    ]
+                    def _usecols(c: str) -> bool:
+                        return (
+                            (c in use_cols)
+                            or c.startswith('als_f')
+                            or c.startswith('als_assets_f')
+                            or c.startswith('mb_lift_')
+                            or c.startswith('affinity__div__lift_topk__12m')
+                            or c == 'owned_division_pre_cutoff'
+                        )
+                    icp_df = pd.read_csv(icp_path, usecols=_usecols)
+                except Exception:
+                    icp_df = pd.read_csv(icp_path)
+                ranked = rank_whitespace(RankInputs(scores=icp_df))
+                # Derive segment labels (warm/cold/prospect) and attach to ranked
+                try:
+                    seg_df = icp_df.copy()
+                    warm = pd.to_numeric(seg_df.get('rfm__all__tx_n__12m', 0), errors='coerce').fillna(0.0) > 0
+                    has_assets = (
+                        pd.to_numeric(seg_df.get('assets_active_total', 0), errors='coerce').fillna(0.0) > 0
+                    ) | (
+                        pd.to_numeric(seg_df.get('assets_on_subs_total', 0), errors='coerce').fillna(0.0) > 0
+                    )
+                    cold = (~warm) & has_assets
+                    segment = pd.Series(np.where(warm, 'warm', np.where(cold, 'cold', 'prospect')), index=seg_df.index)
+                    seg_data = seg_df[['customer_id','division_name']].copy()
+                    seg_data['segment'] = segment.astype(str)
+                    ranked = ranked.merge(seg_data, on=['customer_id','division_name'], how='left')
                 except Exception:
                     pass
-
-                # Capacity selection and bias/diversity sharing
+                # Attach run_id for schema contract if available
+                try:
+                    if run_manifest is not None and isinstance(run_manifest.get('run_id'), str):
+                        if 'run_id' not in ranked.columns:
+                            ranked.insert(0, 'run_id', run_manifest['run_id'])
+                except Exception:
+                    pass
+                path = save_ranked_whitespace(ranked, cutoff_tag=cutoff_tag)
+                if run_manifest is not None:
+                    run_manifest["whitespace_artifact"] = str(path)
+                    if "icp_scores" not in run_manifest:
+                        run_manifest["icp_scores"] = str(icp_path)
+                logger.info(f"Saved Phase-4 ranked whitespace to {path}")
+                # Also save segmented ranked outputs for warm/cold/prospect
+                try:
+                    if 'segment' in ranked.columns:
+                        for seg_name in ['warm','cold','prospect']:
+                            seg_out = ranked[ranked['segment'] == seg_name]
+                            seg_namefile = f"whitespace_{seg_name}_{cutoff_tag}.csv" if cutoff_tag else f"whitespace_{seg_name}.csv"
+                            seg_out.to_csv(OUTPUTS_DIR / seg_namefile, index=False)
+                except Exception:
+                    pass
+    
+                # Shadow mode: emit legacy heuristic whitespace for comparison and report overlap metrics
                 try:
                     cfg = load_config()
-                    mode = str(cfg.whitespace.capacity_mode)
-                    selected = ranked
-                    sort_cols = [c for c in ['score', 'p_icp', 'EV_norm'] if c in ranked.columns]
-                    if mode == 'top_percent':
-                        if len(ranked) > 0:
-                            ksel = max(1, int(len(ranked) * (cfg.modeling.capacity_percent / 100.0)))
-                            # Segment-aware allocation (optional)
+                    if bool(getattr(cfg.whitespace, 'shadow_mode', False)):
+                        legacy = generate_whitespace_opportunities(engine)
+                        if not legacy.is_empty():
+                            legacy_pd = legacy.to_pandas()
+                            legacy_pd.rename(columns={"whitespace_division": "division_name", "whitespace_score": "score"}, inplace=True)
+                            # Standardize required columns for comparison
+                            legacy_pd = legacy_pd[[c for c in ["customer_id", "division_name", "score", "customer_name"] if c in legacy_pd.columns]]
+                            legacy_name = f"whitespace_legacy_{cutoff_tag}.csv" if cutoff_tag else "whitespace_legacy.csv"
+                            legacy_path = OUTPUTS_DIR / legacy_name
+                            legacy_pd.to_csv(legacy_path, index=False)
+                            # Overlap metrics: Jaccard of top-N between champion and legacy
                             try:
-                                seg_alloc_cfg = dict(getattr(getattr(cfg, 'whitespace', object()), 'segment_allocation', {}) or {})
+                                topn = max(1, int(len(ranked) * 0.10))
+                                sort_champ = [c for c in ['score','p_icp'] if c in ranked.columns]
+                                champ_sel = ranked.sort_values(by=sort_champ, ascending=False, na_position='last').head(topn)
+                                leg_sel = legacy_pd.sort_values(by=['score'], ascending=False, na_position='last').head(topn)
+                                champ_top = set(champ_sel['customer_id'].astype(str).tolist())
+                                leg_top = set(leg_sel['customer_id'].astype(str).tolist())
+                                inter = len(champ_top & leg_top)
+                                union = len(champ_top | leg_top)
+                                jacc = float(inter) / max(1, union)
+                                overlap = {"top_percent": 10, "intersection": int(inter), "union": int(union), "jaccard": jacc}
+                                ov_name = f"whitespace_overlap_{cutoff_tag}.json" if cutoff_tag else "whitespace_overlap.json"
+                                import json as _json
+                                (OUTPUTS_DIR / ov_name).write_text(_json.dumps(overlap, indent=2), encoding='utf-8')
                             except Exception:
-                                seg_alloc_cfg = {}
-                            if seg_alloc_cfg and 'segment' in ranked.columns and sort_cols:
-                                alloc: dict[str, float] = {}
-                                for raw_key, raw_val in seg_alloc_cfg.items():
-                                    key = str(raw_key).strip().lower()
-                                    if not key:
-                                        continue
-                                    if key == 'prospects':
-                                        key = 'prospect'
-                                    try:
-                                        val = float(raw_val)
-                                    except (TypeError, ValueError):
-                                        continue
-                                    if math.isfinite(val) and val > 0:
-                                        alloc[key] = val
-                                if alloc:
-                                    warm_r = alloc.get('warm', 0.0)
-                                    cold_r = alloc.get('cold', 0.0)
-                                    pros_r = alloc.get('prospect', 0.0)
-                                    ssum = warm_r + cold_r + pros_r
-                                    if ssum > 0:
-                                        warm_n = int(round(ksel * warm_r / ssum))
-                                        cold_n = int(round(ksel * cold_r / ssum))
-                                        pros_n = max(0, ksel - warm_n - cold_n)
-
-                                        def top_seg(name: str, n: int) -> pd.DataFrame:
-                                            if n <= 0:
-                                                return ranked.head(0)
-                                            sub = ranked[ranked['segment'].astype(str).str.lower() == name]
-                                            return sub.sort_values(by=sort_cols, ascending=False, na_position='last').head(n)
-
-                                        parts = [
-                                            top_seg('warm', warm_n),
-                                            top_seg('cold', cold_n),
-                                            top_seg('prospect', pros_n),
-                                        ]
-                                        initial = pd.concat(parts, ignore_index=True)
-                                        if len(initial) < ksel:
-                                            remaining = ranked.merge(
-                                                initial[['customer_id', 'division_name']],
-                                                on=['customer_id', 'division_name'],
-                                                how='left',
-                                                indicator=True,
-                                            )
-                                            remaining = remaining[remaining['_merge'] == 'left_only'].drop(columns=['_merge'])
-                                            top_up = remaining.sort_values(by=sort_cols, ascending=False, na_position='last').head(ksel - len(initial))
-                                            initial = pd.concat([initial, top_up], ignore_index=True)
+                                pass
+                except Exception as e:
+                    logger.warning(f"Shadow mode failed: {e}")
+    
+                # Challenger overlap (champion vs score_challenger) at top-10%
+                try:
+                    if 'score_challenger' in ranked.columns and len(ranked) > 0:
+                        topn = max(1, int(len(ranked) * 0.10))
+                        # Build numeric sort keys only to avoid dtype issues
+                        sort_champ = [c for c in ['score','p_icp'] if c in ranked.columns]
+                        sort_chall = [c for c in ['score_challenger','p_icp'] if c in ranked.columns]
+                        champ_sel = ranked.sort_values(by=sort_champ, ascending=False, na_position='last').head(topn)
+                        chall_sel = ranked.sort_values(by=sort_chall, ascending=False, na_position='last').head(topn)
+                        champ_top = set(champ_sel['customer_id'].astype(str).tolist())
+                        chall_top = set(chall_sel['customer_id'].astype(str).tolist())
+                        inter = len(champ_top & chall_top)
+                        union = len(champ_top | chall_top)
+                        jacc = float(inter) / max(1, union)
+                        overlap = {"top_percent": 10, "intersection": int(inter), "union": int(union), "jaccard": jacc}
+                        ov_name = f"whitespace_challenger_overlap_{cutoff_tag}.json" if cutoff_tag else "whitespace_challenger_overlap.json"
+                        import json as _json
+                        (OUTPUTS_DIR / ov_name).write_text(_json.dumps(overlap, indent=2), encoding='utf-8')
+                except Exception as e:
+                    logger.warning(f"Failed challenger overlap export: {e}")
+    
+                # Additional Phase-4 artifacts: explanations, thresholds, metrics
+                try:
+                    # Explanations export
+                    expl_cols = [c for c in ['customer_id','division_name','score','p_icp','p_icp_pct','lift_norm','als_norm','EV_norm','nba_reason'] if c in ranked.columns]
+                    if expl_cols:
+                        expl_name = f"whitespace_explanations_{cutoff_tag}.csv" if cutoff_tag else "whitespace_explanations.csv"
+                        ranked[expl_cols].to_csv(OUTPUTS_DIR / expl_name, index=False)
+    
+                    # Thresholds for grid
+                    thresholds = []
+                    if len(ranked) > 0 and 'score' in ranked.columns:
+                        scores_num = pd.to_numeric(ranked['score'], errors='coerce').dropna().values
+                        for k in [5, 10, 20]:
+                            thresholds.append({"mode": "top_percent", "k_percent": k, "threshold": None, "count": 0})
+                        if scores_num.size > 0:
+                            sort_cols = [c for c in ['score', 'p_icp', 'EV_norm'] if c in ranked.columns]
+                            for i, k in enumerate([5, 10, 20]):
+                                kk = max(1, int(scores_num.size * (k / 100.0)))
+                                pos = scores_num.size - kk
+                                thr = float(np.partition(scores_num, pos)[pos])
+                                count = int((pd.to_numeric(ranked['score'], errors='coerce') >= thr).sum())
+                                thresholds[i]["threshold"] = thr
+                                thresholds[i]["count"] = int(count)
+                    thr_name = f"thresholds_whitespace_{cutoff_tag}.csv" if cutoff_tag else "thresholds_whitespace.csv"
+                    pd.DataFrame(thresholds).to_csv(OUTPUTS_DIR / thr_name, index=False)
+    
+                    # Metrics summary
+                    checksum = int(pd.util.hash_pandas_object(ranked[['customer_id','division_name','score']]).sum()) if len(ranked) else 0
+                    top10_n = max(1, int(len(ranked) * 0.10)) if len(ranked) > 0 else 0
+                    top10 = ranked.sort_values(by=[c for c in ['score','p_icp'] if c in ranked.columns], ascending=False, na_position='last').head(top10_n) if top10_n > 0 else ranked.head(0)
+                    shares = top10.groupby('division_name')['customer_id'].size().sort_values(ascending=False) if top10_n > 0 and 'division_name' in top10.columns else pd.Series(dtype=int)
+                    share_map = {str(k): float(v) / max(1, int(len(top10))) for k, v in shares.items()} if top10_n > 0 else {}
+                    metrics = {
+                        "rows": int(len(ranked)),
+                        "checksum": checksum,
+                        "division_shares_top10pct": share_map,
+                    }
+                    met_name = f"whitespace_metrics_{cutoff_tag}.json" if cutoff_tag else "whitespace_metrics.json"
+                    import json as _json
+                    (OUTPUTS_DIR / met_name).write_text(_json.dumps(metrics, indent=2), encoding='utf-8')
+    
+                    # Lightweight schema validation for whitespace
+                    try:
+                        ws_report = validate_whitespace_schema(path)
+                        ws_out = OUTPUTS_DIR / (f"schema_whitespace_{cutoff_tag}.json" if cutoff_tag else "schema_whitespace.json")
+                        write_schema_report(ws_report, ws_out)
+                    except Exception:
+                        pass
+    
+                    # Capacity selection and bias/diversity sharing
+                    try:
+                        cfg = load_config()
+                        mode = str(cfg.whitespace.capacity_mode)
+                        selected = ranked
+                        sort_cols = [c for c in ['score', 'p_icp', 'EV_norm'] if c in ranked.columns]
+                        if mode == 'top_percent':
+                            if len(ranked) > 0:
+                                ksel = max(1, int(len(ranked) * (cfg.modeling.capacity_percent / 100.0)))
+                                # Segment-aware allocation (optional)
+                                try:
+                                    seg_alloc_cfg = dict(getattr(getattr(cfg, 'whitespace', object()), 'segment_allocation', {}) or {})
+                                except Exception:
+                                    seg_alloc_cfg = {}
+                                if seg_alloc_cfg and 'segment' in ranked.columns and sort_cols:
+                                    alloc: dict[str, float] = {}
+                                    for raw_key, raw_val in seg_alloc_cfg.items():
+                                        key = str(raw_key).strip().lower()
+                                        if not key:
+                                            continue
+                                        if key == 'prospects':
+                                            key = 'prospect'
+                                        try:
+                                            val = float(raw_val)
+                                        except (TypeError, ValueError):
+                                            continue
+                                        if math.isfinite(val) and val > 0:
+                                            alloc[key] = val
+                                    if alloc:
+                                        warm_r = alloc.get('warm', 0.0)
+                                        cold_r = alloc.get('cold', 0.0)
+                                        pros_r = alloc.get('prospect', 0.0)
+                                        ssum = warm_r + cold_r + pros_r
+                                        if ssum > 0:
+                                            warm_n = int(round(ksel * warm_r / ssum))
+                                            cold_n = int(round(ksel * cold_r / ssum))
+                                            pros_n = max(0, ksel - warm_n - cold_n)
+    
+                                            def top_seg(name: str, n: int) -> pd.DataFrame:
+                                                if n <= 0:
+                                                    return ranked.head(0)
+                                                sub = ranked[ranked['segment'].astype(str).str.lower() == name]
+                                                return sub.sort_values(by=sort_cols, ascending=False, na_position='last').head(n)
+    
+                                            parts = [
+                                                top_seg('warm', warm_n),
+                                                top_seg('cold', cold_n),
+                                                top_seg('prospect', pros_n),
+                                            ]
+                                            initial = pd.concat(parts, ignore_index=True)
+                                            if len(initial) < ksel:
+                                                remaining = ranked.merge(
+                                                    initial[['customer_id', 'division_name']],
+                                                    on=['customer_id', 'division_name'],
+                                                    how='left',
+                                                    indicator=True,
+                                                )
+                                                remaining = remaining[remaining['_merge'] == 'left_only'].drop(columns=['_merge'])
+                                                top_up = remaining.sort_values(by=sort_cols, ascending=False, na_position='last').head(ksel - len(initial))
+                                                initial = pd.concat([initial, top_up], ignore_index=True)
+                                        else:
+                                            initial = ranked.sort_values(by=sort_cols, ascending=False, na_position='last').head(ksel).copy()
                                     else:
                                         initial = ranked.sort_values(by=sort_cols, ascending=False, na_position='last').head(ksel).copy()
                                 else:
-                                    initial = ranked.sort_values(by=sort_cols, ascending=False, na_position='last').head(ksel).copy()
+                                    initial = ranked.sort_values(by=sort_cols, ascending=False, na_position='last').head(ksel).copy() if sort_cols else ranked.head(0)
+                                # Capacity-aware rebalancing to enforce division max share when applicable
+                                try:
+                                    max_share = float(getattr(getattr(cfg, 'whitespace', object()), 'bias_division_max_share_topN', 0.0))
+                                except Exception:
+                                    max_share = 0.0
+                                def _rebalance(df_all: pd.DataFrame, sel_n: int, max_div_share: float) -> pd.DataFrame:
+                                    if sel_n <= 0 or df_all.empty or max_div_share <= 0.0:
+                                        return df_all.head(sel_n)
+                                    allowed = {d: int(sel_n * max_div_share) for d in df_all['division_name'].dropna().unique()}
+                                    taken = {d: 0 for d in allowed}
+                                    out_rows = []
+                                    for _, row in df_all.sort_values(sort_cols, ascending=False).iterrows():
+                                        d = row.get('division_name')
+                                        if len(out_rows) >= sel_n:
+                                            break
+                                        if d not in allowed:
+                                            out_rows.append(row)
+                                            continue
+                                        if taken[d] < max(1, allowed[d]):
+                                            out_rows.append(row)
+                                            taken[d] += 1
+                                    # If we could not fill capacity due to strict caps, top up with next best regardless of cap
+                                    if len(out_rows) < sel_n:
+                                        rem = sel_n - len(out_rows)
+                                        pool = df_all.drop(pd.DataFrame(out_rows).index, errors='ignore') if out_rows else df_all
+                                        top_up = pool.sort_values(sort_cols, ascending=False).head(rem)
+                                        out_rows.extend(list(top_up.to_dict(orient='records')))
+                                    return pd.DataFrame(out_rows, columns=df_all.columns)
+                                selected = _rebalance(initial if not initial.empty else ranked, ksel, max_share) if max_share > 0 else initial
                             else:
-                                initial = ranked.sort_values(by=sort_cols, ascending=False, na_position='last').head(ksel).copy() if sort_cols else ranked.head(0)
-                            # Capacity-aware rebalancing to enforce division max share when applicable
-                            try:
-                                max_share = float(getattr(getattr(cfg, 'whitespace', object()), 'bias_division_max_share_topN', 0.0))
-                            except Exception:
-                                max_share = 0.0
-                            def _rebalance(df_all: pd.DataFrame, sel_n: int, max_div_share: float) -> pd.DataFrame:
-                                if sel_n <= 0 or df_all.empty or max_div_share <= 0.0:
-                                    return df_all.head(sel_n)
-                                allowed = {d: int(sel_n * max_div_share) for d in df_all['division_name'].dropna().unique()}
-                                taken = {d: 0 for d in allowed}
-                                out_rows = []
-                                for _, row in df_all.sort_values(sort_cols, ascending=False).iterrows():
-                                    d = row.get('division_name')
-                                    if len(out_rows) >= sel_n:
-                                        break
-                                    if d not in allowed:
-                                        out_rows.append(row)
-                                        continue
-                                    if taken[d] < max(1, allowed[d]):
-                                        out_rows.append(row)
-                                        taken[d] += 1
-                                # If we could not fill capacity due to strict caps, top up with next best regardless of cap
-                                if len(out_rows) < sel_n:
-                                    rem = sel_n - len(out_rows)
-                                    pool = df_all.drop(pd.DataFrame(out_rows).index, errors='ignore') if out_rows else df_all
-                                    top_up = pool.sort_values(sort_cols, ascending=False).head(rem)
-                                    out_rows.extend(list(top_up.to_dict(orient='records')))
-                                return pd.DataFrame(out_rows, columns=df_all.columns)
-                            selected = _rebalance(initial if not initial.empty else ranked, ksel, max_share) if max_share > 0 else initial
+                                selected = ranked.head(0)
+                        elif mode in ('per_rep', 'hybrid'):
+                            # Fallback to top_percent until rep attribution/interleave available
+                            ksel = max(1, int(len(ranked) * (cfg.modeling.capacity_percent / 100.0)))
+                            selected = ranked.sort_values(by=sort_cols, ascending=False, na_position='last').head(ksel).copy() if len(ranked) and sort_cols else ranked.head(0)
+    
+                        sel_name = f"whitespace_selected_{cutoff_tag}.csv" if cutoff_tag else "whitespace_selected.csv"
+                        selected.to_csv(OUTPUTS_DIR / sel_name, index=False)
+                        # Emit per-segment selected files when segment column is present
+                        try:
+                            if 'segment' in selected.columns:
+                                for seg_name in ['warm','cold','prospect']:
+                                    seg_sel = selected[selected['segment'] == seg_name]
+                                    seg_file = f"whitespace_selected_{seg_name}_{cutoff_tag}.csv" if cutoff_tag else f"whitespace_selected_{seg_name}.csv"
+                                    seg_sel.to_csv(OUTPUTS_DIR / seg_file, index=False)
+                        except Exception:
+                            pass
+    
+                        cap_df = None
+                        try:
+                            cap_df = _emit_capacity_and_logs(ranked, selected, cutoff_tag=cutoff_tag)
+                        except Exception as exc:
+                            logger.warning("Failed to emit capacity/log summaries: %s", exc)
+    
+                        if cap_df is not None and not cap_df.empty and 'division_name' in cap_df.columns:
+                            share_series = cap_df.set_index('division_name')['selected_count'].sort_values(ascending=False)
+                            total_sel = int(cap_df['selected_count'].sum()) or 0
                         else:
-                            selected = ranked.head(0)
-                    elif mode in ('per_rep', 'hybrid'):
-                        # Fallback to top_percent until rep attribution/interleave available
-                        ksel = max(1, int(len(ranked) * (cfg.modeling.capacity_percent / 100.0)))
-                        selected = ranked.sort_values(by=sort_cols, ascending=False, na_position='last').head(ksel).copy() if len(ranked) and sort_cols else ranked.head(0)
-
-                    sel_name = f"whitespace_selected_{cutoff_tag}.csv" if cutoff_tag else "whitespace_selected.csv"
-                    selected.to_csv(OUTPUTS_DIR / sel_name, index=False)
-                    # Emit per-segment selected files when segment column is present
-                    try:
-                        if 'segment' in selected.columns:
-                            for seg_name in ['warm','cold','prospect']:
-                                seg_sel = selected[selected['segment'] == seg_name]
-                                seg_file = f"whitespace_selected_{seg_name}_{cutoff_tag}.csv" if cutoff_tag else f"whitespace_selected_{seg_name}.csv"
-                                seg_sel.to_csv(OUTPUTS_DIR / seg_file, index=False)
-                    except Exception:
-                        pass
-
-                    cap_df = None
-                    try:
-                        cap_df = _emit_capacity_and_logs(ranked, selected, cutoff_tag=cutoff_tag)
-                    except Exception as exc:
-                        logger.warning("Failed to emit capacity/log summaries: %s", exc)
-
-                    if cap_df is not None and not cap_df.empty and 'division_name' in cap_df.columns:
-                        share_series = cap_df.set_index('division_name')['selected_count'].sort_values(ascending=False)
-                        total_sel = int(cap_df['selected_count'].sum()) or 0
-                    else:
-                        share_series = (
-                            selected.groupby('division_name')['customer_id'].size().sort_values(ascending=False)
-                            if len(selected) > 0 and 'division_name' in selected.columns
-                            else pd.Series(dtype=int)
-                        )
-                        total_sel = int(len(selected))
-                    total_sel = max(1, total_sel)
-                    share_map = {str(k): float(v) / total_sel for k, v in share_series.items()} if len(share_series) else {}
-                    threshold = float(cfg.whitespace.bias_division_max_share_topN)
-                    max_share = max(share_map.values()) if share_map else 0.0
-                    warn = {
-                        "capacity_mode": mode,
-                        "selected_rows": int(len(selected)),
-                        "division_shares": share_map,
-                        "threshold": float(threshold),
-                        "warn": bool(max_share > threshold),
-                    }
-                    warn_name = f"bias_diversity_warnings_{cutoff_tag}.json" if cutoff_tag else "bias_diversity_warnings.json"
-                    # Write via json to avoid pandas dtype issues when nested dicts present
-                    import json as _json
-                    (OUTPUTS_DIR / warn_name).write_text(_json.dumps(warn, indent=2), encoding='utf-8')
+                            share_series = (
+                                selected.groupby('division_name')['customer_id'].size().sort_values(ascending=False)
+                                if len(selected) > 0 and 'division_name' in selected.columns
+                                else pd.Series(dtype=int)
+                            )
+                            total_sel = int(len(selected))
+                        total_sel = max(1, total_sel)
+                        share_map = {str(k): float(v) / total_sel for k, v in share_series.items()} if len(share_series) else {}
+                        threshold = float(cfg.whitespace.bias_division_max_share_topN)
+                        max_share = max(share_map.values()) if share_map else 0.0
+                        warn = {
+                            "capacity_mode": mode,
+                            "selected_rows": int(len(selected)),
+                            "division_shares": share_map,
+                            "threshold": float(threshold),
+                            "warn": bool(max_share > threshold),
+                        }
+                        warn_name = f"bias_diversity_warnings_{cutoff_tag}.json" if cutoff_tag else "bias_diversity_warnings.json"
+                        # Write via json to avoid pandas dtype issues when nested dicts present
+                        import json as _json
+                        (OUTPUTS_DIR / warn_name).write_text(_json.dumps(warn, indent=2), encoding='utf-8')
+                    except Exception as e:
+                        logger.warning(f"Failed capacity/bias exports: {e}")
                 except Exception as e:
-                    logger.warning(f"Failed capacity/bias exports: {e}")
-            except Exception as e:
-                logger.warning(f"Failed to emit Phase-4 thresholds/metrics: {e}")
-
-            # Emit validation artifacts from scores
-            emit_validation_artifacts(icp_path, cutoff_tag=cutoff_tag)
-
-            # Drift/alerts monitoring (basic): write alerts.json at top-level
-            try:
-                check_drift_and_emit_alerts(run_manifest)
-            except Exception:
-                pass
-    except Exception as e:
-        logger.warning(f"Phase-4 ranker failed; skipping whitespace ranking: {e}")
-
-    logger.info("Scoring pipeline completed successfully!")
-    return icp_scores_path
+                    logger.warning(f"Failed to emit Phase-4 thresholds/metrics: {e}")
+    
+                # Emit validation artifacts from scores
+                emit_validation_artifacts(icp_path, cutoff_tag=cutoff_tag)
+    
+                # Drift/alerts monitoring (basic): write alerts.json at top-level
+                try:
+                    check_drift_and_emit_alerts(run_manifest)
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.warning(f"Phase-4 ranker failed; skipping whitespace ranking: {e}")
+    
+    
+        logger.info("Scoring pipeline completed successfully!")
+        return icp_scores_path
+    finally:
+        if seg_list is not None:
+            if prev_segment_env is None:
+                os.environ.pop("GOSALES_POP_BUILD_SEGMENTS", None)
+            else:
+                os.environ["GOSALES_POP_BUILD_SEGMENTS"] = prev_segment_env
 
 if __name__ == "__main__":
     import argparse
@@ -1618,6 +1686,12 @@ if __name__ == "__main__":
         dest="window_months",
         type=int,
         help="Prediction window in months when metadata is missing",
+    )
+    parser.add_argument(
+        "--segment",
+        dest="segment",
+        choices=["warm", "cold", "both"],
+        help="Override population.build_segments for this scoring run",
     )
     args = parser.parse_args()
 
@@ -1640,6 +1714,7 @@ if __name__ == "__main__":
         db_engine,
         cutoff_date=args.cutoff_date,
         prediction_window_months=args.window_months,
+        segment=args.segment,
     )
 
 

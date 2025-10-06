@@ -142,9 +142,11 @@ Recent Enhancements (2025‑09)
   - Lagged market‑basket affinity features with ≥60d embargo
 
 - Training & Evaluation
-  - Per‑division SAFE policy; selection by lift@K + Brier
-  - Model cards include top‑K yield summaries and calibration method/MAE
-  - Prequential forward‑month evaluation (AUC, Lift@10, Brier) with label observability clamp
+  - Per-division SAFE policy; selection by lift@K + Brier
+  - Model cards include top-K yield summaries and calibration method/MAE
+  - Prequential forward-month evaluation (AUC, Lift@10, Brier) with label observability clamp
+  - Segment-aware training: CLI `--segment warm|cold|both` overrides config for ad-hoc runs; pipeline and UI respect the same override.
+  - Calibration fallback ensures artifacts still emit even when probabilities collapse (`calibration_fallback` recorded in metadata).
 
 - Validation & CI Gates
   - Permutation test (train‑only shuffle within time buckets) with p‑value
@@ -154,5 +156,7 @@ Recent Enhancements (2025‑09)
 
 - UI
   - Feature Guide tab (families + configuration + tuning tips)
-  - Business Yield (Top‑K) table and coverage curve in Metrics
+  - Business Yield (Top-K) table and coverage curve in Metrics
   - Prequential and Adjacency Ablation viewers in QA
+  - Roster diagnostics CSVs documented in the Artifact Catalog for transparency into segment math
+

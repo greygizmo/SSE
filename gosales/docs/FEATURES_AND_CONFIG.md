@@ -77,6 +77,16 @@ All options live in `gosales/config.yaml`. Key entries:
   - `safe_divisions`: per-division SAFE policy
   - `top_k_percents`, `capacity_percent`: business thresholds
   - `calibration_methods`: `platt` and/or `isotonic`
+  - `n_jobs`: LightGBM threads (default 1 for strict determinism). Increase cautiously; `deterministic=true` is set.
+  - `final_calibration_max_rows`: when > 0, cap rows used for final CV calibration by sampling a stratified subset. Prevents multi-hour runs on very large populations without changing per-cutoff training logic.
+  - Calibration fallback: if calibrated probabilities are degenerate (`std(p)<0.01`), the trainer falls back to uncalibrated predictions; if still degenerate, it uses a constant prevalence baseline. Metadata records `calibration_fallback`.
+
+- population
+  - `include_prospects`: when false, training/scoring exclude prospects.
+  - `warm_window_months`: define warm customers as `rfm__all__tx_n__{N}m > 0` (default configured to 18 via config; training falls back to `(24m-6m)` if 18m not materialized).
+  - `exclude_prospects_in_features`: when true and `include_prospects=false`, prospects are removed before heavy feature engineering. That reduces rows and joins significantly (laptop-friendly) while preserving leakage safety (uses pre-cutoff tx windows and asset status at cutoff). Falls back gracefully if curated assets are missing.
+  - `build_segments`: controls which segments the feature engine includes: `[warm]`, `[cold]`, or `[warm, cold]`.
+  - Cold customers: own assets purchased on/before the cutoff date (ever-owned), regardless of current subscription status. Implemented via `assets_ever_total > 0` derived from curated `fact_assets`.
 
 - validation
   - `gauntlet_*`: e.g., mask tail days, purge days, label buffer
@@ -123,5 +133,9 @@ python -m gosales.pipeline.score_customers
 
 # Prequential horizon curves
 python -m gosales.pipeline.prequential_eval --division Post_Processing --train-cutoff 2024-12-31 --start 2025-01 --end 2025-12 --window-months 6
+
+# Segment selection (overrides population.build_segments for this run)
+python -m gosales.models.train --division CAMWorks --cutoffs 2024-06-30 --segment warm
+python -m gosales.pipeline.score_customers --segment warm
 ```
 

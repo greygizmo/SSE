@@ -375,6 +375,14 @@ def features_at_cutoff(fact: pd.DataFrame, cutoff_date: str | datetime) -> Tuple
     _start_guard = cutoff + pd.Timedelta(days=int(_guard_days))
     exp_90 = f[(f['expiration_date'].notna()) & (f['expiration_date'] > _start_guard) & (f['expiration_date'] <= cutoff + pd.Timedelta(days=90))]
     per = active.groupby('customer_id')['qty'].sum().rename('assets_active_total').reset_index()
+    # Ever-owned assets: any assets purchased on/before cutoff regardless of current status
+    try:
+        ever_mask = f['purchase_effective'] <= cutoff
+        ever = f.loc[ever_mask].groupby('customer_id')['qty'].sum().rename('assets_ever_total').reset_index()
+        per = per.merge(ever, on='customer_id', how='outer')
+        per['assets_ever_total'] = pd.to_numeric(per['assets_ever_total'], errors='coerce').fillna(0.0)
+    except Exception:
+        per['assets_ever_total'] = 0.0
     per = per.merge(exp_90.groupby('customer_id')['qty'].sum().rename('assets_expiring_90d').reset_index(), on='customer_id', how='left')
     per['assets_expiring_90d'] = per['assets_expiring_90d'].fillna(0.0)
     # Additional totals for 30/60d and shares vs active

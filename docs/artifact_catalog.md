@@ -22,7 +22,7 @@ This catalog enumerates every artifact the GoSales Engine produces across the pi
 | `label_prevalence_<division>_<cutoff>.csv` | `gosales/outputs/labels/` | Positive rate summary for each cohort. | Highlights class imbalance and data sufficiency, guiding modeling choices.【F:README.md†L14-L19】【F:README.md†L191-L199】 |
 | `cutoff_manifest_<division>.json` | `gosales/outputs/labels/` | Records window parameters and censoring decisions. | Documents assumptions per run, enabling reproducibility and audit trails.【F:README.md†L14-L19】 |
 
-## Phase 2 — Feature Engineering
+## Phase 2 – Feature Engineering
 
 | Artifact | Location Pattern | Purpose | Importance |
 | --- | --- | --- | --- |
@@ -30,6 +30,8 @@ This catalog enumerates every artifact the GoSales Engine produces across the pi
 | `feature_catalog_<division>_<cutoff>.csv` | `gosales/outputs/` | Lists every engineered feature with coverage. | Supports explainability, data dictionary tasks, and downstream schema contracts.【F:README.md†L20-L26】【F:README.md†L137-L139】 |
 | `feature_stats_<division>_<cutoff>.json` | `gosales/outputs/features/` | Captures winsorization thresholds, coverage, and checksums. | Detects drift and validates deterministic feature generation.【F:README.md†L20-L26】 |
 | `feature_list.json` | `gosales/outputs/` | Canonical list of expected features. | Used at scoring time to reindex matrices and prevent LightGBM shape mismatches.【F:README.md†L231-L235】 |
+| `population_gating_features_<division>_<cutoff>.csv` | `gosales/outputs/` | Early roster summary (pre/post, warm, cold, prospects_excluded) for feature build. | Explains why the roster shrank and documents warm/cold segmentation.
+| `roster_diagnostics_<division>_<cutoff>.csv` | `gosales/outputs/` | Source and set diagnostics (pre_tx_ids, pred_tx_ids, asset_owner_ids, unions/intersections, eligible, post_roster). | Single‑file narrative for debugging roster math and expectations.
 
 ## Phase 3 — Modeling
 

@@ -67,6 +67,7 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
 
     # --- 1. Load Base Data ---
     try:
+        eligible_ids: set[str] | None = None
         # Use case-insensitive division filter to avoid missing rows due to casing
         division_filter = ", ".join(f"'{normalize_division(d)}'" for d in division_set())
         base_cols_with_qty = "customer_id, order_date, product_division, product_sku, gross_profit, quantity"
@@ -118,6 +119,123 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
             prediction_data = _read_sql(
                 pred_sql, {"cutoff": cutoff_label.strftime("%Y-%m-%d"), "pred_end": prediction_end}
             )
+            # Optional early prospect exclusion to cut compute
+            try:
+                cfgmod = cfg.load_config()
+                exclude_prospects_early = bool(getattr(getattr(cfgmod, 'population', object()), 'exclude_prospects_in_features', False))
+                include_prospects_train = bool(getattr(getattr(cfgmod, 'population', object()), 'include_prospects', False))
+                warm_window = int(getattr(getattr(cfgmod, 'population', object()), 'warm_window_months', 12) or 12)
+                build_segments = [str(s).strip().lower() for s in (getattr(getattr(cfgmod, 'population', object()), 'build_segments', ["warm", "cold"]))]
+                build_segments = [s for s in build_segments if s in ("warm","cold")]
+                if not build_segments:
+                    build_segments = ["warm", "cold"]
+            except Exception:
+                exclude_prospects_early = False
+                include_prospects_train = False
+                warm_window = 12
+                build_segments = ["warm", "cold"]
+            if exclude_prospects_early and not include_prospects_train:
+                try:
+                    # Warm ids: transactions in last N months (all divisions), pre-cutoff only
+                    start_warm = cutoff_dt - pd.DateOffset(months=warm_window)
+                    mask_warm = (feature_data['order_date'] > start_warm) & (feature_data['order_date'] <= cutoff_dt)
+                    warm_ids = set(feature_data.loc[mask_warm, 'customer_id'].astype(str).unique().tolist())
+                except Exception:
+                    warm_ids = set()
+                # Cold ids via curated assets at cutoff (if available)
+                cold_ids = set()
+                try:
+                    fact_assets_pd = pd.read_sql(select_all('fact_assets'), engine)
+                except Exception:
+                    fact_assets_pd = pd.DataFrame()
+                if not fact_assets_pd.empty:
+                    try:
+                        from gosales.etl.assets import features_at_cutoff as _assets_at_cut
+                        roll, per_cust, _extras = _assets_at_cut(fact_assets_pd, cutoff_date)
+                        # Cold definition: ever-owned assets purchased on/before cutoff regardless of subscription status
+                        a_ever = pd.to_numeric(per_cust.get('assets_ever_total', 0), errors='coerce').fillna(0.0)
+                        mask_cold = (a_ever > 0)
+                        cold_ids = set(per_cust.loc[mask_cold, 'customer_id'].astype(str).unique().tolist())
+                    except Exception:
+                        cold_ids = set()
+                # Eligible roster
+                try:
+                    ids_tx = set(feature_data['customer_id'].astype(str).unique().tolist())
+                except Exception:
+                    ids_tx = set()
+                try:
+                    ids_pred = set(prediction_data['customer_id'].astype(str).unique().tolist())
+                except Exception:
+                    ids_pred = set()
+                try:
+                    all_ids = set(ids_tx | ids_pred | cold_ids)
+                except Exception:
+                    all_ids = ids_tx | ids_pred
+                # Cold excludes warm to maintain disjoint warm/cold segmentation
+                cold_ids = set(cold_ids) - set(warm_ids)
+                # Segment selection
+                eligible = set()
+                if "warm" in build_segments:
+                    eligible |= set(warm_ids)
+                if "cold" in build_segments:
+                    eligible |= set(cold_ids)
+                pre_n = len(all_ids)
+                if eligible:
+                    # Filter feature & prediction frames in place
+                    feature_data = feature_data[feature_data['customer_id'].astype(str).isin(eligible)].reset_index(drop=True)
+                    prediction_data = prediction_data[prediction_data['customer_id'].astype(str).isin(eligible)].reset_index(drop=True)
+                    eligible_ids = eligible
+                post_ids = set(feature_data['customer_id'].astype(str).unique().tolist()) | set(prediction_data['customer_id'].astype(str).unique().tolist())
+                post_n = len(post_ids)
+                warm_n = len(warm_ids)
+                cold_n = len(cold_ids)
+                prospects_excluded = max(0, int(pre_n - (warm_n + cold_n)))
+                logger.info(
+                    "Prospect exclusion (features) enabled: warm_window=%dm, roster %d -> %d (warm=%d, cold=%d, prospects_excluded=%d)",
+                    warm_window, pre_n, post_n, warm_n, cold_n, prospects_excluded,
+                )
+                try:
+                    # Emit minimal gating summary artifact
+                    out_path = OUTPUTS_DIR / f"population_gating_features_{norm_division_name}_{cutoff_date}.csv"
+                    pd.DataFrame([
+                        {
+                            'division': norm_division_name,
+                            'cutoff': cutoff_date,
+                            'warm_window_months': int(warm_window),
+                            'pre_roster': int(pre_n),
+                            'post_roster': int(post_n),
+                            'warm': int(warm_n),
+                            'cold': int(cold_n),
+                            'prospects_excluded': int(prospects_excluded),
+                        }
+                    ]).to_csv(out_path, index=False)
+                    # Emit roster diagnostics (source counts & set relationships)
+                    diag_path = OUTPUTS_DIR / f"roster_diagnostics_{norm_division_name}_{cutoff_date}.csv"
+                    asset_ids = set(per_cust.loc[mask_cold, 'customer_id'].astype(str).unique().tolist()) if 'per_cust' in locals() else set()
+                    warm_only = len(set(warm_ids) - set(cold_ids))
+                    cold_only = len(set(cold_ids) - set(warm_ids))
+                    both = len(set(warm_ids).intersection(set(cold_ids)))
+                    future_only = len(set(ids_pred) - (set(ids_tx) | set(asset_ids)))
+                    lapsed_non_asset = len((set(ids_tx) - set(warm_ids)) - set(asset_ids))
+                    pd.DataFrame([
+                        {
+                            'pre_tx_ids': int(len(ids_tx)),
+                            'pred_tx_ids': int(len(ids_pred)),
+                            'asset_owner_ids': int(len(asset_ids)),
+                            'pre_roster': int(pre_n),
+                            'post_roster': int(post_n),
+                            'warm': int(warm_n),
+                            'cold': int(cold_n),
+                            'warm_only': int(warm_only),
+                            'cold_only': int(cold_only),
+                            'both_warm_cold': int(both),
+                            'eligible': int(len(eligible)),
+                            'future_only_pred_not_pre_or_assets': int(future_only),
+                            'lapsed_non_asset_pre_not_warm_not_assets': int(lapsed_non_asset),
+                        }
+                    ]).to_csv(diag_path, index=False)
+                except Exception:
+                    pass
             prediction_data["order_date"] = pd.to_datetime(prediction_data["order_date"])
             try:
                 top_divs = (
@@ -169,6 +287,17 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
             "SELECT customer_id FROM dim_customer", engine
         )
         customers_pd["customer_id"] = customers_pd["customer_id"].astype(str)
+        try:
+            cfgmod = cfg.load_config()
+            exclude_prospects_early = bool(getattr(getattr(cfgmod, 'population', object()), 'exclude_prospects_in_features', False))
+            include_prospects_train = bool(getattr(getattr(cfgmod, 'population', object()), 'include_prospects', False))
+            build_segments = [str(s).strip().lower() for s in (getattr(getattr(cfgmod, 'population', object()), 'build_segments', ["warm","cold"]))]
+        except Exception:
+            exclude_prospects_early = False
+            include_prospects_train = False
+            build_segments = ["warm","cold"]
+        if exclude_prospects_early and not include_prospects_train and eligible_ids:
+            customers_pd = customers_pd[customers_pd['customer_id'].isin(list(eligible_ids))].reset_index(drop=True)
         customers = pl.from_pandas(customers_pd).with_columns(
             pl.col("customer_id").cast(pl.Utf8)
         )
@@ -1591,6 +1720,33 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
                 gr = feature_matrix["growth_ratio_24_over_23"].cast(pl.Float64)
                 for c in interaction_cols[:12]:
                     feature_matrix = feature_matrix.with_columns((gr * feature_matrix[c].cast(pl.Float64)).alias(f"{c}_x_growth"))
+    except Exception:
+        pass
+
+    # Optional segment-specific feature pruning via allowlist
+    try:
+        _cfg = cfg.load_config()
+        segs = [str(s).strip().lower() for s in getattr(getattr(_cfg, 'population', object()), 'build_segments', ["warm","cold"]) if str(s).strip()]
+        allow_map = dict(getattr(getattr(_cfg, 'features', object()), 'segment_feature_allowlist', {}) or {})
+        if len(segs) == 1:
+            seg = segs[0]
+            patterns = [str(p) for p in allow_map.get(seg, []) if str(p)]
+            if patterns:
+                essentials = {"customer_id", "bought_in_division", "industry", "industry_sub"}
+                keep_cols = []
+                for c in feature_matrix.columns:
+                    cs = str(c)
+                    if cs in essentials:
+                        keep_cols.append(cs)
+                        continue
+                    if any(pat in cs for pat in patterns):
+                        keep_cols.append(cs)
+                if keep_cols:
+                    # Ensure essentials are present
+                    for e in list(essentials):
+                        if e in feature_matrix.columns and e not in keep_cols:
+                            keep_cols.append(e)
+                    feature_matrix = feature_matrix.select(keep_cols)
     except Exception:
         pass
 

@@ -311,7 +311,7 @@ def _train_lgbm_for_cutoff(
                         params = dict(
                             random_state=seed,
                             deterministic=True,
-                            n_jobs=1,
+                            n_jobs=int(getattr(modeling_cfg, "n_jobs", 1) or 1),
                             n_estimators=400,
                             learning_rate=learning_rate,
                             num_leaves=num_leaves,
@@ -335,7 +335,7 @@ def _train_lgbm_for_cutoff(
                             reg_params = dict(
                                 random_state=seed,
                                 deterministic=True,
-                                n_jobs=1,
+                                n_jobs=int(getattr(modeling_cfg, "n_jobs", 1) or 1),
                                 n_estimators=400,
                                 learning_rate=learning_rate,
                                 num_leaves=max(15, int(num_leaves * 0.8)),
@@ -744,6 +744,12 @@ def _calibrate(
 @click.option("--models", default="logreg,lgbm")
 @click.option("--calibration", default="platt,isotonic")
 @click.option("--shap-sample", default=0, type=int, help="Rows to sample for SHAP; 0 disables")
+@click.option(
+    "--segment",
+    type=click.Choice(["warm", "cold", "both"], case_sensitive=False),
+    default=None,
+    help="Segment selection for feature build and training gate (overrides config population.build_segments).",
+)
 @click.option("--config", default=str((Path(__file__).parents[1] / "config.yaml").resolve()))
 @click.option("--group-cv/--no-group-cv", default=False, help="Use GroupKFold by customer_id for train/valid split (leakage guard)")
 @click.option("--purge-days", default=0, type=int, help="Embargo/purge days between train and validation (time-aware splits)")
@@ -760,6 +766,7 @@ def main(
     calibration: str,
     shap_sample: int,
     config: str,
+    segment: str | None,
     group_cv: bool,
     purge_days: int,
     label_buffer_days: int,
@@ -768,7 +775,19 @@ def main(
     cold_only: bool = False,
     dry_run: bool = False,
 ) -> None:
-    cfg = load_config(config)
+    # Apply CLI overrides to config for segment selection
+    overrides = None
+    if segment:
+        seg = str(segment).strip().lower()
+        seg_list = [seg] if seg in ("warm", "cold") else ["warm", "cold"]
+        overrides = {"population": {"build_segments": seg_list}}
+        # Also expose via env var so nested loaders in features engine see the override
+        try:
+            import os as _os
+            _os.environ["GOSALES_POP_BUILD_SEGMENTS"] = ",".join(seg_list)
+        except Exception:
+            pass
+    cfg = load_config(config, cli_overrides=overrides)
     # Determine SAFE policy: CLI flag or per-division config override
     auto_safe = bool(safe_mode)
     try:
@@ -887,22 +906,82 @@ def main(
             except Exception:
                 include_prospects = False
             try:
-                warm = pd.to_numeric(df.get('rfm__all__tx_n__12m', 0), errors='coerce').fillna(0.0) > 0
+                # Warm window (months) configurable; default to 12
+                try:
+                    warm_window = int(getattr(getattr(cfg, 'population', object()), 'warm_window_months', 12) or 12)
+                except Exception:
+                    warm_window = 12
+                # Prefer recency-based warm flag if available (days since last order <= N months)
+                days_col = 'rfm__all__recency_days__life'
+                if days_col in df.columns:
+                    days = pd.to_numeric(df[days_col], errors='coerce').fillna(1e9)
+                    # Approximate month length at 30 days for gating; conservative
+                    warm = days <= float(warm_window * 30)
+                else:
+                    # Fallback: use exact window tx counts or 24m-6m for 18m
+                    warm_col = f'rfm__all__tx_n__{warm_window}m'
+                    if warm_col in df.columns:
+                        warm = pd.to_numeric(df[warm_col], errors='coerce').fillna(0.0) > 0
+                    elif warm_window == 18 and all(c in df.columns for c in ['rfm__all__tx_n__24m','rfm__all__tx_n__6m']):
+                        v24 = pd.to_numeric(df['rfm__all__tx_n__24m'], errors='coerce').fillna(0.0)
+                        v6 = pd.to_numeric(df['rfm__all__tx_n__6m'], errors='coerce').fillna(0.0)
+                        warm = (v24 - v6) > 0
+                    else:
+                        # Fallback: use 12m if available, else any available window <= 24m
+                        if 'rfm__all__tx_n__12m' in df.columns:
+                            warm = pd.to_numeric(df['rfm__all__tx_n__12m'], errors='coerce').fillna(0.0) > 0
+                        elif 'rfm__all__tx_n__24m' in df.columns:
+                            warm = pd.to_numeric(df['rfm__all__tx_n__24m'], errors='coerce').fillna(0.0) > 0
+                        else:
+                            warm = pd.Series(False, index=df.index)
                 assets_active = pd.to_numeric(df.get('assets_active_total', 0), errors='coerce').fillna(0.0) > 0
                 assets_on_subs = pd.to_numeric(df.get('assets_on_subs_total', 0), errors='coerce').fillna(0.0) > 0
                 cold = (~warm) & (assets_active | assets_on_subs)
                 mask = None
                 msg = None
-                if cold_only:
+                pre = len(df)
+                warm_n = int(warm.sum())
+                cold_n = int(cold.sum())
+                # Segment-aware gating: CLI --segment takes precedence over cold_only
+                if segment and str(segment).lower() == 'warm':
+                    mask = warm
+                    msg = f"Training population filtered to warm customers (warm_window={warm_window}m)"
+                elif cold_only or (segment and str(segment).lower() == 'cold'):
                     mask = cold
-                    msg = "Training population filtered to cold customers"
+                    msg = f"Training population filtered to cold customers (warm_window={warm_window}m)"
                 elif not include_prospects:
                     mask = warm | cold
-                    msg = "Training population filtered (warm|cold)"
+                    msg = f"Training population filtered (warm|cold; warm_window={warm_window}m)"
                 if mask is not None:
-                    pre = len(df)
                     df = df[mask].reset_index(drop=True)
-                    logger.info("%s @ %s: %d -> %d rows", msg, cutoff, pre, len(df))
+                    post = len(df)
+                    prospects_excluded = max(0, int(pre - (warm_n + cold_n)))
+                    logger.info(
+                        "%s @ %s: %d -> %d rows (warm=%d, cold=%d, prospects_excluded=%d)",
+                        msg,
+                        cutoff,
+                        pre,
+                        post,
+                        warm_n,
+                        cold_n,
+                        prospects_excluded,
+                    )
+                    # Persist a tiny gating summary for diagnostics
+                    try:
+                        from gosales.utils.paths import OUTPUTS_DIR as _OUT
+                        import pandas as _pd
+                        _pd.DataFrame([
+                            {
+                                "cutoff": cutoff,
+                                "pre_rows": int(pre),
+                                "post_rows": int(post),
+                                "warm": int(warm_n),
+                                "cold": int(cold_n),
+                                "prospects_excluded": int(prospects_excluded),
+                            }
+                        ]).to_csv(_OUT / f"population_gating_{artifact_slug}_{cutoff}.csv", index=False)
+                    except Exception:
+                        pass
                     if df.empty:
                         logger.warning("No eligible customer rows after population filter for cutoff %s", cutoff)
                         continue
@@ -1276,18 +1355,54 @@ def main(
         except Exception:
             n_splits_f = 3
         if n_splits_f >= 2:
+            # Optional sampling guard for very large populations
+            try:
+                cal_cap = int(getattr(getattr(cfg, 'modeling', object()), 'final_calibration_max_rows', 0) or 0)
+            except Exception:
+                cal_cap = 0
+            if cal_cap > 0 and len(X_final) > cal_cap:
+                try:
+                    from sklearn.model_selection import StratifiedShuffleSplit
+                    ratio = float(cal_cap) / float(len(X_final))
+                    ratio = min(max(ratio, 0.0), 1.0)
+                    sss = StratifiedShuffleSplit(n_splits=1, test_size=ratio, random_state=cfg.modeling.seed)
+                    _, sample_idx = next(sss.split(X_final, y_final))
+                    X_cal = X_final.iloc[sample_idx]
+                    y_cal = y_final[sample_idx]
+                    logger.info(
+                        "Final calibration (LR) on stratified sample: %d of %d rows, folds=%d",
+                        len(X_cal), len(X_final), n_splits_f,
+                    )
+                except Exception:
+                    X_cal, y_cal = X_final, y_final
+                    logger.warning(
+                        "Failed to create stratified sample for calibration; falling back to full population (%d rows)",
+                        len(X_final),
+                    )
+            else:
+                X_cal, y_cal = X_final, y_final
+                logger.info(
+                    "Final calibration (LR) on %d rows, folds=%d",
+                    len(X_cal), n_splits_f,
+                )
             cal = CalibratedClassifierCV(
                 pipe,
                 method='isotonic' if final_cal_method == 'isotonic' else 'sigmoid',
                 cv=n_splits_f,
-            ).fit(X_final, y_final)
+            ).fit(X_cal, y_cal)
             model = cal
         else:
             logger.warning("Skipping final calibration for LR: insufficient per-class counts; using uncalibrated model")
             model = pipe
         feature_names = list(X_final.columns)
     else:
-        clf = LGBMClassifier(random_state=cfg.modeling.seed, n_estimators=400, learning_rate=0.05, deterministic=True, n_jobs=1)
+        clf = LGBMClassifier(
+            random_state=cfg.modeling.seed,
+            n_estimators=400,
+            learning_rate=0.05,
+            deterministic=True,
+            n_jobs=int(getattr(getattr(cfg, 'modeling', object()), 'n_jobs', 1) or 1),
+        )
         clf.fit(X_final, y_final)
         # Dynamic cv for final calibration; fallback to uncalibrated if infeasible
         try:
@@ -1298,11 +1413,41 @@ def main(
         except Exception:
             n_splits_f = 3
         if n_splits_f >= 2:
+            # Optional sampling guard for very large populations
+            try:
+                cal_cap = int(getattr(getattr(cfg, 'modeling', object()), 'final_calibration_max_rows', 0) or 0)
+            except Exception:
+                cal_cap = 0
+            if cal_cap > 0 and len(X_final) > cal_cap:
+                try:
+                    from sklearn.model_selection import StratifiedShuffleSplit
+                    ratio = float(cal_cap) / float(len(X_final))
+                    ratio = min(max(ratio, 0.0), 1.0)
+                    sss = StratifiedShuffleSplit(n_splits=1, test_size=ratio, random_state=cfg.modeling.seed)
+                    _, sample_idx = next(sss.split(X_final, y_final))
+                    X_cal = X_final.iloc[sample_idx]
+                    y_cal = y_final[sample_idx]
+                    logger.info(
+                        "Final calibration on stratified sample: %d of %d rows, folds=%d",
+                        len(X_cal), len(X_final), n_splits_f,
+                    )
+                except Exception:
+                    X_cal, y_cal = X_final, y_final
+                    logger.warning(
+                        "Failed to create stratified sample for calibration; falling back to full population (%d rows)",
+                        len(X_final),
+                    )
+            else:
+                X_cal, y_cal = X_final, y_final
+                logger.info(
+                    "Final calibration on %d rows, folds=%d",
+                    len(X_cal), n_splits_f,
+                )
             cal = CalibratedClassifierCV(
                 clf,
                 method='isotonic' if final_cal_method == 'isotonic' else 'sigmoid',
                 cv=n_splits_f,
-            ).fit(X_final, y_final)
+            ).fit(X_cal, y_cal)
             model = cal
         else:
             logger.warning("Skipping final calibration for LGBM: insufficient per-class counts; using uncalibrated model")
@@ -1350,20 +1495,37 @@ def main(
             _metadata["model_variant"] = "cold"
     except Exception:
         _metadata = None
-    # Final predictions and guardrails
+    # Final predictions and guardrails (with calibration fallback)
     try:
-        p_final = model.predict_proba(X_final)[:,1]
+        p_final = model.predict_proba(X_final)[:, 1]
         if float(np.std(p_final)) < 0.01:
-            logger.warning("Degenerate classifier (std(p) < 0.01). Aborting artifact write.")
-            # Ensure minimal metadata exists even on degenerate runs
+            logger.warning("Degenerate calibrated probabilities (std(p) < 0.01). Falling back to uncalibrated.")
+            # Try uncalibrated base estimator
+            base = getattr(model, "base_estimator", None)
+            if base is None and hasattr(model, "estimator"):
+                base = model.estimator
+            if base is None:
+                base = model
             try:
-                if _metadata is not None:
-                    with open(out_dir / "metadata.json", "w", encoding="utf-8") as mf:
-                        json.dump(_metadata, mf, indent=2)
-                    artifacts["metadata.json"] = str(out_dir / "metadata.json")
+                p_uncal = base.predict_proba(X_final)[:, 1]
+                if float(np.std(p_uncal)) >= 0.01:
+                    p_final = p_uncal
+                    final_cal_method = 'none'
+                    if _metadata is not None:
+                        _metadata["calibration_fallback"] = "uncalibrated"
+                else:
+                    prev = float(np.mean(y_final)) if len(y_final) > 0 else 0.0
+                    p_final = np.full(len(y_final), prev, dtype=float)
+                    final_cal_method = 'none'
+                    logger.warning("Uncalibrated probabilities still degenerate; using constant prevalence baseline.")
+                    if _metadata is not None:
+                        _metadata["calibration_fallback"] = "constant_prevalence"
             except Exception:
-                pass
-            return
+                prev = float(np.mean(y_final)) if len(y_final) > 0 else 0.0
+                p_final = np.full(len(y_final), prev, dtype=float)
+                final_cal_method = 'none'
+                if _metadata is not None:
+                    _metadata["calibration_fallback"] = "constant_prevalence_error"
     except Exception:
         p_final = None
 
