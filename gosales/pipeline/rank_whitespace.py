@@ -773,57 +773,105 @@ def rank_whitespace(inputs: RankInputs, *, weights: Iterable[float] = (0.60, 0.2
     lift_cov = float(lift_norm_series.attrs.get("coverage", 0.0))
     lift_src = lift_norm_series.attrs.get("source_column")
     df['lift_norm'] = lift_norm_series
-    als_norm, als_signal_strength = _compute_als_norm(df, owner_centroid=als_centroid)
-    df['als_norm'] = als_norm
-    df['_als_signal_strength'] = als_signal_strength
-    # ALS coverage enforcement and optional assets-ALS / item2vec backfill
+    txn_als_norm, txn_signal_strength = _compute_als_norm(df, owner_centroid=als_centroid)
+    txn_als_norm = txn_als_norm.astype(float)
+    txn_signal_strength = pd.to_numeric(txn_signal_strength, errors='coerce').fillna(0.0)
+
+    assets_cols = [c for c in df.columns if c.startswith('als_assets_f')]
+    assets_als_present = bool(assets_cols)
+    try:
+        assets_norm = _compute_assets_als_norm(df, owner_centroid=None).astype(float) if assets_als_present else None
+    except Exception:
+        assets_norm = None
+    if assets_norm is None:
+        assets_norm = pd.Series(np.zeros(len(df)), index=df.index, dtype=float)
+
+    try:
+        assets_signal_strength = (
+            df[assets_cols]
+            .apply(pd.to_numeric, errors='coerce')
+            .fillna(0.0)
+            .abs()
+            .sum(axis=1)
+            .astype(float)
+        ) if assets_als_present else None
+    except Exception:
+        assets_signal_strength = None
+    if assets_signal_strength is None:
+        assets_signal_strength = pd.Series(np.zeros(len(df)), index=df.index, dtype=float)
+
     try:
         from gosales.utils.config import load_config
         _cfg = load_config()
         als_thr = float(getattr(getattr(_cfg, 'whitespace', object()), 'als_coverage_threshold', 0.30))
         use_i2v = bool(getattr(getattr(_cfg, 'features', object()), 'use_item2vec', False))
+        blend_cfg = getattr(getattr(_cfg, 'whitespace', object()), 'als_blend_weights', [0.5, 0.5])
     except Exception:
         als_thr = 0.30
         use_i2v = False
+        blend_cfg = [0.5, 0.5]
+
     try:
-        cov_als = (
-            pd.to_numeric(df['_als_signal_strength'], errors='coerce').fillna(0.0) > 0
-        ).mean()
+        blend_txn = float(blend_cfg[0]) if len(blend_cfg) > 0 else 0.0
+        blend_assets = float(blend_cfg[1]) if len(blend_cfg) > 1 else 0.0
     except Exception:
-        cov_als = 0.0
-    coverage_meta = {"als": float(cov_als), "affinity": float(lift_cov)}
+        blend_txn, blend_assets = 0.5, 0.5
+    if blend_txn < 0 or not math.isfinite(blend_txn):
+        blend_txn = 0.0
+    if blend_assets < 0 or not math.isfinite(blend_assets):
+        blend_assets = 0.0
+    if not assets_als_present:
+        blend_assets = 0.0
+    total_blend = blend_txn + blend_assets
+    if total_blend <= 0:
+        blend_txn, blend_assets = 1.0, 0.0
+    else:
+        blend_txn /= total_blend
+        blend_assets /= total_blend
+
+    als_norm = txn_als_norm.mul(blend_txn)
+    if assets_als_present:
+        als_norm = als_norm.add(assets_norm.mul(blend_assets), fill_value=0.0)
+    als_norm = als_norm.fillna(0.0)
+    df['als_norm'] = als_norm
+
+    combined_signal = txn_signal_strength.add(assets_signal_strength, fill_value=0.0)
+    df['_als_signal_strength'] = combined_signal
+
+    try:
+        cov_txn = float((txn_signal_strength > 0).mean())
+    except Exception:
+        cov_txn = 0.0
+    try:
+        cov_assets = float((assets_signal_strength > 0).mean()) if assets_als_present else 0.0
+    except Exception:
+        cov_assets = 0.0
+    try:
+        cov_combined = float((combined_signal > 0).mean())
+    except Exception:
+        cov_combined = 0.0
+
+    coverage_meta = {
+        "als": float(cov_combined),
+        "als_txn": float(cov_txn),
+        "affinity": float(lift_cov),
+    }
+    if assets_als_present:
+        coverage_meta["als_assets"] = float(cov_assets)
+    coverage_meta["als_blend_weights"] = {
+        "transaction": float(blend_txn),
+        "assets": float(blend_assets),
+    }
     if lift_src:
         coverage_meta["affinity_source_column"] = lift_src
-    # Prefer assets-ALS fallback when available, else item2vec
-    assets_cols = [c for c in df.columns if c.startswith('als_assets_f')]
-    assets_als_present = bool(assets_cols)
-    assets_signal_strength = None
-    if assets_als_present:
-        try:
-            assets_signal_strength = (
-                df[assets_cols]
-                .apply(pd.to_numeric, errors='coerce')
-                .fillna(0.0)
-                .abs()
-                .sum(axis=1)
-                .astype(float)
-            )
-        except Exception:
-            assets_signal_strength = None
-    if cov_als < als_thr:
-        mask_zero_als = (
-            pd.to_numeric(df['_als_signal_strength'], errors='coerce').fillna(0.0) <= 0
-        )
-        if assets_als_present:
-            try:
-                aals = _compute_assets_als_norm(df, owner_centroid=None)
-                if mask_zero_als.any():
-                    df.loc[mask_zero_als, 'als_norm'] = aals[mask_zero_als]
-            except Exception:
-                pass
-        # If still zero, try i2v
+
+    if cov_combined < als_thr:
+        mask_zero_als = combined_signal.fillna(0.0) <= 0.0
+        if assets_als_present and mask_zero_als.any():
+            df.loc[mask_zero_als, 'als_norm'] = assets_norm[mask_zero_als]
+            combined_signal.loc[mask_zero_als] = combined_signal.loc[mask_zero_als] + assets_signal_strength.loc[mask_zero_als]
         i2v_present = any(c.startswith('i2v_f') for c in df.columns)
-        if (use_i2v or i2v_present):
+        if use_i2v or i2v_present:
             i2v_norm = _compute_item2vec_norm(df, owner_centroid=None)
             mask_i2v = mask_zero_als
             if assets_signal_strength is not None:
@@ -834,11 +882,12 @@ def rank_whitespace(inputs: RankInputs, *, weights: Iterable[float] = (0.60, 0.2
                 ) & mask_zero_als
             if mask_i2v.any():
                 df.loc[mask_i2v, 'als_norm'] = i2v_norm[mask_i2v]
-        pos_mask = pd.to_numeric(df['_als_signal_strength'], errors='coerce').fillna(0.0) > 0
+        pos_mask = combined_signal.fillna(0.0) > 0
         if pos_mask.any():
             pos_vals = pd.to_numeric(df.loc[pos_mask, 'als_norm'], errors='coerce').fillna(0.0)
             if pos_vals.max() <= 0:
                 df.loc[pos_mask, 'als_norm'] = 1.0
+        df['_als_signal_strength'] = combined_signal
     # EV proxy with cap and normalization
     try:
         from gosales.utils.config import load_config

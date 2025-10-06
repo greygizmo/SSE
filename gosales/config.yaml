@@ -57,6 +57,9 @@ etl:
 logging:
   level: INFO
   jsonl: true
+population:
+  # Default: exclude prospects from training and scoring pipelines
+  include_prospects: false
 labels:
   gp_min_threshold: 0.0
   denylist_skus_csv: gosales/data/lookup/label_denylist_skus.csv
@@ -135,6 +138,7 @@ whitespace:
     prospect: 0.0
   ev_cap_percentile: 0.95
   als_coverage_threshold: 0.30
+  als_blend_weights: [0.5, 0.5]    # [transaction ALS, assets ALS]
   bias_division_max_share_topN: 0.6
   cooldown_days: 30
   cooldown_factor: 0.75

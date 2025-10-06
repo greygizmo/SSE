@@ -62,7 +62,7 @@ class Logging:
 
 @dataclass
 class PopulationConfig:
-    include_prospects: bool = True
+    include_prospects: bool = False
 
 
 @dataclass
@@ -170,6 +170,7 @@ class WhitespaceConfig:
     accounts_per_rep: int = 25
     ev_cap_percentile: float = 0.95
     als_coverage_threshold: float = 0.30
+    als_blend_weights: list[float] = field(default_factory=lambda: [0.5, 0.5])
     bias_division_max_share_topN: float = 0.6
     cooldown_days: int = 30
     cooldown_factor: float = 0.75
@@ -364,6 +365,19 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
         raise ValueError("whitespace.weights must sum to a positive number")
     ws_weights = [w / total_w for w in ws_weights]
 
+    raw_als_blend = ws_cfg.get("als_blend_weights", [0.5, 0.5])
+    try:
+        als_blend_weights = [float(w) for w in raw_als_blend]
+    except Exception as e:  # pragma: no cover - defensive
+        raise ValueError("whitespace.als_blend_weights must be a list of numbers") from e
+    if len(als_blend_weights) < 2:
+        als_blend_weights += [0.0] * (2 - len(als_blend_weights))
+    als_blend_weights = als_blend_weights[:2]
+    if any((not math.isfinite(w)) or w < 0 for w in als_blend_weights):
+        raise ValueError("whitespace.als_blend_weights must be finite and non-negative")
+    if als_blend_weights[0] == 0 and als_blend_weights[1] == 0:
+        als_blend_weights = [0.5, 0.5]
+
     raw_seg_alloc = ws_cfg.get("segment_allocation") or {}
     segment_allocation: Dict[str, float] = {}
     if isinstance(raw_seg_alloc, dict):
@@ -429,7 +443,7 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
             jsonl=bool(log_cfg.get("jsonl", True)),
         ),
         population=PopulationConfig(
-            include_prospects=bool(pop_cfg.get("include_prospects", True))
+            include_prospects=bool(pop_cfg.get("include_prospects", False))
         ),
         labels=Labels(
             gp_min_threshold=float(labels_cfg.get("gp_min_threshold", 0.0)),
@@ -504,6 +518,7 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
             accounts_per_rep=int(ws_cfg.get("accounts_per_rep", 25)),
             ev_cap_percentile=float(ws_cfg.get("ev_cap_percentile", 0.95)),
             als_coverage_threshold=float(ws_cfg.get("als_coverage_threshold", 0.30)),
+            als_blend_weights=als_blend_weights,
             bias_division_max_share_topN=float(ws_cfg.get("bias_division_max_share_topN", 0.6)),
             cooldown_days=int(ws_cfg.get("cooldown_days", 30)),
             cooldown_factor=float(ws_cfg.get("cooldown_factor", 0.75)),

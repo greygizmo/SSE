@@ -488,6 +488,15 @@ def _assemble_scores_dataframe(
             for c in als_cols:
                 scores_df[c] = pd.to_numeric(feature_matrix_pd[c], errors="coerce").fillna(0.0)
 
+    # Pass through Assets-ALS embedding columns if present so the ranker can backfill ALS similarity.
+    assets_als_cols = [c for c in feature_matrix_pd.columns if str(c).startswith("als_assets_f")]
+    if assets_als_cols:
+        try:
+            scores_df[assets_als_cols] = feature_matrix_pd[assets_als_cols].apply(pd.to_numeric, errors="coerce").fillna(0.0)
+        except Exception:
+            for c in assets_als_cols:
+                scores_df[c] = pd.to_numeric(feature_matrix_pd[c], errors="coerce").fillna(0.0)
+
     i2v_cols = [c for c in feature_matrix_pd.columns if str(c).startswith("i2v_f")]
     if i2v_cols:
         try:
@@ -770,9 +779,9 @@ def score_customers_for_division(
     # Early customer-only filtering (warm or cold) in Polars to reduce compute
     try:
         cfg_all = load_config()
-        include_prospects = bool(getattr(getattr(cfg_all, 'population', object()), 'include_prospects', True))
+        include_prospects = bool(getattr(getattr(cfg_all, 'population', object()), 'include_prospects', False))
     except Exception:
-        include_prospects = True
+        include_prospects = False
     if not include_prospects and not feature_matrix.is_empty():
         try:
             cols = set(feature_matrix.columns)
@@ -936,9 +945,9 @@ def score_customers_for_division(
         # Only keep warm (recent tx) and cold (assets but no recent tx) customers when configured.
         try:
             cfg = load_config()
-            include_prospects = bool(getattr(getattr(cfg, 'population', object()), 'include_prospects', True))
+            include_prospects = bool(getattr(getattr(cfg, 'population', object()), 'include_prospects', False))
         except Exception:
-            include_prospects = True
+            include_prospects = False
         if not include_prospects:
             try:
                 warm = pd.to_numeric(scores_df.get('rfm__all__tx_n__12m', 0), errors='coerce').fillna(0.0) > 0
@@ -1280,6 +1289,7 @@ def generate_scoring_outputs(
                     return (
                         (c in use_cols)
                         or c.startswith('als_f')
+                        or c.startswith('als_assets_f')
                         or c.startswith('mb_lift_')
                         or c.startswith('affinity__div__lift_topk__12m')
                         or c == 'owned_division_pre_cutoff'

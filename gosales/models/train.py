@@ -883,9 +883,9 @@ def main(
             df = fm.to_pandas()
             # Optional gating: exclude prospect accounts; optionally keep only cold customers.
             try:
-                include_prospects = bool(getattr(getattr(cfg, 'population', object()), 'include_prospects', True))
+                include_prospects = bool(getattr(getattr(cfg, 'population', object()), 'include_prospects', False))
             except Exception:
-                include_prospects = True
+                include_prospects = False
             try:
                 warm = pd.to_numeric(df.get('rfm__all__tx_n__12m', 0), errors='coerce').fillna(0.0) > 0
                 assets_active = pd.to_numeric(df.get('assets_active_total', 0), errors='coerce').fillna(0.0) > 0

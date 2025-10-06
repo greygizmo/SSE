@@ -2,6 +2,7 @@ import json
 import time
 from datetime import datetime
 from pathlib import Path
+import os
 
 import pandas as pd
 import streamlit as st
@@ -362,6 +363,26 @@ with st.sidebar:
             ["All Divisions"] + st.session_state['divisions'],
             help="Filter data by specific division"
         )
+
+    segment_options = {
+        "Config default": None,
+        "Warm only": "warm",
+        "Cold only": "cold",
+        "Warm + Cold": "both",
+    }
+    default_segment_label = "Config default"
+    current_choice = st.session_state.get('segment_choice')
+    for label, value in segment_options.items():
+        if value == current_choice:
+            default_segment_label = label
+            break
+    selected_segment_label = st.selectbox(
+        "Segment Mode",
+        list(segment_options.keys()),
+        index=list(segment_options.keys()).index(default_segment_label),
+        help="Override population.build_segments for training/scoring commands launched from the UI."
+    )
+    st.session_state['segment_choice'] = segment_options[selected_segment_label]
 
     # Quick stats
     st.markdown("### 📊 Quick Stats")
@@ -2198,7 +2219,7 @@ elif tab == "Quality Assurance":
                             "--models", selected_models
                         ]
 
-                        result = subprocess.run(cmd, capture_output=True, text=True, cwd=Path.cwd())
+                        result = subprocess.run(cmd, capture_output=True, text=True, cwd=Path.cwd(), env=env_override)
 
                         if result.returncode == 0:
                             st.success("✅ Ablation test completed!")
@@ -2325,7 +2346,7 @@ elif tab == "Quality Assurance":
             with st.spinner("Generating drift snapshot..."):
                 try:
                     cmd = [sys.executable, "scripts/drift_snapshots.py"]
-                    result = subprocess.run(cmd, capture_output=True, text=True, cwd=Path.cwd())
+                    result = subprocess.run(cmd, capture_output=True, text=True, cwd=Path.cwd(), env=env_override)
 
                     if result.returncode == 0:
                         st.success("✅ Drift snapshot generated!")
@@ -2402,7 +2423,7 @@ elif tab == "Quality Assurance":
                 with st.spinner(f"Running {selected_script}..."):
                     try:
                         cmd = [sys.executable, script_info['script']]
-                        result = subprocess.run(cmd, capture_output=True, text=True, cwd=Path.cwd())
+                        result = subprocess.run(cmd, capture_output=True, text=True, cwd=Path.cwd(), env=env_override)
 
                         if result.returncode == 0:
                             st.success(f"✅ {selected_script} completed successfully!")
@@ -2476,7 +2497,7 @@ elif tab == "Quality Assurance":
                         "--window-months", str(preq_win),
                         "--k-percent", str(preq_k),
                     ]
-                    result = subprocess.run(cmd, capture_output=True, text=True, cwd=Path.cwd())
+                    result = subprocess.run(cmd, capture_output=True, text=True, cwd=Path.cwd(), env=env_override)
                     if result.returncode == 0:
                         st.success("Prequential evaluation complete!")
                     else:
@@ -2851,6 +2872,12 @@ elif tab == "Configuration & Launch":
                 progress = current_step / total_steps
                 progress_bar.progress(progress)
                 status_text.markdown(f"**Executing:** {step} ({current_step}/{total_steps})")
+                segment_choice = st.session_state.get('segment_choice')
+                env_override = None
+                if segment_choice:
+                    env_override = os.environ.copy()
+                    env_override['GOSALES_POP_BUILD_SEGMENTS'] = 'warm,cold' if segment_choice == 'both' else segment_choice
+
 
                 # Simulate execution with subprocess call
                 try:
@@ -2860,8 +2887,12 @@ elif tab == "Configuration & Launch":
                         cmd = [sys.executable, "-m", "gosales.features.engine"]
                     elif step == "Model Training":
                         cmd = [sys.executable, "-m", "gosales.models.train"]
+                        if segment_choice:
+                            cmd.extend(['--segment', segment_choice])
                     elif step == "Customer Scoring":
                         cmd = [sys.executable, "-m", "gosales.pipeline.score_customers"]
+                        if segment_choice:
+                            cmd.extend(['--segment', segment_choice])
                     elif step == "Whitespace Analysis":
                         cmd = [sys.executable, "-m", "gosales.whitespace.build_lift"]
                     elif step == "Leakage Gauntlet":
@@ -2889,7 +2920,7 @@ elif tab == "Configuration & Launch":
                         cmd = [sys.executable, "-c", f"print('Completed {step}')"]
 
                     # Run the command
-                    result = subprocess.run(cmd, capture_output=True, text=True, cwd=Path.cwd())
+                    result = subprocess.run(cmd, capture_output=True, text=True, cwd=Path.cwd(), env=env_override)
 
                     if result.returncode == 0:
                         st.success(f"✅ {step} completed successfully")
@@ -2917,11 +2948,13 @@ elif tab == "Configuration & Launch":
 
         with col1:
             if st.button("🔄 Full Pipeline", help="Run complete ETL → Training → Scoring pipeline"):
-                st.info("Launching full pipeline... (This would execute score_all.py)")
+                segment_suffix = f" --segment {st.session_state.get('segment_choice')}" if st.session_state.get('segment_choice') else ''
+                st.info(f"Launching full pipeline... (This would execute score_all.py{segment_suffix})")
 
         with col2:
             if st.button("📊 Scoring Only", help="Run scoring with existing models"):
-                st.info("Launching scoring pipeline... (This would execute score_customers.py)")
+                segment_suffix = f" --segment {st.session_state.get('segment_choice')}" if st.session_state.get('segment_choice') else ''
+                st.info(f"Launching scoring pipeline... (This would execute score_customers.py{segment_suffix})")
 
         with col3:
             if st.button("🔧 ETL Only", help="Run data processing only"):
