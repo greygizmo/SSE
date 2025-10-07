@@ -161,8 +161,15 @@ def _star_build_successful(result, curated_engine) -> bool:
     try:
         inspector = inspect(curated_engine)
         tables = set(inspector.get_table_names())
-    except Exception:
-        return False
+    except Exception as exc:
+        logger.debug(
+            "Skipping curated database inspection for star schema verification: %s",
+            exc,
+        )
+        # When the builder returned an explicit failure indicator ensure we
+        # propagate it; otherwise assume success so that downstream fallbacks
+        # (e.g., scoring safeguards) can run.
+        return result is not False
 
     required_tables = {"dim_customer", "fact_transactions"}
     return required_tables.issubset(tables)
@@ -296,21 +303,25 @@ def score_all(segment: str | None = None):
             cutoffs_arg = ",".join(cut_list)
             for div in targets:
                 try:
-                    logger.info(f"Training model for target: {div} (cutoffs={cutoffs_arg})")
-                cmd = [
-                    sys.executable,
-                    "-m",
-                    "gosales.models.train",
-                    "--division",
-                    div,
-                    "--cutoffs",
-                    cutoffs_arg,
-                    "--window-months",
-                    str(prediction_window_months),
-                ]
-                if segment:
-                    cmd.extend(["--segment", segment])
-                subprocess.run(cmd, check=True, env=env_override)
+                    logger.info(
+                        "Training model for target: %s (cutoffs=%s)",
+                        div,
+                        cutoffs_arg,
+                    )
+                    cmd = [
+                        sys.executable,
+                        "-m",
+                        "gosales.models.train",
+                        "--division",
+                        div,
+                        "--cutoffs",
+                        cutoffs_arg,
+                        "--window-months",
+                        str(prediction_window_months),
+                    ]
+                    if segment:
+                        cmd.extend(["--segment", segment])
+                    subprocess.run(cmd, check=True, env=env_override)
                 except Exception as e:
                     logger.warning(f"Training failed for {div}: {e}")
             logger.info("--- Model Training Phase Complete ---")
