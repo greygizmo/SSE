@@ -36,12 +36,13 @@ def build_als(engine, output_path, top_n: int = 10):
     )
 
     # Build explicit, deterministic mappings for readable outputs
-    user_ids = sorted(set(user_item["customer_id"].to_list()))
+    raw_customer_ids = user_item["customer_id"].to_list()
+    user_ids = sorted(set(raw_customer_ids), key=lambda uid: str(uid))
     item_names = sorted(set(user_item["item"].to_list()))
     user_id_to_idx = {uid: idx for idx, uid in enumerate(user_ids)}
     item_name_to_idx = {name: idx for idx, name in enumerate(item_names)}
 
-    user_codes = [user_id_to_idx[int(uid)] for uid in user_item["customer_id"].to_list()]
+    user_codes = [user_id_to_idx[uid] for uid in raw_customer_ids]
     item_codes = [item_name_to_idx[str(name)] for name in user_item["item"].to_list()]
     counts = user_item["count"].to_list()
 
@@ -61,7 +62,7 @@ def build_als(engine, output_path, top_n: int = 10):
         item_indices, scores = model.recommend(user_idx, sparse_matrix[user_idx], N=top_n)
         for item_idx, score in zip(item_indices, scores):
             records.append({
-                "customer_id": int(user_id),
+                "customer_id": user_id,
                 "product_name": item_names[int(item_idx)],
                 "score": float(score),
             })
