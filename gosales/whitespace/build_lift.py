@@ -8,6 +8,7 @@ from gosales.utils.paths import OUTPUTS_DIR
 
 logger = get_logger(__name__)
 
+
 def build_lift(engine, output_path):
     """Calculates the market basket lift for each product combination.
 
@@ -26,7 +27,9 @@ def build_lift(engine, output_path):
         item_col = "product_sku"
         src = fact_transactions
     except Exception:
-        fact_orders = pl.read_database("SELECT customer_id, product_name FROM fact_orders", engine)
+        fact_orders = pl.read_database(
+            "SELECT customer_id, product_name FROM fact_orders", engine
+        )
         fact_orders = fact_orders.rename({"product_name": "product_sku"})
         item_col = "product_sku"
         src = fact_orders
@@ -44,8 +47,14 @@ def build_lift(engine, output_path):
         basket.to_dummies(columns=[item_col])
         .group_by("customer_id")
         .agg(pl.all().exclude(["customer_id"]).sum())
-        .drop("count")
-        .with_columns((pl.all().exclude("customer_id") > 0).cast(pl.Boolean))
+    )
+
+    count_columns = [col for col in basket_plus.columns if col.startswith("count")]
+    if count_columns:
+        basket_plus = basket_plus.drop(count_columns)
+
+    basket_plus = basket_plus.with_columns(
+        (pl.all().exclude("customer_id") > 0).cast(pl.Boolean)
     )
 
     # Perform market basket analysis
