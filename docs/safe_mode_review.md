@@ -10,22 +10,37 @@ This playbook captures the checks to run before removing the SAFE designation fr
 1. Ensure the latest configuration and data refresh are in place:
    ```bash
    PYTHONPATH="$PWD" python -m gosales.etl.build_star --config gosales/config.yaml --rebuild
-   PYTHONPATH="$PWD" python -m gosales.labels.build --division Solidworks --config gosales/config.yaml
-   PYTHONPATH="$PWD" python -m gosales.features.build --division Solidworks --config gosales/config.yaml
+   PYTHONPATH="$PWD" python -m gosales.pipeline.build_labels \
+     --division Solidworks \
+     --cutoff "2024-03-31,2024-06-30" \
+     --window-months 6 \
+     --mode expansion \
+     --config gosales/config.yaml
+   PYTHONPATH="$PWD" python -m gosales.features.build \
+     --division Solidworks \
+     --cutoff "2024-03-31,2024-06-30" \
+     --config gosales/config.yaml
    ```
 2. Train paired models on identical cutoffs:
    ```bash
-   PYTHONPATH="$PWD" python -m gosales.models.train --division Solidworks --config gosales/config.yaml --safe-mode
-   PYTHONPATH="$PWD" python -m gosales.models.train --division Solidworks --config gosales/config.yaml --variant full
+   PYTHONPATH="$PWD" python -m gosales.models.train \
+     --division Solidworks \
+     --cutoffs "2024-03-31,2024-06-30" \
+     --config gosales/config.yaml \
+     --safe-mode
+   PYTHONPATH="$PWD" python -m gosales.models.train \
+     --division Solidworks \
+     --cutoffs "2024-03-31,2024-06-30" \
+     --config gosales/config.yaml
    ```
-   - Retain the SAFE run output as the control. The `--variant full` flag forces the adjacency-rich configuration that SAFE normally disables.
+   - Retain the SAFE run output as the control. Omit `--safe-mode` on the second command to train the adjacency-rich configuration normally gated by SAFE.
 
 ## 3. Run adjacency ablations
 - Execute the CI gate check locally to compare SAFE vs. Full:
   ```bash
-  PYTHONPATH="$PWD" python -m gosales.validation.ci_gate --division Solidworks --config gosales/config.yaml --compare safe,full
+  PYTHONPATH="$PWD" python -m gosales.validation.ci_gate gosales/outputs
   ```
-- Inspect the produced `ablation_summary.csv` and confirm whether SAFE still wins by ≥0.005 AUC. If SAFE is still better, removing the designation will fail CI.
+- Inspect `gosales/outputs/ablation/adjacency/<division>/<run>/ablation_summary.csv` and confirm whether SAFE still wins by ≥0.005 AUC. If SAFE is still better, removing the designation will fail CI.
 
 ## 4. Inspect feature leakage signals
 - Review the generated `feature_catalog.json` and `label_audit/` prevalence reports for Solidworks.
@@ -34,7 +49,7 @@ This playbook captures the checks to run before removing the SAFE designation fr
 ## 5. Validate downstream scoring
 1. Score with both artifacts:
    ```bash
-   PYTHONPATH="$PWD" python -m gosales.pipeline.score_all --divisions Solidworks --config gosales/config.yaml --skip-train
+   PYTHONPATH="$PWD" python -m gosales.pipeline.score_all
    ```
    - Before running, drop the prior Solidworks model from `gosales/outputs/models/` and symlink either the SAFE or Full run so the scorer picks the intended artifact.
 2. Compare holdout metrics under `gosales/outputs/validation/` and confirm the Full variant does not regress precision, lift, or drift guards.
