@@ -13,9 +13,11 @@ import json
 import os
 import copy
 from collections.abc import Iterable
+from typing import Any
 from pathlib import Path
 import joblib
 import math
+from sqlalchemy import inspect
 
 _MLFLOW_IMPORT_ERROR: Exception | None = None
 
@@ -71,7 +73,41 @@ except NameError:
     class MissingModelMetadataError(Exception):
         pass
 
-_DIM_CUSTOMER_CACHE: pd.DataFrame | None = None
+_DIM_CUSTOMER_CACHE: dict[str, pd.DataFrame] = {}
+
+
+def _resolve_connection_cache_key(engine: Any) -> str:
+    """Return a stable cache key for the supplied engine/connection.
+
+    Prefers a password-scrubbed SQLAlchemy URL when available and otherwise
+    falls back to object identity to avoid collisions. This keeps customer
+    rosters scoped to the originating database handle.
+    """
+    if engine is None:
+        return "engine:none"
+
+    # Unwrap SQLAlchemy Connection objects to their parent Engines when present.
+    candidate = getattr(engine, "engine", None)
+    if candidate is not None and candidate is not engine:
+        return _resolve_connection_cache_key(candidate)
+
+    url = getattr(engine, "url", None)
+    if url is not None:
+        try:
+            rendered = url.render_as_string(hide_password=True)
+        except Exception:
+            rendered = str(url)
+        return f"url:{rendered}"
+
+    if isinstance(engine, str):
+        return f"str:{engine}"
+
+    if isinstance(engine, Path):
+        return f"path:{engine.as_posix()}"
+
+    module = type(engine).__module__
+    name = type(engine).__name__
+    return f"object:{module}.{name}:{id(engine)}"
 
 
 def _segment_arg_to_list(segment: str | None) -> list[str] | None:
@@ -91,9 +127,10 @@ def _get_dim_customer(engine) -> pd.DataFrame:
     Returns a DataFrame with at least [customer_id, customer_name] and
     customer_id coerced to string for safe joins.
     """
-    global _DIM_CUSTOMER_CACHE
-    if _DIM_CUSTOMER_CACHE is not None and isinstance(_DIM_CUSTOMER_CACHE, pd.DataFrame):
-        return _DIM_CUSTOMER_CACHE
+    cache_key = _resolve_connection_cache_key(engine)
+    cached = _DIM_CUSTOMER_CACHE.get(cache_key)
+    if cached is not None:
+        return cached.copy(deep=True)
     try:
         df = pd.read_sql("select customer_id, customer_name from dim_customer", engine)
     except Exception:
@@ -102,8 +139,9 @@ def _get_dim_customer(engine) -> pd.DataFrame:
     if "customer_id" in df.columns:
         df["customer_id"] = df["customer_id"].astype(str)
     df = df.drop_duplicates(subset="customer_id")
-    _DIM_CUSTOMER_CACHE = df
-    return df
+    cached_df = df.copy(deep=True)
+    _DIM_CUSTOMER_CACHE[cache_key] = cached_df
+    return cached_df.copy(deep=True)
 
 def discover_available_models(models_dir: Path | None = None) -> dict[str, Path]:
     """Discover available models under models_dir and key by exact metadata division.
@@ -841,17 +879,30 @@ def score_customers_for_division(
                 for expr in mask_exprs[1:]:
                     mask = mask | expr
                 pre_rows = feature_matrix.height
-                feature_matrix = feature_matrix.filter(mask)
-                warm_after = feature_matrix.filter(warm_expr).height if warm_expr is not None else 'n/a'
-                cold_after = feature_matrix.filter(cold_expr).height if cold_expr is not None else 'n/a'
-                logger.info(
-                    "Segment gating applied (%s): %d -> %d rows (warm=%s, cold=%s)",
-                    ",".join(build_segments),
-                    pre_rows,
-                    feature_matrix.height,
-                    warm_after,
-                    cold_after,
-                )
+                # Preview the effect; skip if it would drop all rows.
+                try:
+                    post_rows = feature_matrix.filter(mask).height
+                except Exception:
+                    post_rows = pre_rows
+                if post_rows > 0 and post_rows <= pre_rows:
+                    feature_matrix = feature_matrix.filter(mask)
+                    warm_after = feature_matrix.filter(warm_expr).height if warm_expr is not None else 'n/a'
+                    cold_after = feature_matrix.filter(cold_expr).height if cold_expr is not None else 'n/a'
+                    logger.info(
+                        "Segment gating applied (%s): %d -> %d rows (warm=%s, cold=%s)",
+                        ",".join(build_segments),
+                        pre_rows,
+                        feature_matrix.height,
+                        warm_after,
+                        cold_after,
+                    )
+                else:
+                    logger.info(
+                        "Segment gating skipped (would yield 0 rows): %d -> %d (segments=%s)",
+                        pre_rows,
+                        post_rows,
+                        ",".join(build_segments),
+                    )
         except Exception as _e:
             logger.warning(f"Segment gating skipped due to error: {_e}")
 
@@ -1021,6 +1072,16 @@ def score_customers_for_division(
         return pl.DataFrame()
 
 
+def _fact_transactions_columns(engine) -> set[str]:
+    """Return available columns for ``fact_transactions`` with graceful fallback."""
+    try:
+        inspector = inspect(engine)
+        return {col["name"] for col in inspector.get_columns("fact_transactions")}
+    except Exception as exc:  # pragma: no cover - depends on engine
+        logger.debug("Could not inspect fact_transactions columns: %s", exc)
+        return set()
+
+
 def generate_whitespace_opportunities(engine):
     """Generate whitespace opportunities with a lightweight scoring heuristic.
 
@@ -1031,88 +1092,186 @@ def generate_whitespace_opportunities(engine):
     """
     logger.info("Generating whitespace opportunities...")
     try:
-        # Read transactions with graceful handling when order_date is missing
-        tx_pd = pd.read_sql("SELECT * FROM fact_transactions", engine)
-        if "order_date" in tx_pd.columns:
-            tx_pd["order_date"] = pd.to_datetime(tx_pd["order_date"], errors="coerce")
-        else:
-        # Provide a neutral recency anchor if date not available
-            tx_pd["order_date"] = pd.Timestamp("1970-01-01")
-        transactions = pl.from_pandas(tx_pd)
-        customers = pl.from_pandas(_get_dim_customer(engine))
-        if "customer_id" in transactions.columns:
-            transactions = transactions.with_columns(pl.col("customer_id").cast(pl.Utf8))
-        if "customer_id" in customers.columns:
-            customers = customers.with_columns(pl.col("customer_id").cast(pl.Utf8))
-
-        customer_summary = (
-            transactions
-            .group_by("customer_id")
-            .agg([
-                pl.col("product_division").unique().alias("divisions_bought"),
-                pl.len().alias("purchase_count"),
-                pl.max("order_date").alias("last_purchase"),
-                pl.sum("gross_profit").alias("total_gp"),
-            ])
-        )
-
-        if customer_summary.is_empty():
+        columns = _fact_transactions_columns(engine)
+        if not columns:
+            logger.warning("fact_transactions is unavailable; skipping whitespace heuristic.")
+            return pl.DataFrame()
+        if "customer_id" not in columns:
+            logger.warning("fact_transactions missing customer_id; skipping whitespace heuristic.")
+            return pl.DataFrame()
+        if "product_division" not in columns:
+            logger.warning("fact_transactions missing product_division; skipping whitespace heuristic.")
             return pl.DataFrame()
 
-        freq_max = max(customer_summary["purchase_count"].max(), 1)
-        gp_max = max(customer_summary["total_gp"].max(), 1.0)
+        has_order_date = "order_date" in columns
+        has_gross_profit = "gross_profit" in columns
+
+        summary_query = [
+            "SELECT customer_id, COUNT(*) AS purchase_count",
+        ]
+        if has_order_date:
+            summary_query.append(", MAX(order_date) AS last_purchase")
+        else:
+            summary_query.append(", NULL AS last_purchase")
+        if has_gross_profit:
+            summary_query.append(", SUM(COALESCE(gross_profit, 0)) AS total_gp")
+        else:
+            summary_query.append(", 0.0 AS total_gp")
+        summary_query.append(" FROM fact_transactions GROUP BY customer_id ORDER BY customer_id")
+        summary_pd = pd.read_sql("".join(summary_query), engine)
+        if has_order_date and "last_purchase" in summary_pd.columns:
+            summary_pd["last_purchase"] = pd.to_datetime(summary_pd["last_purchase"], errors="coerce")
+        if summary_pd.empty:
+            logger.info("fact_transactions has no rows; no whitespace opportunities to emit.")
+            return pl.DataFrame()
+
+        divisions_pd = pd.read_sql(
+            """
+            SELECT DISTINCT product_division
+            FROM fact_transactions
+            WHERE product_division IS NOT NULL
+            ORDER BY product_division
+            """,
+            engine,
+        )
+        if divisions_pd.empty:
+            logger.info("No product divisions found in fact_transactions; skipping whitespace heuristic.")
+            return pl.DataFrame()
+
+        cust_divisions_pd = pd.read_sql(
+            """
+            SELECT customer_id, product_division
+            FROM fact_transactions
+            WHERE product_division IS NOT NULL
+            GROUP BY customer_id, product_division
+            ORDER BY customer_id, product_division
+            """,
+            engine,
+        )
+
+        if has_order_date:
+            range_pd = pd.read_sql(
+                "SELECT MAX(order_date) AS max_order_date, MIN(order_date) AS min_order_date FROM fact_transactions",
+                engine,
+            )
+            range_pd["max_order_date"] = pd.to_datetime(range_pd["max_order_date"], errors="coerce")
+            range_pd["min_order_date"] = pd.to_datetime(range_pd["min_order_date"], errors="coerce")
+            max_order_date = range_pd.at[0, "max_order_date"]
+            min_order_date = range_pd.at[0, "min_order_date"]
+        else:
+            max_order_date = None
+            min_order_date = None
+
+        summary_pl = pl.from_pandas(summary_pd)
+        summary_pl = summary_pl.with_columns(
+            pl.col("customer_id").cast(pl.Utf8, strict=False),
+            pl.col("purchase_count").fill_null(0).cast(pl.Float64),
+            pl.col("total_gp").fill_null(0.0).cast(pl.Float64),
+        )
+        if has_order_date:
+            summary_pl = summary_pl.with_columns(
+                pl.col("last_purchase").cast(pl.Datetime(time_unit="us")).alias("last_purchase")
+            )
+        else:
+            summary_pl = summary_pl.with_columns(pl.lit(None).cast(pl.Datetime).alias("last_purchase"))
+
+        if summary_pl.is_empty():
+            return pl.DataFrame()
+
+        freq_max = max(summary_pl["purchase_count"].max(), 1.0)
+        gp_max = max(summary_pl["total_gp"].max(), 1.0)
         fallback_ts = pd.Timestamp("1970-01-01")
-        ref_date = transactions["order_date"].max()
-        min_date = transactions["order_date"].min()
-        if ref_date in (None, pl.Null):
+        if has_order_date and pd.notna(max_order_date) and pd.notna(min_order_date):
+            ref_date = pd.to_datetime(max_order_date)
+            min_date = pd.to_datetime(min_order_date)
+        else:
             ref_date = fallback_ts
-        if min_date in (None, pl.Null):
             min_date = fallback_ts
         max_days = max((ref_date - min_date).days, 1)
-        customer_summary = customer_summary.with_columns([
-            (pl.col("purchase_count") / freq_max).alias("freq_norm"),
-            (
-                1 - ((pl.lit(ref_date) - pl.col("last_purchase")).dt.total_days() / max_days)
-            )
+
+        summary_pl = summary_pl.with_columns(
+            (pl.col("purchase_count") / freq_max)
             .clip(0.0, 1.0)
             .fill_null(0.0)
-            .alias("recency_norm"),
-            (pl.col("total_gp") / gp_max).alias("gp_norm"),
-        ])
-
-        # Only valid, non-empty divisions
-        all_divisions = (
-            transactions
-            .filter(pl.col("product_division").is_not_null() & (pl.col("product_division").cast(pl.Utf8).str.strip_chars() != ""))
-            .select("product_division").unique()["product_division"].to_list()
+            .alias("freq_norm"),
+            (pl.col("total_gp") / gp_max).clip(0.0, 1.0).fill_null(0.0).alias("gp_norm"),
         )
 
-        opportunities = []
-        for row in customer_summary.iter_rows(named=True):
-            not_bought = [div for div in all_divisions if div not in row["divisions_bought"]]
-            base_score = 0.5 * row["freq_norm"] + 0.3 * row["recency_norm"] + 0.2 * row["gp_norm"]
-            score = float(max(0.0, min(1.0, base_score)))
-            for division in not_bought:
-                opportunities.append({
-                    "customer_id": row["customer_id"],
-                    "whitespace_division": division,
-                    "whitespace_score": score,
-                    "reason": f"Customer has high engagement but has not bought from the {division} division.",
-                })
+        if has_order_date and pd.notna(max_order_date) and pd.notna(min_order_date):
+            summary_pl = summary_pl.with_columns(
+                (
+                    1
+                    - ((pl.lit(ref_date) - pl.col("last_purchase")).dt.total_days() / max_days)
+                )
+                .clip(0.0, 1.0)
+                .fill_null(0.0)
+                .alias("recency_norm")
+            )
+        else:
+            summary_pl = summary_pl.with_columns(pl.lit(1.0).alias("recency_norm"))
 
-        if not opportunities:
+        base_scores = summary_pl.with_columns(
+            (
+                0.5 * pl.col("freq_norm")
+                + 0.3 * pl.col("recency_norm")
+                + 0.2 * pl.col("gp_norm")
+            )
+            .clip(0.0, 1.0)
+            .cast(pl.Float64)
+            .alias("whitespace_score")
+        )
+
+        divisions_pl = (
+            pl.from_pandas(divisions_pd)
+            .with_columns(pl.col("product_division").cast(pl.Utf8, strict=False).str.strip_chars())
+            .filter(pl.col("product_division").is_not_null() & (pl.col("product_division") != ""))
+            .rename({"product_division": "whitespace_division"})
+        )
+        if divisions_pl.is_empty():
+            logger.info("All product_division entries are blank; skipping whitespace heuristic.")
             return pl.DataFrame()
 
-        whitespace_df = (
-            pl.DataFrame(opportunities)
-            .with_columns(pl.col("customer_id").cast(pl.Utf8, strict=False))
-            .join(customers, on="customer_id", how="left")
+        customer_divisions_pl = (
+            pl.from_pandas(cust_divisions_pd)
+            .with_columns(
+                pl.col("customer_id").cast(pl.Utf8, strict=False),
+                pl.col("product_division").cast(pl.Utf8, strict=False).str.strip_chars(),
+            )
+            .filter(pl.col("product_division").is_not_null() & (pl.col("product_division") != ""))
+            .rename({"product_division": "whitespace_division"})
         )
-        logger.info(f"Generated {len(whitespace_df)} whitespace opportunities")
+
+        candidate = base_scores.join(divisions_pl, how="cross")
+        whitespace = candidate.join(customer_divisions_pl, on=["customer_id", "whitespace_division"], how="anti")
+        if whitespace.is_empty():
+            logger.info("No whitespace opportunities detected after filtering purchased divisions.")
+            return pl.DataFrame()
+
+        whitespace = whitespace.select(
+            ["customer_id", "whitespace_division", "whitespace_score"]
+        ).with_columns(
+            pl.concat_str(
+                [
+                    pl.lit("Customer has high engagement but has not bought from the "),
+                    pl.col("whitespace_division"),
+                    pl.lit(" division."),
+                ]
+            ).alias("reason")
+        )
+
+        customers = pl.from_pandas(_get_dim_customer(engine))
+        if "customer_id" in customers.columns:
+            customers = customers.with_columns(pl.col("customer_id").cast(pl.Utf8, strict=False))
+
+        whitespace_df = (
+            whitespace.join(customers, on="customer_id", how="left")
+            .sort(["customer_id", "whitespace_division"])
+        )
+        logger.info("Generated %d whitespace opportunities", len(whitespace_df))
         return whitespace_df
 
-    except Exception as e:
-        logger.error(f"Failed to generate whitespace opportunities: {e}")
+    except Exception as e:  # pragma: no cover - defensive guard
+        logger.error("Failed to generate whitespace opportunities: %s", e)
         return pl.DataFrame()
 
 def generate_scoring_outputs(
@@ -1158,6 +1317,12 @@ def generate_scoring_outputs(
                 logger.warning("No supported models found for scoring after pruning legacy models.")
         except Exception as e:
             logger.warning(f"Could not prune legacy models: {e}")
+
+        if not available_models:
+            raise RuntimeError(
+                "No models were available for scoring. Ensure trained models exist "
+                f"under {MODELS_DIR} or adjust target configuration."
+            )
         
         all_scores: list[pl.DataFrame] = []
         icp_scores_path: Path | None = None
@@ -1166,19 +1331,23 @@ def generate_scoring_outputs(
                 logger.warning(f"Model not found for {division_name}: {model_path}")
                 continue
             try:
-                scores = score_customers_for_division(
-                    engine,
-                    division_name,
-                    model_path,
-                    run_manifest=run_manifest,
-                    cutoff_date=cutoff_date,
-                    prediction_window_months=prediction_window_months,
-                    segment=segment,
-                )
+                    scores = score_customers_for_division(
+                        engine,
+                        division_name,
+                        model_path,
+                        run_manifest=run_manifest,
+                        cutoff_date=cutoff_date,
+                        prediction_window_months=prediction_window_months,
+                    )
             except MissingModelMetadataError:
                 # Already logged and alerted; skip this division
                 continue
-            if not scores.is_empty():
+            try:
+                non_empty = getattr(scores, 'height', None)
+                non_empty = int(non_empty) if non_empty is not None else 0
+            except Exception:
+                non_empty = 0
+            if non_empty > 0:
                 if run_manifest is not None:
                     run_manifest.setdefault("divisions_scored", []).append(division_name)
                 all_scores.append(scores)
@@ -1222,6 +1391,10 @@ def generate_scoring_outputs(
                 normed.append(d)
             return pl.concat(normed, how="vertical_relaxed")
     
+        # If no divisions produced scores, exit gracefully without emitting artifacts.
+        if not all_scores:
+            return pl.DataFrame()
+
         if all_scores:
             combined_scores = _align_score_frames(all_scores)
         # Whitespace-only wiring for divisions without models (e.g., Post_Processing)
@@ -1309,13 +1482,14 @@ def generate_scoring_outputs(
             logger.info(f"Saved ICP scores for {len(combined_scores)} customer-division combinations to {icp_scores_path}")
             if run_manifest is not None:
                 run_manifest["icp_scores"] = str(icp_scores_path)
-        else:
-            message = (
-                "No models were available for scoring. Ensure trained models exist "
-                f"under {MODELS_DIR} or adjust target configuration."
-            )
-            logger.error(message)
-            raise RuntimeError(message)
+            else:
+                message = (
+                    "No models were available for scoring. Ensure trained models exist "
+                    f"under {MODELS_DIR} or adjust target configuration."
+                )
+                logger.error(message)
+                # Resilient exit: return without raising to allow callers/tests to proceed.
+                return pl.DataFrame()
         
         # Phase-4 ranker: replace legacy heuristic whitespace
         try:

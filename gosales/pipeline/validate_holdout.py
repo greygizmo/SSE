@@ -17,7 +17,7 @@ import polars as pl
 import joblib
 from sklearn import metrics as skm
 from sklearn.metrics import roc_auc_score, classification_report, confusion_matrix
-from sqlalchemy import text
+from sqlalchemy import text, inspect
 
 from gosales.utils.db import get_db_connection, get_curated_connection, validate_connection
 from gosales.etl.load_csv import load_csv_to_db
@@ -167,12 +167,23 @@ def validate_against_holdout():
     with db_engine.connect() as connection:
         # Create a unified sales_log_combined table
         connection.execute(text("DROP TABLE IF EXISTS sales_log_combined;"))
-        connection.execute(text("""
-            CREATE TABLE sales_log_combined AS 
-            SELECT * FROM sales_log
-            UNION ALL
-            SELECT * FROM sales_log_2025_ytd;
-        """))
+        try:
+            insp = inspect(db_engine)
+            tables = set(insp.get_table_names())
+        except Exception:
+            tables = set()
+        if 'sales_log' in tables:
+            create_sql = (
+                "CREATE TABLE sales_log_combined AS "
+                "SELECT * FROM sales_log "
+                "UNION ALL SELECT * FROM sales_log_2025_ytd;"
+            )
+        else:
+            create_sql = (
+                "CREATE TABLE sales_log_combined AS "
+                "SELECT * FROM sales_log_2025_ytd;"
+            )
+        connection.execute(text(create_sql))
         connection.commit()
     
     # Rebuild star schema with all data

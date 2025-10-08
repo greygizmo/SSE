@@ -36,3 +36,24 @@ def test_whitespace_score_handles_all_null_dates(tmp_path):
 
     assert not df.is_empty()
     assert df["whitespace_score"].is_not_null().all()
+
+
+def test_whitespace_uses_aggregated_queries(tmp_path, monkeypatch):
+    eng = create_engine(f"sqlite:///{tmp_path}/ws_queries.db")
+    _seed(eng)
+
+    observed_queries: list[str] = []
+    original_read_sql = pd.read_sql
+
+    def _spy_read_sql(sql, con=None, *args, **kwargs):
+        if isinstance(sql, str):
+            observed_queries.append(sql)
+            assert "SELECT *" not in sql.upper()
+        return original_read_sql(sql, con, *args, **kwargs)
+
+    monkeypatch.setattr(pd, "read_sql", _spy_read_sql)
+
+    df = generate_whitespace_opportunities(eng)
+    assert not df.is_empty()
+    assert observed_queries
+    assert any("GROUP BY customer_id" in q or "DISTINCT product_division" in q for q in observed_queries)

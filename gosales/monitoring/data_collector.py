@@ -59,29 +59,115 @@ class MonitoringDataCollector:
         return metrics
 
     def _calculate_data_quality_score(self) -> float:
-        """Calculate overall data quality score based on various factors."""
+        """Calculate an interpretable data quality score based on validation artifacts."""
+
+        def _as_float(value: Any) -> float | None:
+            if value is None:
+                return None
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
+        def _is_lower_better(metric_name: str) -> bool:
+            metric_lower = metric_name.lower()
+            return any(token in metric_lower for token in ("mae", "rmse", "mape", "psi", "error", "loss"))
+
+        validation_files = self._find_validation_metric_files()
+        if not validation_files:
+            logger.info("No validation metrics found; data quality score falls back.")
+            return 40.0
+
         try:
-            # Check if recent validation metrics exist
-            validation_files = self._find_validation_metric_files()
-            if validation_files:
-                latest_validation = max(validation_files, key=lambda x: x.stat().st_mtime)
-                with open(latest_validation, 'r') as f:
-                    validation_data = json.load(f)
+            latest_validation = max(validation_files, key=lambda x: x.stat().st_mtime)
+            with latest_validation.open("r", encoding="utf-8") as handle:
+                validation_data = json.load(handle)
+        except Exception as exc:  # pragma: no cover - defensive guard
+            logger.warning("Unable to load validation metrics for scoring (%s): %s", validation_files[-1], exc)
+            return 45.0
 
-                # Calculate score based on validation metrics
-                # This is a simplified scoring mechanism
-                base_score = 99.5
+        gates_raw = validation_data.get("gates") or {}
+        if not isinstance(gates_raw, dict):
+            gates_raw = {}
+        divisions = validation_data.get("divisions") or []
+        if not isinstance(divisions, list):
+            divisions = []
 
-                # Deduct points for issues
-                if 'alerts' in validation_data and validation_data['alerts']:
-                    base_score -= len(validation_data['alerts']) * 0.1
+        total_checks = 0
+        passing_checks = 0
+        missing_checks = 0
+        failing_checks = 0
 
-                return max(base_score, 90.0)  # Minimum score of 90%
+        for division_metrics in divisions:
+            if not isinstance(division_metrics, dict):
+                continue
+            for metric_name, threshold in gates_raw.items():
+                threshold_val = _as_float(threshold)
+                if threshold_val is None:
+                    continue
+                total_checks += 1
+                observed_val = _as_float(division_metrics.get(metric_name))
+                if observed_val is None:
+                    missing_checks += 1
+                    continue
+                if _is_lower_better(metric_name):
+                    if observed_val <= threshold_val:
+                        passing_checks += 1
+                    else:
+                        failing_checks += 1
+                else:
+                    if observed_val >= threshold_val:
+                        passing_checks += 1
+                    else:
+                        failing_checks += 1
 
-        except Exception:
-            pass
+        if total_checks == 0:
+            score = 55.0
+        else:
+            pass_ratio = passing_checks / total_checks
+            score = pass_ratio * 100.0
+            if missing_checks:
+                score -= (missing_checks / total_checks) * 15.0
 
-        return 99.0  # Default score
+        status = str(validation_data.get("status", "") or "").lower()
+        if status in {"fail", "failed", "error"}:
+            score = min(score, 25.0)
+        elif status in {"warn", "warning"}:
+            score = min(score, 70.0)
+
+        alerts = validation_data.get("alerts") or []
+        severity_penalties = {
+            "critical": 18.0,
+            "error": 12.0,
+            "warn": 8.0,
+            "warning": 8.0,
+            "info": 0.0,
+        }
+        for alert in alerts:
+            if not isinstance(alert, dict):
+                continue
+            severity = str(alert.get("severity", "") or "").lower()
+            penalty = severity_penalties.get(severity, 5.0)
+            score -= penalty
+
+        if total_checks > 0 and failing_checks:
+            failure_ratio = failing_checks / total_checks
+            score -= failure_ratio * 10.0
+
+        score = max(0.0, min(100.0, round(score, 2)))
+        logger.debug(
+            "Computed data quality score",
+            extra={
+                "score": score,
+                "status": status or "unknown",
+                "checks_total": total_checks,
+                "checks_pass": passing_checks,
+                "checks_missing": missing_checks,
+                "checks_fail": failing_checks,
+                "alerts": len(alerts),
+            },
+        )
+        return score
 
     def _calculate_type_consistency_score(self) -> float:
         """Calculate type consistency score."""
@@ -548,53 +634,117 @@ class MonitoringDataCollector:
         return alerts[:10]  # Return only the 10 most recent
 
     def _find_validation_metric_files(self) -> List[Path]:
-        """Return all validation metric files including unsuffixed variants."""
-        validation_files: List[Path] = []
-        for pattern in ("validation_metrics.json", "validation_metrics_*.json"):
-            validation_files.extend(OUTPUTS_DIR.glob(pattern))
+        """Return validation metric files including nested validation outputs.
 
-        # Remove duplicates in case patterns overlap and ensure deterministic ordering
-        unique_files = {file.resolve(): file for file in validation_files}
-        return list(unique_files.values())
+        This crawls both the legacy top-level artifacts and the canonical
+        ``outputs/validation/<division>/<cutoff>/metrics.json`` structure.
+        Paths are deduplicated and returned in deterministic order.
+        """
+        candidates: Dict[Path, Path] = {}
+
+        # Legacy top-level files (maintain compatibility with historical runs).
+        for pattern in ("validation_metrics.json", "validation_metrics_*.json"):
+            for path in OUTPUTS_DIR.glob(pattern):
+                candidates[path.resolve()] = path
+
+        # Canonical validation tree produced by forward validation and pipeline scoring.
+        validation_root = OUTPUTS_DIR / "validation"
+        if validation_root.exists():
+            nested_patterns = (
+                "*/**/metrics.json",
+                "*/**/validation_metrics.json",
+                "*/**/validation_metrics_*.json",
+            )
+            for pattern in nested_patterns:
+                for path in validation_root.glob(pattern):
+                    if path.is_file():
+                        candidates[path.resolve()] = path
+
+        return [candidates[key] for key in sorted(candidates)]
 
     def _collect_data_lineage(self) -> List[Dict[str, Any]]:
-        """Collect data lineage information."""
-        lineage = []
+        """Collect data lineage information from the latest run context."""
+
+        def _status_from(step: Dict[str, Any]) -> str:
+            status_value = step.get("status")
+            if isinstance(status_value, str) and status_value.strip():
+                return status_value.strip().lower()
+            success = step.get("success")
+            if success is True:
+                return "success"
+            if success is False:
+                return "failed"
+            return "unknown"
+
+        def _records_from(step: Dict[str, Any]) -> Any:
+            for key in ("records_processed", "records"):
+                value = step.get(key)
+                if isinstance(value, (int, float)):
+                    return value
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+            return "N/A"
+
+        def _duration_from(step: Dict[str, Any]) -> Any:
+            for key in ("duration_seconds", "duration"):
+                value = step.get(key)
+                if isinstance(value, (int, float)):
+                    return round(float(value), 3)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+            return "N/A"
+
+        def _source_from(step: Dict[str, Any]) -> str:
+            for key in ("source", "data_source"):
+                value = step.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+            return "unknown"
 
         try:
-            # Check for recent run manifest
-            run_files = list(OUTPUTS_DIR.glob("run_context_*.json"))
-            if run_files:
-                latest_run = max(run_files, key=lambda x: x.stat().st_mtime)
-                with open(latest_run, 'r') as f:
-                    run_data = json.load(f)
+            run_manifests = sorted(
+                OUTPUTS_DIR.glob("run_context_*.json"),
+                key=lambda path: path.stat().st_mtime,
+                reverse=True,
+            )
+        except Exception as exc:  # pragma: no cover - filesystem failure
+            logger.warning("Failed to enumerate run context files: %s", exc)
+            return []
 
-                # Extract lineage from run context
-                if 'steps' in run_data:
-                    for step in run_data['steps']:
-                        lineage.append({
-                            'step': step.get('name', 'Unknown'),
-                            'status': '✅' if step.get('success', True) else '❌',
-                            'records_processed': step.get('records', 'N/A'),
-                            'execution_time': step.get('duration', 'N/A'),
-                            'data_source': step.get('source', 'N/A')
-                        })
+        for manifest_path in run_manifests:
+            try:
+                with manifest_path.open("r", encoding="utf-8") as handle:
+                    run_data = json.load(handle)
+            except Exception as exc:
+                logger.debug("Unable to read run context %s: %s", manifest_path, exc)
+                continue
 
-        except Exception:
-            pass
+            steps = run_data.get("steps")
+            if not isinstance(steps, list):
+                continue
 
-        # Default lineage if no run data found
-        if not lineage:
-            lineage = [
-                {'step': 'ETL Load', 'status': '✅', 'records_processed': '91,149', 'execution_time': '5m 30s', 'data_source': 'Azure SQL'},
-                {'step': 'Data Validation', 'status': '✅', 'records_processed': '25,261', 'execution_time': '2m 15s', 'data_source': 'SQLite'},
-                {'step': 'Feature Engineering', 'status': '✅', 'records_processed': '25,261', 'execution_time': '8m 45s', 'data_source': 'SQLite'},
-                {'step': 'Model Training', 'status': '✅', 'records_processed': '25,261', 'execution_time': '2m 30s', 'data_source': 'SQLite'},
-                {'step': 'Scoring', 'status': '✅', 'records_processed': '25,261', 'execution_time': '4m 20s', 'data_source': 'SQLite'},
-                {'step': 'Validation', 'status': '✅', 'records_processed': '25,261', 'execution_time': '30s', 'data_source': 'Outputs'}
-            ]
+            lineage: List[Dict[str, Any]] = []
+            for index, step in enumerate(steps, start=1):
+                if not isinstance(step, dict):
+                    continue
+                name = step.get("name")
+                if not isinstance(name, str) or not name.strip():
+                    name = f"step_{index}"
+                lineage.append(
+                    {
+                        "step": name.strip(),
+                        "status": _status_from(step),
+                        "records_processed": _records_from(step),
+                        "execution_time": _duration_from(step),
+                        "data_source": _source_from(step),
+                    }
+                )
 
-        return lineage
+            if lineage:
+                return lineage
+
+        logger.info("No run context with lineage details found; returning empty lineage.")
+        return []
 
     def _collect_system_health(self) -> Dict[str, Any]:
         """Collect system health metrics."""

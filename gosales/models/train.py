@@ -766,11 +766,11 @@ def main(
     calibration: str,
     shap_sample: int,
     config: str,
-    segment: str | None,
-    group_cv: bool,
-    purge_days: int,
-    label_buffer_days: int,
-    safe_mode: bool,
+    segment: str | None = None,
+    group_cv: bool = False,
+    purge_days: int = 0,
+    label_buffer_days: int = 0,
+    safe_mode: bool = False,
     output_name: str | None = None,
     cold_only: bool = False,
     dry_run: bool = False,
@@ -1325,8 +1325,10 @@ def main(
     try:
         pos_final = int(np.sum(y_final))
         thr = int(getattr(getattr(cfg, 'modeling', object()), 'sparse_isotonic_threshold_pos', 1000) or 1000)
-        avail = set([m for m in cal_methods])
-        if pos_final >= thr and 'isotonic' in avail:
+        avail = {str(m).lower() for m in cal_methods if m}
+        if not avail:
+            final_cal_method = 'none'
+        elif pos_final >= thr and 'isotonic' in avail:
             final_cal_method = 'isotonic'
         elif 'platt' in avail or 'sigmoid' in avail:
             final_cal_method = 'sigmoid'
@@ -1354,7 +1356,10 @@ def main(
             n_splits_f = min(folds_f, pos_f, neg_f)
         except Exception:
             n_splits_f = 3
-        if n_splits_f >= 2:
+        if final_cal_method == 'none':
+            logger.info("Final calibration disabled for LR; using uncalibrated model")
+            model = pipe
+        elif n_splits_f >= 2:
             # Optional sampling guard for very large populations
             try:
                 cal_cap = int(getattr(getattr(cfg, 'modeling', object()), 'final_calibration_max_rows', 0) or 0)
@@ -1378,7 +1383,7 @@ def main(
                     logger.warning(
                         "Failed to create stratified sample for calibration; falling back to full population (%d rows)",
                         len(X_final),
-                    )
+                )
             else:
                 X_cal, y_cal = X_final, y_final
                 logger.info(
@@ -1393,6 +1398,7 @@ def main(
             model = cal
         else:
             logger.warning("Skipping final calibration for LR: insufficient per-class counts; using uncalibrated model")
+            final_cal_method = 'none'
             model = pipe
         feature_names = list(X_final.columns)
     else:
@@ -1412,7 +1418,10 @@ def main(
             n_splits_f = min(folds_f, pos_f, neg_f)
         except Exception:
             n_splits_f = 3
-        if n_splits_f >= 2:
+        if final_cal_method == 'none':
+            logger.info("Final calibration disabled for LGBM; using uncalibrated model")
+            model = clf
+        elif n_splits_f >= 2:
             # Optional sampling guard for very large populations
             try:
                 cal_cap = int(getattr(getattr(cfg, 'modeling', object()), 'final_calibration_max_rows', 0) or 0)
@@ -1451,6 +1460,7 @@ def main(
             model = cal
         else:
             logger.warning("Skipping final calibration for LGBM: insufficient per-class counts; using uncalibrated model")
+            final_cal_method = 'none'
             model = clf
         feature_names = list(X_final.columns)
 
@@ -1471,7 +1481,13 @@ def main(
         pos = int(np.sum(y_final))
         neg = int(max(0, len(y_final) - pos))
         spw = float((neg / pos)) if pos > 0 else None
-        cal_label = 'isotonic' if str(final_cal_method).lower() == 'isotonic' else 'sigmoid'
+        final_cal_str = str(final_cal_method).lower()
+        if final_cal_str == 'isotonic':
+            cal_label = 'isotonic'
+        elif final_cal_str == 'none':
+            cal_label = 'none'
+        else:
+            cal_label = 'sigmoid'
         best_model_label = 'Logistic Regression' if str(winner).lower() == 'logreg' else 'LightGBM'
         _metadata = {
             "division": division,
@@ -1705,7 +1721,13 @@ def main(
         # Model card JSON
         # Derive a human-friendly calibration method label
         try:
-            cal_method_label = 'isotonic' if final_cal_method == 'isotonic' else 'platt'
+            final_cal_lower = str(final_cal_method).lower()
+            if final_cal_lower == 'isotonic':
+                cal_method_label = 'isotonic'
+            elif final_cal_lower == 'none':
+                cal_method_label = 'none'
+            else:
+                cal_method_label = 'platt'
         except Exception:
             cal_method_label = None
 

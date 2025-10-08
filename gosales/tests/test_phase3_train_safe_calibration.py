@@ -74,6 +74,7 @@ def _run_with_matrix(
     models: str = "logreg",
     cutoffs: str = "2023-01-01",
     cfg_mutator=None,
+    calibration: str = "platt,isotonic",
 ):
     outputs_dir = tmp_path / "outputs"
     models_dir = tmp_path / "models"
@@ -92,7 +93,7 @@ def _run_with_matrix(
     cfg = _cfg_for_tests()
     if cfg_mutator is not None:
         cfg_mutator(cfg)
-    monkeypatch.setattr(train_module, "load_config", lambda _: cfg)
+    monkeypatch.setattr(train_module, "load_config", lambda *_args, **_kwargs: cfg)
     monkeypatch.setattr(train_module, "get_curated_connection", lambda: object())
     monkeypatch.setattr(train_module, "get_db_connection", lambda: object())
     monkeypatch.setattr(train_module, "validate_connection", lambda engine: True)
@@ -107,9 +108,10 @@ def _run_with_matrix(
         cutoffs=cutoffs,
         window_months=1,
         models=models,
-        calibration="platt,isotonic",
+        calibration=calibration,
         shap_sample=0,
         config="ignored",
+        segment=None,
         group_cv=False,
         purge_days=0,
         label_buffer_days=0,
@@ -206,6 +208,39 @@ def test_model_card_contains_stability_block(monkeypatch, tmp_path):
     assert "delta_holdout_rev_lift" in stability
     assert "final_rev_lift" in stability
     assert "final_prevalence" in stability
+
+
+def test_final_metadata_marks_none_when_calibration_disabled(monkeypatch, tmp_path):
+    rng = np.random.RandomState(321)
+    n = 150
+    df = pd.DataFrame(
+        {
+            "customer_id": [f"CZ{i:05d}" for i in range(n)],
+            "feature_one": rng.normal(size=n),
+            "feature_two": rng.normal(size=n),
+            "rfm__all__recency_days__life": np.linspace(1, n, n),
+            "bought_in_division": (rng.rand(n) < 0.3).astype(int),
+        }
+    )
+
+    _run_with_matrix(
+        monkeypatch,
+        tmp_path,
+        df,
+        models="logreg",
+        calibration="",
+    )
+
+    metadata_path = tmp_path / "models" / "acme_model" / "metadata.json"
+    assert metadata_path.exists()
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert metadata.get("calibration_method") == "none"
+
+    card_path = tmp_path / "outputs" / "model_card_acme.json"
+    assert card_path.exists()
+    card = json.loads(card_path.read_text(encoding="utf-8"))
+    cal_block = card.get("calibration") or {}
+    assert cal_block.get("method") == "none"
 
 
 def test_sparse_family_drop_preserves_backbone(monkeypatch, tmp_path):

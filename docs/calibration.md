@@ -51,8 +51,35 @@ modeling:
   scale_pos_weight_cap: 10.0
 ```
 
+### Stability Objective Controls
+Stability heuristics smooth performance across cutoffs and prevent the trainer from selecting extremely peaky feature sets. Configure them under `modeling.stability`:
+- `coverage_floor` (float, default `0.0`)
+  - Minimum acceptable feature coverage; rows that fall below trigger warnings and candidate rejection.
+- `min_positive_rate` / `min_positive_count`
+  - Guardrails for per-cutoff prevalence; features dropped when cohorts fall below these limits.
+- `penalty_lambda`
+  - Weight applied to the stability penalty term when evaluating models across cutoffs.
+- `cv_guard_max`
+  - Optional ceiling on the coefficient of variation (CV) across cutoffs; values above the cap trigger penalties.
+- `sparse_family_prefixes`
+  - Feature-family prefixes treated as sparse; enables targeted drops when coverage falls.
+- `backbone_features` / `backbone_prefixes`
+  - Columns or prefixes that must remain even during stability pruning (e.g., critical RFM features).
+
+Example:
+```yaml
+modeling:
+  stability:
+    penalty_lambda: 0.3
+    cv_guard_max: 5.0
+    coverage_floor: 0.75
+    min_positive_rate: 0.05
+    sparse_family_prefixes: ["als_"]
+    backbone_prefixes: ["rfm__"]
+```
+
 ## Rules of Thumb
-- Use isotonic when you have ample positives per fold (e.g., >= 200–300 per fold for smoother reliability curves).
+- Use isotonic when you have ample positives per fold (e.g., >= 200‑300 per fold for smoother reliability curves).
 - Prefer Platt for smaller datasets or thin cutoffs; it’s less prone to overfitting than isotonic.
 - If you frequently see `single_class_train` or `insufficient_per_class`:
   - Increase `window_months` (wider label horizon), or

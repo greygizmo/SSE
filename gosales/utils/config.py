@@ -139,6 +139,18 @@ class Features:
 
 
 @dataclass
+class StabilityConfig:
+    coverage_floor: float = 0.0
+    min_positive_rate: float = 0.0
+    min_positive_count: int = 0
+    penalty_lambda: float = 0.0
+    cv_guard_max: float | None = None
+    sparse_family_prefixes: list[str] = field(default_factory=list)
+    backbone_features: list[str] = field(default_factory=list)
+    backbone_prefixes: list[str] = field(default_factory=list)
+
+
+@dataclass
 class ModelingConfig:
     seed: int = 42
     folds: int = 3
@@ -164,6 +176,8 @@ class ModelingConfig:
     scale_pos_weight_cap: float = 10.0
     # Divisions to train in SAFE feature policy (drop adjacency-heavy/short-window families)
     safe_divisions: list[str] = field(default_factory=list)
+    # Stability controls for feature drops and objective smoothing
+    stability: StabilityConfig = field(default_factory=StabilityConfig)
 
 
 @dataclass
@@ -435,6 +449,32 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
 
     assets_als_cfg_raw = feat_cfg.get("assets_als")
     assets_als_cfg = assets_als_cfg_raw if isinstance(assets_als_cfg_raw, dict) else {}
+    stability_cfg_raw_obj = mdl_cfg.get("stability")
+    stability_cfg_raw = stability_cfg_raw_obj if isinstance(stability_cfg_raw_obj, dict) else {}
+    try:
+        cv_guard_raw = stability_cfg_raw.get("cv_guard_max")
+    except AttributeError:
+        cv_guard_raw = None
+    try:
+        cv_guard_max = float(cv_guard_raw) if cv_guard_raw is not None else None
+    except Exception:
+        cv_guard_max = None
+    stability_cfg = StabilityConfig(
+        coverage_floor=float(stability_cfg_raw.get("coverage_floor", 0.0) or 0.0),
+        min_positive_rate=float(stability_cfg_raw.get("min_positive_rate", 0.0) or 0.0),
+        min_positive_count=int(stability_cfg_raw.get("min_positive_count", 0) or 0),
+        penalty_lambda=float(stability_cfg_raw.get("penalty_lambda", 0.0) or 0.0),
+        cv_guard_max=cv_guard_max,
+        sparse_family_prefixes=[
+            str(s).strip() for s in (stability_cfg_raw.get("sparse_family_prefixes") or []) if str(s).strip()
+        ],
+        backbone_features=[
+            str(s).strip() for s in (stability_cfg_raw.get("backbone_features") or []) if str(s).strip()
+        ],
+        backbone_prefixes=[
+            str(s).strip() for s in (stability_cfg_raw.get("backbone_prefixes") or []) if str(s).strip()
+        ],
+    )
     cfg = Config(
         paths=_paths_from_dict(paths_dict),
         database=Database(
@@ -529,6 +569,7 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
             use_scale_pos_weight=bool(mdl_cfg.get("use_scale_pos_weight", True)),
             scale_pos_weight_cap=float(mdl_cfg.get("scale_pos_weight_cap", 10.0)),
             safe_divisions=list(mdl_cfg.get("safe_divisions", [])),
+            stability=stability_cfg,
         ),
         whitespace=WhitespaceConfig(
             weights=ws_weights,

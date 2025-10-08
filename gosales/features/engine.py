@@ -296,8 +296,10 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
             exclude_prospects_early = False
             include_prospects_train = False
             build_segments = ["warm","cold"]
-        if exclude_prospects_early and not include_prospects_train and eligible_ids:
-            customers_pd = customers_pd[customers_pd['customer_id'].isin(list(eligible_ids))].reset_index(drop=True)
+        # Preserve full customer roster for diagnostics and missingness flags. We still gate
+        # transactions/prediction data above to reduce compute when exclude_prospects_early is True.
+        # This ensures rows without transactions remain present with appropriate *_missing flags,
+        # while scoring can later filter segments as needed.
         customers = pl.from_pandas(customers_pd).with_columns(
             pl.col("customer_id").cast(pl.Utf8)
         )

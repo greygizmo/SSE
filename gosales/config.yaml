@@ -66,7 +66,7 @@ population:
   # (keeps only warm+cold customers in the roster during feature build)
   exclude_prospects_in_features: true
   # Which segments to include during feature-build: [warm], [cold], or [warm, cold]
-  build_segments: [warm]
+  build_segments: [warm, cold]
 labels:
   gp_min_threshold: 0.0
   denylist_skus_csv: gosales/data/lookup/label_denylist_skus.csv
@@ -160,6 +160,15 @@ modeling:
   scale_pos_weight_cap: 10.0
   # Adopt SAFE feature policy for specific divisions (drops adjacency-heavy/short-window families)
   safe_divisions: ["Solidworks"]
+  stability:
+    coverage_floor: 0.0
+    min_positive_rate: 0.0
+    min_positive_count: 0
+    penalty_lambda: 0.0
+    cv_guard_max: null
+    sparse_family_prefixes: []
+    backbone_features: []
+    backbone_prefixes: []
 
 whitespace:
   weights: [0.60, 0.20, 0.10, 0.10]   # [p_icp_pct, lift_norm, als_norm, EV_norm]; non-negative, auto-normalized

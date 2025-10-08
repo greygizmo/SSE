@@ -68,7 +68,7 @@ def test_collect_recent_alerts_reads_base_validation_file(tmp_path, monkeypatch)
     assert any(alert["message"] == "Base validation alert" for alert in alerts)
 
     score = collector._calculate_data_quality_score()
-    assert score > 99.0
+    assert 30.0 <= score <= 60.0
 
 
 def test_collect_recent_alerts_success(tmp_path, monkeypatch):
@@ -99,6 +99,8 @@ def test_collect_recent_alerts_success(tmp_path, monkeypatch):
             "component": "Pipeline",
         }
     ]
+    score = collector._calculate_data_quality_score()
+    assert score == pytest.approx(100.0)
 
 
 def test_collect_recent_alerts_validation_failure(tmp_path, monkeypatch):
@@ -126,6 +128,9 @@ def test_collect_recent_alerts_validation_failure(tmp_path, monkeypatch):
     assert any("status=fail" in msg for msg in error_messages)
     assert any("auc" in msg for msg in error_messages)
     assert not any("successfully" in a["message"] for a in alerts)
+
+    score = collector._calculate_data_quality_score()
+    assert score == 0.0
 
 
 def test_collect_performance_metrics_from_artifacts(monkeypatch, tmp_path):
@@ -167,3 +172,72 @@ def test_collect_performance_metrics_with_fallbacks(monkeypatch, tmp_path):
     assert metrics["fallbacks"]["processing_rate"]
     assert metrics["fallbacks"]["active_divisions"]
     assert metrics["fallbacks"]["total_customers"]
+
+
+def test_nested_validation_metrics_are_discovered(tmp_path, monkeypatch):
+    monkeypatch.setattr(dc_module, "OUTPUTS_DIR", tmp_path)
+    collector = MonitoringDataCollector()
+
+    nested_metrics = tmp_path / "validation" / "widgets" / "2024-06-30" / "metrics.json"
+    nested_metrics.parent.mkdir(parents=True, exist_ok=True)
+    nested_metrics.write_text(json.dumps({"timestamp": "2024-06-30"}), encoding="utf-8")
+
+    files = collector._find_validation_metric_files()
+    assert nested_metrics in files
+
+    score = collector._calculate_data_quality_score()
+    assert score == pytest.approx(55.0)
+
+
+def test_data_quality_score_no_metrics(tmp_path, monkeypatch):
+    monkeypatch.setattr(dc_module, "OUTPUTS_DIR", tmp_path)
+    collector = MonitoringDataCollector()
+    score = collector._calculate_data_quality_score()
+    assert score == pytest.approx(40.0)
+
+
+def test_data_lineage_from_run_context(tmp_path, monkeypatch):
+    run_manifest = {
+        "steps": [
+            {
+                "name": "features",
+                "success": True,
+                "records": 1000,
+                "duration_seconds": 20.1234,
+                "source": "feature_builder",
+            },
+            {
+                "name": "scoring",
+                "success": False,
+                "records_processed": 500,
+                "duration": "00:05",
+                "data_source": "scoring_engine",
+            },
+        ]
+    }
+    (tmp_path / "run_context_20240101.json").write_text(json.dumps(run_manifest), encoding="utf-8")
+    monkeypatch.setattr(dc_module, "OUTPUTS_DIR", tmp_path)
+
+    lineage = MonitoringDataCollector()._collect_data_lineage()
+
+    assert lineage == [
+        {
+            "step": "features",
+            "status": "success",
+            "records_processed": 1000,
+            "execution_time": 20.123,
+            "data_source": "feature_builder",
+        },
+        {
+            "step": "scoring",
+            "status": "failed",
+            "records_processed": 500,
+            "execution_time": "00:05",
+            "data_source": "scoring_engine",
+        },
+    ]
+
+
+def test_data_lineage_empty_when_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr(dc_module, "OUTPUTS_DIR", tmp_path)
+    assert MonitoringDataCollector()._collect_data_lineage() == []

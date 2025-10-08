@@ -829,14 +829,55 @@ def rank_whitespace(inputs: RankInputs, *, weights: Iterable[float] = (0.60, 0.2
         blend_txn /= total_blend
         blend_assets /= total_blend
 
+    # Baseline ALS score: blend transaction and assets ALS by configured weights.
     als_norm = txn_als_norm.mul(blend_txn)
     if assets_als_present:
         als_norm = als_norm.add(assets_norm.mul(blend_assets), fill_value=0.0)
     als_norm = als_norm.fillna(0.0)
+    txn_positive_mask = txn_signal_strength.fillna(0.0) > 0.0
+    assets_positive_mask = (
+        assets_signal_strength.fillna(0.0) > 0.0 if assets_signal_strength is not None else pd.Series(False, index=df.index)
+    )
+    if assets_als_present:
+        assets_only_mask = (~txn_positive_mask) & assets_positive_mask
+        if assets_only_mask.any():
+            # For assets-only rows, use assets-ALS similarity directly (no blending).
+            als_norm = als_norm.where(~assets_only_mask, assets_norm)
+
+    # For rows with transaction embeddings available, ensure ALS score is at least
+    # the assets-ALS similarity to keep both signals competitive.
+    try:
+        if assets_als_present and txn_positive_mask.any():
+            idx = txn_positive_mask[txn_positive_mask].index
+            als_norm.loc[idx] = np.maximum(
+                pd.to_numeric(als_norm.loc[idx], errors='coerce').fillna(0.0).to_numpy(),
+                pd.to_numeric(assets_norm.loc[idx], errors='coerce').fillna(0.0).to_numpy(),
+            )
+    except Exception:
+        pass
+    # Opportunistically fill any remaining zero-ALS rows with item2vec if present, regardless of
+    # coverage threshold. This only applies where both txn and assets are missing.
+    try:
+        i2v_present_any = any(c.startswith('i2v_f') for c in df.columns)
+    except Exception:
+        i2v_present_any = False
+    if i2v_present_any:
+        i2v_norm_any = _compute_item2vec_norm(df, owner_centroid=None)
+        zero_vals = pd.to_numeric(als_norm, errors='coerce').fillna(0.0) <= 0.0
+        no_txn = ~txn_positive_mask
+        no_assets = ~assets_positive_mask
+        fill_i2v_mask = zero_vals & no_txn & no_assets
+        if fill_i2v_mask.any():
+            als_norm.loc[fill_i2v_mask] = i2v_norm_any[fill_i2v_mask]
     df['als_norm'] = als_norm
+    # Fallback bounding occurs in low-coverage branch below; do not alter normal-case values.
+    # Preserve baseline ALS norms for rows with intrinsic transaction signal so fallbacks
+    # can be bounded against genuine embeddings.
+    baseline_als_norm = df['als_norm'].copy()
 
     combined_signal = txn_signal_strength.add(assets_signal_strength, fill_value=0.0)
     df['_als_signal_strength'] = combined_signal
+    zero_signal_mask = combined_signal.fillna(0.0) <= 0.0
 
     try:
         cov_txn = float((txn_signal_strength > 0).mean())
@@ -866,7 +907,7 @@ def rank_whitespace(inputs: RankInputs, *, weights: Iterable[float] = (0.60, 0.2
         coverage_meta["affinity_source_column"] = lift_src
 
     if cov_combined < als_thr:
-        mask_zero_als = combined_signal.fillna(0.0) <= 0.0
+        mask_zero_als = zero_signal_mask
         if assets_als_present and mask_zero_als.any():
             df.loc[mask_zero_als, 'als_norm'] = assets_norm[mask_zero_als]
             combined_signal.loc[mask_zero_als] = combined_signal.loc[mask_zero_als] + assets_signal_strength.loc[mask_zero_als]
@@ -887,6 +928,20 @@ def rank_whitespace(inputs: RankInputs, *, weights: Iterable[float] = (0.60, 0.2
             pos_vals = pd.to_numeric(df.loc[pos_mask, 'als_norm'], errors='coerce').fillna(0.0)
             if pos_vals.max() <= 0:
                 df.loc[pos_mask, 'als_norm'] = 1.0
+        # Bound fallback ALS scores by genuine transaction-driven embeddings to prevent
+        # zero-signal accounts from outranking real ALS coverage.
+        # Bound all non-transaction ALS rows (including assets-only and i2v-only) to be below
+        # the strongest transaction-driven embedding when applying heavy fallback logic.
+        fallback_rows = ~txn_positive_mask
+        baseline_txn_vals = baseline_als_norm.loc[txn_positive_mask]
+        if fallback_rows.any() and not baseline_txn_vals.empty:
+            fallback_cap = float(baseline_txn_vals.max())
+            if math.isfinite(fallback_cap) and fallback_cap > 0:
+                cap_value = max(0.0, fallback_cap - 1e-6)
+                df.loc[fallback_rows, 'als_norm'] = df.loc[fallback_rows, 'als_norm'].clip(
+                    lower=0.0,
+                    upper=cap_value if cap_value > 0 else fallback_cap,
+                )
         df['_als_signal_strength'] = combined_signal
     # EV proxy with cap and normalization
     try:

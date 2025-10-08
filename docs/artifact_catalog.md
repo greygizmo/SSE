@@ -46,7 +46,9 @@ This catalog enumerates every artifact the GoSales Engine produces across the pi
 | `train_scores_<division>_<cutoff>.parquet` | `gosales/outputs/models/<division>/<cutoff>/` | Training-set score distribution snapshots. | Feeds drift analysis alongside holdout monitoring.【F:README.md†L37-L41】 |
 | `train_feature_sample_<division>_<cutoff>.parquet` | `gosales/outputs/models/<division>/<cutoff>/` | Sample of features used to train the model. | Baseline for feature drift comparisons in forward validation.【F:README.md†L37-L41】 |
 
-## Phase 4 — Whitespace Ranking / Next-Best-Action
+## Phase 4 - Whitespace Ranking / Next-Best-Action
+
+Note: See `docs/whitespace_als_semantics.md` for updated ALS blending and fallback behavior used during ranking.
 
 | Artifact | Location Pattern | Purpose | Importance |
 | --- | --- | --- | --- |
@@ -145,3 +147,8 @@ Calibration behavior is now adaptive:
 - CV folds are set to `min(modeling.folds, #pos, #neg)` for the training fold of each cutoff.
 - When `n_splits < 2`, calibration is skipped and uncalibrated probabilities are used. The diagnostics row records `calibration='none'` and a reason such as `insufficient_per_class` or `single_class_train`.
 - Isotonic may be downgraded to Platt when positives are very sparse, controlled by `modeling.sparse_isotonic_threshold_pos`.
+
+---
+
+See also
+- Whitespace ALS semantics and fallbacks: docs/whitespace_als_semantics.md

@@ -9,6 +9,7 @@ from sklearn.dummy import DummyClassifier
 from sklearn.tree import DecisionTreeClassifier
 import joblib
 
+from gosales.pipeline import score_customers as score_module
 from gosales.pipeline.score_customers import score_customers_for_division
 from gosales.models.shap_utils import compute_shap_reasons
 
@@ -89,3 +90,39 @@ def test_compute_shap_reasons_returns_non_empty_columns_when_shap():
     assert list(reasons.columns) == ["reason_1", "reason_2"]
     assert not reasons.empty
     assert all(reasons[col].notna().any() for col in reasons.columns)
+
+
+def test_dim_customer_cache_isolation_across_engines(tmp_path):
+    score_module._DIM_CUSTOMER_CACHE.clear()
+
+    db1 = tmp_path / "tenant_a.sqlite"
+    db2 = tmp_path / "tenant_b.sqlite"
+    engine_a = create_engine(f"sqlite:///{db1}")
+    engine_b = create_engine(f"sqlite:///{db2}")
+
+    try:
+        pd.DataFrame([{"customer_id": 1, "customer_name": "Alpha"}]).to_sql(
+            "dim_customer", engine_a, index=False, if_exists="replace"
+        )
+        pd.DataFrame([{"customer_id": 2, "customer_name": "Beta"}]).to_sql(
+            "dim_customer", engine_b, index=False, if_exists="replace"
+        )
+
+        df_a = score_module._get_dim_customer(engine_a)
+        df_b = score_module._get_dim_customer(engine_b)
+
+        assert df_a["customer_name"].tolist() == ["Alpha"]
+        assert df_b["customer_name"].tolist() == ["Beta"]
+
+        # Cached responses must remain stable even if a caller mutates the returned frame.
+        df_a.loc[:, "customer_name"] = ["Corrupted"]
+        df_b.loc[:, "customer_name"] = ["Corrupted"]
+
+        df_a_cached = score_module._get_dim_customer(engine_a)
+        df_b_cached = score_module._get_dim_customer(engine_b)
+
+        assert df_a_cached["customer_name"].tolist() == ["Alpha"]
+        assert df_b_cached["customer_name"].tolist() == ["Beta"]
+    finally:
+        engine_a.dispose()
+        engine_b.dispose()
