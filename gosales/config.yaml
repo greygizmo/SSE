@@ -4,7 +4,7 @@ paths:
   curated: gosales/data/curated
   outputs: gosales/outputs
 database:
-  engine: azure          # sqlite | duckdb | azure
+  engine: azure          # sqlite | azure | auto
   sqlite_path: gosales/gosales.db
   # If true, require external DB; fail if AZSQL_* missing/unhealthy (no SQLite fallback)
   strict_db: false

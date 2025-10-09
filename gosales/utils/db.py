@@ -13,6 +13,7 @@ load_dotenv()
 
 logger = get_logger(__name__)
 
+
 def _build_pyodbc_conn(server: str, database: str, username: str, password: str, driver: str) -> str:
     params = (
         f"DRIVER={{{{drv}}}};SERVER={server};DATABASE={database};UID={username};PWD={password};"  # placeholders
@@ -22,6 +23,7 @@ def _build_pyodbc_conn(server: str, database: str, username: str, password: str,
     params += "Encrypt=yes;TrustServerCertificate=yes;"
     odbc_connect = urllib.parse.quote_plus(params)
     return f"mssql+pyodbc:///?odbc_connect={odbc_connect}"
+
 
 def _build_url_style_conn(server: str, database: str, username: str, password: str, driver: str) -> str:
     # Normalize server (drop tcp: prefix if present)
@@ -35,6 +37,7 @@ def _build_url_style_conn(server: str, database: str, username: str, password: s
         f"mssql+pyodbc://{user_enc}:{pwd_enc}@{srv}/{database}?driver={drv_enc}&Encrypt=yes&TrustServerCertificate=yes"
     )
 
+
 def get_db_connection():
     """Return a SQLAlchemy engine based on configuration and environment.
 
@@ -42,8 +45,7 @@ def get_db_connection():
       credentials are present, connect to Azure SQL via ``pyodbc``.
     * When the configured engine is ``"sqlite"`` or Azure credentials are missing,
       build a SQLite engine using the configured ``sqlite_path``.
-    * When the configured engine is ``"duckdb"``, connect using the DuckDB driver and
-      configured path (``database.duckdb_path`` when available, otherwise ``sqlite_path``).
+    * Unsupported engines fall back to SQLite with a warning to preserve determinism.
     """
 
     server = os.getenv("AZSQL_SERVER")
@@ -55,7 +57,6 @@ def get_db_connection():
     strict_db = False
     sqlite_path = ROOT_DIR.parent / "gosales.db"
     engine_choice = "sqlite"
-    duckdb_path = None
 
     try:
         cfg = load_config()
@@ -64,9 +65,6 @@ def get_db_connection():
             engine_choice = str(getattr(db_cfg, "engine", engine_choice) or engine_choice).lower()
             strict_db = bool(getattr(db_cfg, "strict_db", strict_db))
             sqlite_path = Path(getattr(db_cfg, "sqlite_path", sqlite_path))
-            duckdb_path = getattr(db_cfg, "duckdb_path", None)
-            if duckdb_path:
-                duckdb_path = Path(duckdb_path)
     except Exception as exc:
         logger.debug("Unable to load config; defaulting DB engine handling. Error: %s", exc)
 
@@ -76,11 +74,6 @@ def get_db_connection():
         resolved = Path(path)
         logger.info("Using SQLite database at: %s", resolved)
         return create_engine(f"sqlite:///{resolved}")
-
-    def _connect_duckdb(path: Path):
-        resolved = Path(path)
-        logger.info("Using DuckDB database at: %s", resolved)
-        return create_engine(f"duckdb:///{resolved}")
 
     def _connect_azure() -> "Engine":
         logger.info("Connecting to Azure SQL database: %s/%s", server, database)
@@ -128,8 +121,11 @@ def get_db_connection():
         return _connect_sqlite(sqlite_path)
 
     if engine_choice == "duckdb":
-        target = duckdb_path or Path(sqlite_path).with_suffix(".duckdb")
-        return _connect_duckdb(target)
+        logger.warning(
+            "DuckDB support has been removed; falling back to SQLite at %s",
+            sqlite_path,
+        )
+        return _connect_sqlite(sqlite_path)
 
     logger.warning(
         "Unknown database engine '%s'; defaulting to SQLite at %s",

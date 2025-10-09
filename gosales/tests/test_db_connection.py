@@ -63,12 +63,10 @@ def test_get_db_connection_uses_custom_sqlite_path(monkeypatch):
     assert captured["url"] == f"sqlite:///{custom_path}"
 
 
-def test_get_db_connection_duckdb(monkeypatch):
-    duckdb_path = Path("/tmp/gosales/test.duckdb")
+def test_get_db_connection_warns_and_falls_back_when_duckdb_requested(monkeypatch, caplog):
+    custom_path = Path("/tmp/gosales/test.sqlite")
     cfg = types.SimpleNamespace(
-        database=types.SimpleNamespace(
-            engine="duckdb", sqlite_path=ROOT_DIR / "gosales.db", duckdb_path=duckdb_path, strict_db=False
-        )
+        database=types.SimpleNamespace(engine="duckdb", sqlite_path=custom_path, strict_db=False)
     )
     monkeypatch.setattr(dbmod, "load_config", lambda: cfg)
 
@@ -80,7 +78,9 @@ def test_get_db_connection_duckdb(monkeypatch):
 
     monkeypatch.setattr(dbmod, "create_engine", fake_create_engine)
 
+    caplog.set_level("WARNING")
     engine = dbmod.get_db_connection()
 
     assert isinstance(engine, DummyEngine)
-    assert captured["url"] == f"duckdb:///{duckdb_path}"
+    assert captured["url"] == f"sqlite:///{custom_path}"
+    assert any("DuckDB support has been removed" in msg for msg in caplog.messages)

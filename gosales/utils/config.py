@@ -21,7 +21,7 @@ class Paths:
 
 @dataclass
 class Database:
-    engine: str = "sqlite"  # sqlite | duckdb | azure
+    engine: str = "sqlite"  # sqlite | azure | auto
     sqlite_path: Path = ROOT_DIR.parent / "gosales.db"
     curated_target: str = "db"  # 'db' | 'sqlite'
     curated_sqlite_path: Path = ROOT_DIR.parent / "gosales_curated.db"
