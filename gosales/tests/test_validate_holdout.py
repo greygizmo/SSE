@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import os
 from types import SimpleNamespace
 
 import pandas as pd
@@ -8,10 +9,63 @@ from gosales.pipeline import validate_holdout
 from gosales.validation.holdout_data import HoldoutData
 
 
-def test_validate_against_holdout_deprecated():
+def test_validate_against_holdout_skips_without_scores(tmp_path, monkeypatch):
+    monkeypatch.setattr(validate_holdout, "OUTPUTS_DIR", tmp_path)
+
     result = validate_holdout.validate_against_holdout()
-    assert result["status"] == "deprecated"
-    assert "gosales.validation.forward" in result["message"]
+
+    assert result["status"] == "skipped"
+    assert "icp_scores" in result["message"]
+
+
+def test_validate_against_holdout_uses_primary_scores(tmp_path, monkeypatch):
+    monkeypatch.setattr(validate_holdout, "OUTPUTS_DIR", tmp_path)
+    scores_path = tmp_path / "icp_scores.csv"
+    scores_path.write_text("division_name,icp_score\nA,0.5\n", encoding="utf-8")
+
+    captured = {}
+
+    def _fake_validate_holdout(icp_scores_csv: str, **kwargs):
+        captured["path"] = icp_scores_csv
+        out = tmp_path / "validation_metrics.json"
+        out.write_text(json.dumps({"status": "ok"}), encoding="utf-8")
+        return out
+
+    monkeypatch.setattr(validate_holdout, "validate_holdout", _fake_validate_holdout)
+
+    result = validate_holdout.validate_against_holdout(strict=False)
+
+    assert result["status"] == "ok"
+    assert Path(captured["path"]) == scores_path
+    assert Path(result["metrics_path"]).name == "validation_metrics.json"
+
+
+def test_validate_against_holdout_falls_back_to_timestamped_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(validate_holdout, "OUTPUTS_DIR", tmp_path)
+    fallback_old = tmp_path / "icp_scores_20230101.csv"
+    fallback_new = tmp_path / "icp_scores_20240201.csv"
+    fallback_old.write_text("division_name,icp_score\nA,0.1\n", encoding="utf-8")
+    fallback_new.write_text("division_name,icp_score\nB,0.9\n", encoding="utf-8")
+    os.utime(
+        fallback_old, (fallback_old.stat().st_atime, fallback_old.stat().st_mtime - 100)
+    )
+    os.utime(fallback_new, None)
+
+    captured = {}
+
+    def _fake_validate_holdout(icp_scores_csv: str, **kwargs):
+        captured["path"] = icp_scores_csv
+        out = tmp_path / "validation_metrics.json"
+        out.write_text(json.dumps({"status": "ok"}), encoding="utf-8")
+        return out
+
+    monkeypatch.setattr(validate_holdout, "validate_holdout", _fake_validate_holdout)
+
+    result = validate_holdout.validate_against_holdout()
+
+    assert result["status"] == "ok"
+    assert Path(captured["path"]) == fallback_new
+    assert result["scores_path"] == str(fallback_new)
 
 
 def test_validate_holdout_writes_metrics(tmp_path, monkeypatch):

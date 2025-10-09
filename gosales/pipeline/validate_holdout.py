@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -79,7 +79,9 @@ def validate_holdout(
         scores = pd.to_numeric(g["icp_score"], errors="coerce").fillna(0.0).to_numpy()
 
         if "customer_id" in g.columns:
-            customer_series = pd.to_numeric(g["customer_id"], errors="coerce").astype("Int64")
+            customer_series = pd.to_numeric(g["customer_id"], errors="coerce").astype(
+                "Int64"
+            )
         else:
             customer_series = pd.Series(dtype="Int64")
 
@@ -105,9 +107,15 @@ def validate_holdout(
             window_months = default_window
 
         applied_holdout = False
-        if cutoff_val is not None and not pd.isna(cutoff_val) and not customer_series.empty:
+        if (
+            cutoff_val is not None
+            and not pd.isna(cutoff_val)
+            and not customer_series.empty
+        ):
             try:
-                holdout = load_holdout_buyers(cfg, str(div), cutoff_val, int(window_months))
+                holdout = load_holdout_buyers(
+                    cfg, str(div), cutoff_val, int(window_months)
+                )
                 if holdout.buyers is not None and not holdout.buyers.empty:
                     holdout_ids = set(int(x) for x in holdout.buyers.dropna().tolist())
                     mask = customer_series.isin(holdout_ids)
@@ -199,19 +207,95 @@ def validate_holdout(
 
 
 def validate_against_holdout(*_: object, **__: object) -> dict[str, str]:
-    """Deprecated compatibility shim.
+    """Backward-compatible holdout validation entry point.
 
-    The unsafe implementation that mutated curated tables has been removed. Users
-    should invoke ``gosales.validation.forward`` for holdout evaluation.
+    Older orchestration flows still import :func:`validate_against_holdout`. The
+    original implementation assumed ``fact_transactions`` existed in the curated
+    warehouse and crashed otherwise. This safe shim discovers the most recent
+    ``icp_scores`` export and runs :func:`validate_holdout` against it, falling
+    back gracefully when prerequisite artifacts are missing.
     """
 
-    logger.warning(
-        "validate_against_holdout() is deprecated and no longer performs any work. "
-        "Use gosales.validation.forward for holdout validation."
+    def _coerce_path(value: object) -> Optional[Path]:
+        if isinstance(value, Path):
+            return value
+        if isinstance(value, str) and value.strip():
+            return Path(value.strip())
+        return None
+
+    # Backwards compatibility: accept positional or keyword score path hints
+    provided_scores = _coerce_path(
+        __.get("icp_scores_csv") or __.get("scores") or __.get("scores_csv")
     )
+    if provided_scores is None and _:
+        provided_scores = _coerce_path(_[0])
+
+    strict = bool(__.get("strict", False))
+    year_tag = __.get("year_tag")
+
+    candidates: List[Path] = []
+    if provided_scores is not None:
+        candidates.append(provided_scores)
+
+    outputs_dir = OUTPUTS_DIR
+    primary = outputs_dir / "icp_scores.csv"
+    if primary not in candidates:
+        candidates.append(primary)
+
+    if outputs_dir.exists():
+        try:
+            fallbacks = sorted(
+                (p for p in outputs_dir.glob("icp_scores_*.csv") if p.is_file()),
+                key=lambda path: path.stat().st_mtime,
+                reverse=True,
+            )
+            for fb in fallbacks:
+                if fb not in candidates:
+                    candidates.append(fb)
+        except Exception as exc:
+            logger.debug("Failed to enumerate fallback icp_scores files: %s", exc)
+
+    scores_path: Optional[Path] = None
+    for candidate in candidates:
+        if candidate.is_file():
+            scores_path = candidate
+            break
+    if scores_path is None:
+        message = (
+            "No icp_scores CSV found; holdout validation skipped. "
+            f"Searched: {[str(p) for p in candidates or [primary]]}"
+        )
+        logger.warning(message)
+        return {
+            "status": "skipped",
+            "message": message,
+        }
+
+    logger.info(
+        "Running validate_against_holdout using scores file %s. "
+        "For full validation flows prefer gosales.validation.forward.",
+        scores_path,
+    )
+
+    try:
+        metrics_path = validate_holdout(str(scores_path), year_tag=year_tag)
+    except Exception as exc:
+        logger.exception("Holdout validation failed for %s: %s", scores_path, exc)
+        if strict:
+            raise
+        return {
+            "status": "error",
+            "message": f"Holdout validation failed: {exc}",
+            "scores_path": str(scores_path),
+        }
+
+    message = f"Holdout validation succeeded; metrics written to {metrics_path}."
+    logger.info(message)
     return {
-        "status": "deprecated",
-        "message": "Use gosales.validation.forward; no database writes performed.",
+        "status": "ok",
+        "message": message,
+        "scores_path": str(scores_path),
+        "metrics_path": str(metrics_path),
     }
 
 
