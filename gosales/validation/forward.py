@@ -38,6 +38,7 @@ from gosales.pipeline.rank_whitespace import _percentile_normalize
 from gosales.validation.utils import bootstrap_ci, psi, ks_statistic
 from gosales.ops.run import run_context
 from gosales.etl.sku_map import get_sku_mapping
+from gosales.utils.db import get_db_connection, validate_connection
 
 
 logger = get_logger(__name__)
@@ -143,12 +144,13 @@ def _calibration_mae(bins_df: pd.DataFrame) -> float:
 @click.option('--division', required=True)
 @click.option('--cutoff', required=True)
 @click.option('--window-months', default=6, type=int)
+@click.option('--holdout-source', type=click.Choice(['auto','db','csv']), default=None, help='Holdout label source; default from config (auto = DB-first)')
 @click.option('--capacity-grid', default='5,10,20')
 @click.option('--accounts-per-rep-grid', default='10,25')
 @click.option('--bootstrap', default=1000, type=int)
 @click.option('--config', default=str((Path(__file__).parents[1] / 'config.yaml').resolve()))
 @click.option('--dry-run/--no-dry-run', default=False, help='Skip compute; only verify inputs and planned outputs')
-def main(division: str, cutoff: str, window_months: int, capacity_grid: str, accounts_per_rep_grid: str, bootstrap: int, config: str, dry_run: bool) -> None:
+def main(division: str, cutoff: str, window_months: int, holdout_source: str | None, capacity_grid: str, accounts_per_rep_grid: str, bootstrap: int, config: str, dry_run: bool) -> None:
     cfg = load_config(config)
     out_dir = OUTPUTS_DIR / 'validation' / division.lower() / cutoff
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -168,57 +170,109 @@ def main(division: str, cutoff: str, window_months: int, capacity_grid: str, acc
             return
 
         vf = _build_validation_frame(division, cutoff, window_months, cfg)
-        # Join holdout labels from holdout CSVs if available (data/holdout/*). Fallback to training labels in feature parquet
+        # Join holdout labels from DB (preferred) or CSVs based on config/CLI
         try:
             from gosales.utils.paths import DATA_DIR
             cutoff_dt = pd.to_datetime(cutoff)
             window_end = cutoff_dt + pd.DateOffset(months=window_months)
-            holdout_dir = (DATA_DIR / 'holdout')
             buyers = None
             holdout_gp_map = None
-            if holdout_dir.exists():
-                # Load and concatenate CSVs in holdout directory
+            used_source = None
+            try:
+                src_pref = (holdout_source or getattr(getattr(cfg, 'validation', object()), 'holdout_source', 'auto')).strip().lower()
+            except Exception:
+                src_pref = 'auto'
+
+            def _fetch_from_db() -> tuple[pd.Series | None, pd.DataFrame | None]:
+                try:
+                    eng = get_db_connection()
+                except Exception:
+                    return None, None
+                if not validate_connection(eng):
+                    return None, None
+                try:
+                    obj = getattr(getattr(cfg, 'database', object()), 'source_tables', {}).get('sales_log', '').strip()
+                except Exception:
+                    obj = ''
+                if not obj:
+                    obj = 'dbo.saleslog'
+                try:
+                    sc = getattr(getattr(cfg, 'etl', object()), 'source_columns', {}) or {}
+                except Exception:
+                    sc = {}
+                cust_col = sc.get('customer_id', 'CustomerId')
+                date_col = sc.get('order_date', 'Rec_Date')
+                div_col = sc.get('division', 'Division')
+                sql = (
+                    f"SELECT {cust_col} AS customer_id, {date_col} AS rec_date, {div_col} AS division "
+                    f"FROM {obj} "
+                    f"WHERE {date_col} > :cutoff AND {date_col} <= :window_end "
+                    f"AND LOWER(LTRIM(RTRIM(CAST({div_col} AS NVARCHAR(255))))) = :div_lower"
+                )
+                try:
+                    ho = pd.read_sql_query(sql, eng, params={'cutoff': cutoff_dt, 'window_end': window_end, 'div_lower': division.lower()})
+                    if ho.empty:
+                        return None, None
+                    ho['customer_id'] = pd.to_numeric(ho['customer_id'], errors='coerce').astype('Int64')
+                    return ho['customer_id'].dropna().astype('Int64').unique(), None
+                except Exception:
+                    return None, None
+
+            def _fetch_from_csv() -> tuple[pd.Series | None, pd.DataFrame | None]:
+                holdout_dir = (DATA_DIR / 'holdout')
+                if not holdout_dir.exists():
+                    return None, None
                 parts = []
                 for pth in holdout_dir.glob('*.csv'):
                     try:
-                        # Read all columns as strings to avoid mixed-type inference warnings;
-                        # numeric coercion is applied explicitly downstream where needed
                         parts.append(pd.read_csv(pth, dtype=str, low_memory=False))
                     except Exception:
                         continue
-                if parts:
-                    ho = pd.concat(parts, ignore_index=True)
-                    # Parse dates and filter by division and window
-                    if 'Rec Date' in ho.columns:
-                        ho['Rec Date'] = pd.to_datetime(ho['Rec Date'], errors='coerce')
-                        mask_window = (ho['Rec Date'] > cutoff_dt) & (ho['Rec Date'] <= window_end)
-                    else:
-                        mask_window = pd.Series(True, index=ho.index)
-                    div_col = 'Division' if 'Division' in ho.columns else None
-                    if div_col:
-                        mask_div = ho[div_col].astype(str).str.strip().str.casefold() == division.lower()
-                    else:
-                        mask_div = pd.Series(True, index=ho.index)
-                    cust_col = 'CustomerId' if 'CustomerId' in ho.columns else 'customer_id'
-                    # If entire file was read as strings, coerce to numeric safely
-                    buyers = pd.to_numeric(ho.loc[mask_window & mask_div, cust_col], errors='coerce').dropna().astype('Int64').unique()
-    
-                    # Compute realized GP for target division using SKU mapping (sum of division GP columns)
-                    try:
-                        mapping = get_sku_mapping()
-                        div_cols = [gp for gp, meta in mapping.items() if meta.get('division', '').strip().lower() == division.lower()]
-                        # Some datasets have missing GP columns; keep existing ones only
-                        div_cols = [c for c in div_cols if c in ho.columns]
-                        if div_cols:
-                            gp_df = ho.loc[mask_window, [cust_col] + div_cols].copy()
-                            # Coerce GP cols to numeric after reading as strings
-                            for c in div_cols:
-                                gp_df[c] = pd.to_numeric(gp_df[c], errors='coerce').fillna(0.0)
-                            gp_df['holdout_gp'] = gp_df[div_cols].sum(axis=1)
-                            holdout_gp_map = gp_df.groupby(cust_col)['holdout_gp'].sum().reset_index()
-                            holdout_gp_map[cust_col] = pd.to_numeric(holdout_gp_map[cust_col], errors='coerce').astype('Int64')
-                    except Exception:
-                        holdout_gp_map = None
+                if not parts:
+                    return None, None
+                ho = pd.concat(parts, ignore_index=True)
+                if 'Rec Date' in ho.columns:
+                    ho['Rec Date'] = pd.to_datetime(ho['Rec Date'], errors='coerce')
+                    mask_window = (ho['Rec Date'] > cutoff_dt) & (ho['Rec Date'] <= window_end)
+                else:
+                    mask_window = pd.Series(True, index=ho.index)
+                div_col = 'Division' if 'Division' in ho.columns else None
+                if div_col:
+                    mask_div = ho[div_col].astype(str).str.strip().str.casefold() == division.lower()
+                else:
+                    mask_div = pd.Series(True, index=ho.index)
+                cust_col = 'CustomerId' if 'CustomerId' in ho.columns else 'customer_id'
+                buyers_s = pd.to_numeric(ho.loc[mask_window & mask_div, cust_col], errors='coerce').dropna().astype('Int64').unique()
+                hold_gp_map = None
+                try:
+                    mapping = get_sku_mapping()
+                    div_cols = [gp for gp, meta in mapping.items() if meta.get('division', '').strip().lower() == division.lower()]
+                    div_cols = [c for c in div_cols if c in ho.columns]
+                    if div_cols:
+                        gp_df = ho.loc[mask_window, [cust_col] + div_cols].copy()
+                        for c in div_cols:
+                            gp_df[c] = pd.to_numeric(gp_df[c], errors='coerce').fillna(0.0)
+                        gp_df['holdout_gp'] = gp_df[div_cols].sum(axis=1)
+                        hold_gp_map = gp_df.groupby(cust_col)['holdout_gp'].sum().reset_index()
+                        hold_gp_map[cust_col] = pd.to_numeric(hold_gp_map[cust_col], errors='coerce').astype('Int64')
+                except Exception:
+                    hold_gp_map = None
+                return buyers_s, hold_gp_map
+
+            # DB-first when auto/db
+            if src_pref in {'auto','db'}:
+                b_s, gp_map = _fetch_from_db()
+                if b_s is not None and len(b_s) > 0:
+                    buyers, holdout_gp_map, used_source = b_s, gp_map, 'db'
+                elif src_pref == 'db':
+                    b_s, gp_map = _fetch_from_csv()
+                    if b_s is not None and len(b_s) > 0:
+                        buyers, holdout_gp_map, used_source = b_s, gp_map, 'csv'
+            # CSV when requested or DB failed in auto
+            if buyers is None and src_pref in {'auto','csv'}:
+                b_s, gp_map = _fetch_from_csv()
+                if b_s is not None and len(b_s) > 0:
+                    buyers, holdout_gp_map, used_source = b_s, gp_map, 'csv'
             if buyers is not None and len(buyers) > 0:
                 labels_df = pd.DataFrame({'customer_id': buyers, 'holdout_bought': 1})
                 vf['customer_id'] = pd.to_numeric(vf['customer_id'], errors='coerce').astype('Int64')
@@ -230,8 +284,10 @@ def main(division: str, cutoff: str, window_months: int, capacity_grid: str, acc
                 vf.rename(columns={'holdout_bought': 'bought_in_division'}, inplace=True)
                 # Join realized GP if computed
                 if holdout_gp_map is not None:
-                    vf = vf.merge(holdout_gp_map.rename(columns={cust_col: 'customer_id'}), on='customer_id', how='left')
-                    vf['holdout_gp'] = vf['holdout_gp'].fillna(0.0)
+                    ccol = 'CustomerId' if 'CustomerId' in holdout_gp_map.columns else ('customer_id' if 'customer_id' in holdout_gp_map.columns else None)
+                    if ccol:
+                        vf = vf.merge(holdout_gp_map.rename(columns={ccol: 'customer_id'}), on='customer_id', how='left')
+                        vf['holdout_gp'] = vf['holdout_gp'].fillna(0.0)
         except Exception:
             pass
     
@@ -481,6 +537,11 @@ def main(division: str, cutoff: str, window_months: int, capacity_grid: str, acc
                 'cal_mae': cal_mae,
             },
         }
+        try:
+            if 'used_source' in locals() and used_source:
+                metrics['holdout_source'] = used_source
+        except Exception:
+            pass
         # Per-feature PSI highlights (train snapshot vs holdout) for metrics.json
         drift_highlights = {}
         try:

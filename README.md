@@ -42,6 +42,7 @@ A division-focused Ideal Customer Profile (ICP) & Whitespace engine. The pipelin
 
 - **Phase 5 — Forward Validation / Holdout**
   - CLI: `python -m gosales.validation.forward --division Solidworks --cutoff 2024-12-31 --window-months 6 --capacity-grid 5,10,20 --accounts-per-rep-grid 10,25`
+  - Holdout labels source: DB-first when `validation.holdout_source: auto` (or `--holdout-source db|auto`), filtered to `(cutoff, cutoff+window]` for the target division; falls back to `gosales/data/holdout/*.csv` when DB is unavailable.
   - Artifacts per division/cutoff in `gosales/outputs/validation/<division>/<cutoff>/`: `validation_frame.parquet`, `gains.csv`, `calibration.csv`, `topk_scenarios*.csv`, `segment_performance.csv`, `metrics.json`, `drift.json`
   - Phase 3 emits `train_scores_*` and `train_feature_sample_*` to support drift
 
@@ -129,7 +130,7 @@ You may still see warnings from dependencies in CI:
 
 - Class imbalance is handled via class weights (LR) and `scale_pos_weight` (LightGBM).
 - Probability calibration curves are exported to `gosales/outputs/calibration_<division>.csv`.
-- Holdout labels for 2025 are derived directly from `gosales/data/holdout/Sales Log 2025 YTD.csv` using `Division == 'Solidworks'` and dates in Jan–Jun 2025.
+- Holdout labels are derived from CSVs under `gosales/data/holdout/`, filtered to the window `(cutoff, cutoff+window]` for the target division. No curated DB writes are performed.
 
 #### Warning handling (pandas/sklearn)
 - Pandas groupby: we explicitly set `observed=False` on groupby operations used to build calibration and gains tables to avoid version‑dependent FutureWarnings

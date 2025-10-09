@@ -216,6 +216,8 @@ validation:
   segment_columns: [industry, industry_sub, region, territory]
   ks_threshold: 0.15
   psi_threshold: 0.25
+  # Holdout label source: auto (prefer DB), db, or csv
+  holdout_source: auto
   # Shift-14 Leakage Gauntlet thresholds
   shift14_epsilon_auc: 0.01
   shift14_epsilon_lift10: 0.25

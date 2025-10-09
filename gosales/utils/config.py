@@ -243,6 +243,10 @@ class ValidationConfig:
     gauntlet_purge_days: int = 30
     # Gauntlet-only: start labels at cutoff+buffer_days (horizon buffer)
     gauntlet_label_buffer_days: int = 0
+    # Holdout label source: 'auto' (prefer DB), 'db', or 'csv'
+    holdout_source: str = "auto"
+    # Optional explicit DB object to read holdout from; defaults to database.source_tables.sales_log
+    holdout_db_object: Optional[str] = None
 
 
 @dataclass
@@ -628,6 +632,8 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
             gauntlet_mask_tail_days=int(val_cfg.get("gauntlet_mask_tail_days", 14)),
             gauntlet_purge_days=int(val_cfg.get("gauntlet_purge_days", 30)),
             gauntlet_label_buffer_days=int(val_cfg.get("gauntlet_label_buffer_days", 0)),
+            holdout_source=str(val_cfg.get("holdout_source", "auto")),
+            holdout_db_object=(str(val_cfg.get("holdout_db_object")).strip() if val_cfg.get("holdout_db_object") else None),
         ),
     )
 
