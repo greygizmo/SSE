@@ -31,6 +31,12 @@ run:
   cutoff_date: "2024-12-31"
   prediction_window_months: 6
   lookback_years: 3
+  # Optional explicit training cutoffs; when non-empty this overrides automatic generation.
+  training_cutoffs: []
+  # When `training_cutoffs` is empty, derive historical cutoffs stepping backwards by this many months.
+  training_frequency_months: 6
+  # Number of cutoffs to train (including the primary cutoff) when auto-generating.
+  training_cutoff_count: 4
 etl:
   coerce_dates_tz: "UTC"
   currency: "USD"

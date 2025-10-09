@@ -24,6 +24,7 @@ A division-focused Ideal Customer Profile (ICP) & Whitespace engine. The pipelin
 - **Phase 3 — Modeling**
   - Config-driven modeling grids and seeds
   - Training CLI for LR (elastic-net) and LGBM across multiple cutoffs, with calibration (Platt/Isotonic) and selection by mean lift@10 (tie-breaker Brier)
+  - Training cutoffs resolve from configuration (`run.training_cutoffs` or auto-generated via `training_frequency_months`/`training_cutoff_count`) and can be overridden at runtime with `python -m gosales.pipeline.score_all --training-cutoffs 2024-06-30,2024-12-31`
   - LR now trains via a Pipeline: `StandardScaler(with_mean=False)` → `LogisticRegression`; calibration is applied to the entire pipeline; coefficient export unwraps the calibrated pipeline
   - LightGBM remains scale-invariant (no scaler in front)
   - Metrics: AUC, PR-AUC, Brier, lift@{5,10,20}%, revenue-weighted lift@K, calibration MAE

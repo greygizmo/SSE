@@ -9,6 +9,8 @@ our production DAG.
 from pathlib import Path
 import os
 import argparse
+from datetime import datetime
+from typing import Optional, Sequence, Iterable
 
 from gosales.utils.db import get_db_connection, validate_connection
 from gosales.etl.load_csv import load_csv_to_db
@@ -27,11 +29,18 @@ from gosales.ops.run import run_context
 from gosales.utils.config import load_config
 from gosales.utils.normalize import normalize_model_key
 from shutil import rmtree
+from dateutil.relativedelta import relativedelta
 
 logger = get_logger(__name__)
 
 
 _ACTIVE_MODEL_ALIASES: tuple[str, ...] = ("", "_cold")
+_DEFAULT_TRAINING_CUTOFFS: tuple[str, ...] = (
+    "2023-03-31",
+    "2023-09-30",
+    "2024-03-31",
+    "2024-06-30",
+)
 
 
 def _segment_arg_to_list(segment: str | None) -> list[str] | None:
@@ -127,6 +136,86 @@ def _prune_legacy_model_dirs(targets, models_dir, log=logger):
             log.warning(f"Failed to prune {path}: {err}")
 
 
+def _parse_cutoff(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        return datetime.strptime(str(value).strip(), "%Y-%m-%d")
+    except Exception:
+        return None
+
+
+def _normalize_cutoff_list(values: Iterable[str], *, log) -> list[str]:
+    normalized: set[datetime] = set()
+    invalid: list[str] = []
+    for value in values or []:
+        parsed = _parse_cutoff(value)
+        if parsed is None:
+            invalid.append(str(value))
+            continue
+        normalized.add(parsed)
+    if invalid:
+        log.warning("Ignoring invalid cutoff date(s) %s; expected YYYY-MM-DD.", invalid)
+    return [dt.strftime("%Y-%m-%d") for dt in sorted(normalized)]
+
+
+def _generate_cutoff_series(base: datetime, frequency_months: int, count: int) -> list[str]:
+    if frequency_months <= 0 or count <= 0:
+        return []
+    series = [
+        base - relativedelta(months=frequency_months * idx)
+        for idx in range(count)
+    ]
+    return [dt.strftime("%Y-%m-%d") for dt in sorted(set(series))]
+
+
+def _resolve_training_cutoffs(
+    run_cfg,
+    *,
+    cutoff_date: Optional[str],
+    override_cutoffs: Optional[Sequence[str]],
+    log,
+) -> list[str]:
+    if override_cutoffs:
+        normalized = _normalize_cutoff_list(override_cutoffs, log=log)
+        if normalized:
+            return normalized
+        log.warning("Training cutoff override did not include valid dates; falling back to config.")
+
+    cfg_cutoffs = getattr(run_cfg, "training_cutoffs", None)
+    normalized_cfg = _normalize_cutoff_list(cfg_cutoffs or [], log=log)
+    if normalized_cfg:
+        return normalized_cfg
+
+    base_candidate = cutoff_date or getattr(run_cfg, "cutoff_date", None)
+    base_dt = _parse_cutoff(base_candidate)
+    frequency = getattr(run_cfg, "training_frequency_months", 0) or 0
+    count = getattr(run_cfg, "training_cutoff_count", 0) or 0
+    try:
+        frequency = int(frequency)
+    except Exception:
+        log.warning("Invalid training_frequency_months=%r; expected integer months.", frequency)
+        frequency = 0
+    try:
+        count = int(count)
+    except Exception:
+        log.warning("Invalid training_cutoff_count=%r; expected integer.", count)
+        count = 0
+
+    if base_dt and frequency > 0 and count > 0:
+        generated = _generate_cutoff_series(base_dt, frequency, count)
+        if generated:
+            return generated
+
+    if base_dt:
+        fallback = [base_dt.strftime("%Y-%m-%d")]
+        log.info("Using primary cutoff %s for training because no additional cutoffs were derived.", fallback[0])
+        return fallback
+
+    log.warning("Unable to resolve training cutoffs; defaulting to legacy values %s.", _DEFAULT_TRAINING_CUTOFFS)
+    return list(_DEFAULT_TRAINING_CUTOFFS)
+
+
 def _record_run_failure(ctx, message: str) -> None:
     """Persist run metadata indicating the pipeline terminated with an error."""
 
@@ -169,7 +258,7 @@ def _star_build_successful(result, curated_engine) -> bool:
     required_tables = {"dim_customer", "fact_transactions"}
     return required_tables.issubset(tables)
 
-def score_all(segment: str | None = None):
+def score_all(segment: str | None = None, *, training_cutoffs: Sequence[str] | None = None):
     """
     Orchestrates the entire GoSales pipeline from data ingestion to final scoring.
 
@@ -226,6 +315,16 @@ def score_all(segment: str | None = None):
             logger.info("--- Phase 1: ETL ---")
             # Skip local CSV ingest when a database source is configured
             cfg = load_config()
+            run_cfg = getattr(cfg, "run", None)
+            cutoff_date = str(getattr(run_cfg, "cutoff_date", "2024-06-30") or "2024-06-30")
+            prediction_window_months = int(getattr(run_cfg, "prediction_window_months", 6) or 6)
+            resolved_training_cutoffs = _resolve_training_cutoffs(
+                run_cfg,
+                cutoff_date=cutoff_date,
+                override_cutoffs=training_cutoffs,
+                log=logger,
+            )
+            logger.info("Resolved training cutoffs for training phase: %s", ", ".join(resolved_training_cutoffs))
             src = getattr(getattr(cfg, 'database', object()), 'source_tables', {}) or {}
             sl_src = str(src.get('sales_log', '')).strip()
             use_db_source = bool(sl_src and sl_src.lower() != 'csv' and is_azure_like)
@@ -269,9 +368,7 @@ def score_all(segment: str | None = None):
     
             # --- 3. Label Audit (Phase 2) ---
             logger.info("--- Phase 2: Label audit (leakage-safe targets) ---")
-            # Training cutoff chosen so the 6-month target window is within training data (Jul-Dec 2024)
-            cutoff_date = "2024-06-30"
-            prediction_window_months = 6
+            # Use configured run cutoff and prediction window for label audit scope
             for div in targets:
                 try:
                     compute_label_audit(curated_engine, div, cutoff_date, prediction_window_months)
@@ -294,8 +391,7 @@ def score_all(segment: str | None = None):
     
             # --- 5. Model Training Phase ---
             logger.info("--- Phase 3: Training models for all targets (robust trainer) ---")
-            cut_list = ["2023-03-31", "2023-09-30", "2024-03-31", "2024-06-30"]
-            cutoffs_arg = ",".join(cut_list)
+            cutoffs_arg = ",".join(resolved_training_cutoffs)
             for div in targets:
                 try:
                     logger.info(f"Training model for target: {div} (cutoffs={cutoffs_arg})")
@@ -329,6 +425,7 @@ def score_all(segment: str | None = None):
             run_manifest = default_manifest(pipeline_version="0.1.0")
             run_manifest["cutoff"] = cutoff_date
             run_manifest["window_months"] = int(prediction_window_months)
+            run_manifest["training_cutoffs"] = list(resolved_training_cutoffs)
     
             # Generate outputs; function will update manifest details (divisions scored, alerts)
             icp_scores_path = generate_scoring_outputs(
@@ -369,6 +466,7 @@ def score_all(segment: str | None = None):
                         "divisions": targets,
                         "cutoff": cutoff_date,
                         "window_months": int(prediction_window_months),
+                        "training_cutoffs": list(resolved_training_cutoffs),
                         "artifact_count": 3,
                         "status": "finished",
                     }
@@ -408,5 +506,12 @@ if __name__ == "__main__":
         choices=["warm", "cold", "both"],
         help="Override population.build_segments for this pipeline run",
     )
+    parser.add_argument(
+        "--training-cutoffs",
+        help="Comma-separated list of training cutoff dates (YYYY-MM-DD). Overrides configuration.",
+    )
     args = parser.parse_args()
-    score_all(segment=args.segment)
+    overrides = None
+    if args.training_cutoffs:
+        overrides = [c.strip() for c in args.training_cutoffs.split(",") if c.strip()]
+    score_all(segment=args.segment, training_cutoffs=overrides)

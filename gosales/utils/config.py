@@ -38,6 +38,9 @@ class Run:
     cutoff_date: str = "2024-12-31"
     prediction_window_months: int = 6
     lookback_years: int = 3
+    training_cutoffs: list[str] = field(default_factory=list)
+    training_frequency_months: int = 6
+    training_cutoff_count: int = 4
 
 
 @dataclass
@@ -490,6 +493,13 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
             cutoff_date=str(run_cfg.get("cutoff_date", "2024-12-31")),
             prediction_window_months=int(run_cfg.get("prediction_window_months", 6)),
             lookback_years=int(run_cfg.get("lookback_years", 3)),
+            training_cutoffs=[
+                str(s).strip()
+                for s in (run_cfg.get("training_cutoffs") or [])
+                if str(s).strip()
+            ],
+            training_frequency_months=int(run_cfg.get("training_frequency_months", 6) or 0),
+            training_cutoff_count=int(run_cfg.get("training_cutoff_count", 4) or 0),
         ),
         etl=ETL(
             coerce_dates_tz=str(etl_cfg.get("coerce_dates_tz", "UTC")),
