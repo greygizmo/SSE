@@ -101,6 +101,7 @@ $env:PYTHONPATH = "$PWD"; python -m gosales.pipeline.rank_whitespace --cutoff "2
 # 8) Launch Streamlit UI (Phase 6)
 $env:PYTHONPATH = "$PWD"; streamlit run gosales/ui/app.py
 #   Within the UI, open the **Docs** navigation tab to browse repository guides such as the calibration tuning guide.
+#   Interactive charts depend on Plotly, which now ships via `gosales/requirements.txt`.
 ```
 
 ---

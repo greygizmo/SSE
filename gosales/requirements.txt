@@ -11,6 +11,7 @@ rapidfuzz
 implicit
 mlxtend
 streamlit
+plotly>=5.0
 prefect
 python-dotenv
 ruff
