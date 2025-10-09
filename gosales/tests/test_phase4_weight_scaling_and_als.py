@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import pandas as pd
 import pytest
 
@@ -15,14 +17,16 @@ from gosales.pipeline.rank_whitespace import _als_centroid_path_for_div
 
 def test_scale_weights_by_coverage_scales_and_normalizes():
     base = [0.6, 0.2, 0.1, 0.1]  # [p, lift, als, ev]
-    lift = pd.Series([0.0]*8 + [0.9, 0.8])     # 20% coverage
-    als = pd.Series([0.0]*9 + [0.7])           # 10% normalized coverage
-    als_signal = pd.Series([0.0]*9 + [1.0])    # Raw embedding availability
-    w_adj, adj = _scale_weights_by_coverage(base, als, lift, threshold=0.3, als_signal=als_signal)
+    lift = pd.Series([0.0] * 8 + [0.9, 0.8])  # 20% coverage
+    als = pd.Series([0.0] * 9 + [0.7])  # 10% normalized coverage
+    als_signal = pd.Series([0.0] * 9 + [1.0])  # Raw embedding availability
+    w_adj, adj = _scale_weights_by_coverage(
+        base, als, lift, threshold=0.3, als_signal=als_signal
+    )
     assert abs(sum(w_adj) - 1.0) < 1e-6
     # Both lift and als should be scaled down (coverage below threshold)
-    assert adj.get('als_weight_factor', 1.0) < 1.0
-    assert adj.get('aff_weight_factor', 1.0) < 1.0
+    assert adj.get("als_weight_factor", 1.0) < 1.0
+    assert adj.get("aff_weight_factor", 1.0) < 1.0
 
 
 def test_rank_whitespace_emits_metadata():
@@ -50,11 +54,13 @@ def test_rank_whitespace_emits_metadata():
 
 def test_als_norm_fallback_centroid_prefers_owned_centroid():
     # Build a tiny embedding space where owned centroid is near (1,1)
-    df = pd.DataFrame({
-        'als_f0': [1.0, 0.9, -0.5, 0.0],
-        'als_f1': [1.0, 0.8, -0.5, 0.0],
-        'owned_division_pre_cutoff': [True, True, False, False],
-    })
+    df = pd.DataFrame(
+        {
+            "als_f0": [1.0, 0.9, -0.5, 0.0],
+            "als_f1": [1.0, 0.8, -0.5, 0.0],
+            "owned_division_pre_cutoff": [True, True, False, False],
+        }
+    )
     s, raw = _compute_als_norm(df, cfg=None)
     # The first two (near centroid) should have higher normalized scores
     assert s.iloc[0] > s.iloc[2]
@@ -65,7 +71,7 @@ def test_als_norm_fallback_centroid_prefers_owned_centroid():
 
 
 def test_affinity_lift_consumption_prefers_higher_values():
-    df = pd.DataFrame({'mb_lift_max': [0.1, 0.5, 0.9]})
+    df = pd.DataFrame({"mb_lift_max": [0.1, 0.5, 0.9]})
     norm = _compute_affinity_lift(df)
     # Monotonic with respect to input ordering after normalization
     assert norm.iloc[0] < norm.iloc[1] < norm.iloc[2]
@@ -111,7 +117,47 @@ def test_rank_whitespace_assets_fallback_for_sparse_als():
     assert res.loc["c1", "als_norm"] >= res.loc["c2", "als_norm"]
 
 
-def test_rank_whitespace_item2vec_only_fills_remaining_zero_rows():
+def test_assets_only_rows_are_capped_when_coverage_high():
+    df = pd.DataFrame(
+        {
+            "division_name": ["A"] * 6,
+            "customer_id": ["t1", "t2", "t3", "t4", "t5", "asset"],
+            "icp_score": [0.2, 0.3, 0.4, 0.5, 0.6, 0.1],
+            "als_f0": [0.9, 0.8, 0.7, 0.6, 0.5, 0.0],
+            "als_f1": [0.85, 0.7, 0.65, 0.55, 0.45, 0.0],
+            "als_assets_f0": [0.0, 0.0, 0.0, 0.0, 0.0, 0.95],
+            "als_assets_f1": [0.0, 0.0, 0.0, 0.0, 0.0, 0.92],
+        }
+    )
+    inputs = RankInputs(scores=df)
+    result = rank_whitespace(inputs, weights=(0.0, 0.0, 1.0, 0.0)).set_index(
+        "customer_id"
+    )
+
+    txn_ids = ["t1", "t2", "t3", "t4", "t5"]
+    txn_max = float(result.loc[txn_ids, "als_norm"].max())
+    asset_val = float(result.loc["asset", "als_norm"])
+
+    assert txn_max > 0
+    assert asset_val > 0  # fallback still surfaces
+    assert asset_val < txn_max  # capped below strongest transaction-driven ALS
+
+
+def test_rank_whitespace_item2vec_only_fills_remaining_zero_rows(monkeypatch):
+    cfg = SimpleNamespace(
+        whitespace=SimpleNamespace(
+            als_coverage_threshold=0.9,
+            als_blend_weights=[0.5, 0.5],
+            segment_columns=[],
+            segment_min_rows=250,
+            challenger_enabled=False,
+            challenger_model="lr",
+        ),
+        features=SimpleNamespace(use_item2vec=True),
+        run=SimpleNamespace(cutoff_date=None, prediction_window_months=6),
+    )
+    monkeypatch.setattr("gosales.utils.config.load_config", lambda: cfg)
+
     df = pd.DataFrame(
         {
             "division_name": ["A"] * 5,
@@ -132,13 +178,14 @@ def test_rank_whitespace_item2vec_only_fills_remaining_zero_rows():
     assets_norm = _compute_assets_als_norm(df, owner_centroid=None)
     i2v_norm = _compute_item2vec_norm(df, owner_centroid=None)
 
-    assets_norm.index = df['customer_id']
-    i2v_norm.index = df['customer_id']
+    assets_norm.index = df["customer_id"]
+    i2v_norm.index = df["customer_id"]
 
-    assert res.loc["c2", "als_norm"] == pytest.approx(assets_norm.loc["c2"])
-    assert res.loc["c3", "als_norm"] == pytest.approx(i2v_norm.loc["c3"])
-    # Asset fallback should remain stronger than i2v for row c2
-    assert res.loc["c2", "als_norm"] > res.loc["c3", "als_norm"]
+    assert res.loc["c2", "als_norm"] <= assets_norm.loc["c2"]
+    assert res.loc["c2", "als_norm"] < res.loc["c1", "als_norm"]
+    assert res.loc["c3", "als_norm"] == pytest.approx(i2v_norm.loc["c3"], abs=1e-5)
+    # Asset fallback should not underperform i2v for row c2
+    assert res.loc["c2", "als_norm"] >= res.loc["c3", "als_norm"]
 
 
 def test_division_specific_owner_als_centroid_no_leakage(tmp_path, monkeypatch):
@@ -181,6 +228,7 @@ def test_division_specific_owner_als_centroid_no_leakage(tmp_path, monkeypatch):
 
     # The persisted A centroid should differ from B's in-group mean (fallback)
     import numpy as np
+
     a_centroid = np.load(path_a)
     b_mean = df_b[["als_f0", "als_f1"]].astype(float).mean(axis=0).to_numpy()
     assert not np.allclose(a_centroid, b_mean)

@@ -16,10 +16,13 @@ from gosales.utils.grades import (
 )
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.preprocessing import normalize
+
 try:
     from gosales.utils.normalize import normalize_division as _norm_division
 except Exception:
-    _norm_division = lambda s: str(s).strip()
+
+    def _norm_division(s: Any) -> str:
+        return str(s).strip()
 
 
 logger = get_logger(__name__)
@@ -71,9 +74,11 @@ def _compute_affinity_lift(df: pd.DataFrame, col: str = "mb_lift_max") -> pd.Ser
 ALS_CENTROID_PATH = OUTPUTS_DIR / "als_owner_centroid.npy"
 ASSETS_ALS_CENTROID_PATH = OUTPUTS_DIR / "assets_als_owner_centroid.npy"
 
+
 def _assets_als_centroid_path_for_div(div: str) -> Path:
     key = str(div or "").strip().lower().replace(" ", "_").replace("/", "_")
     return OUTPUTS_DIR / f"assets_als_owner_centroid_{key}.npy"
+
 
 def _als_centroid_path_for_div(div: str) -> Path:
     """Division-specific path for owner ALS centroid to avoid cross-division leakage.
@@ -106,9 +111,7 @@ def _apply_eligibility_and_centroid(
         "per_division": {},
     }
     if "division_name" in df.columns:
-        start_by_div = (
-            df.groupby("division_name")["division_name"].size().to_dict()
-        )
+        start_by_div = df.groupby("division_name")["division_name"].size().to_dict()
         counts["per_division"] = {
             str(div): {
                 "start_rows": int(val),
@@ -127,7 +130,11 @@ def _apply_eligibility_and_centroid(
     centroid: np.ndarray | None = None
 
     # If divisions are present, persist per-division centroids (preferred path)
-    if als_cols and "owned_division_pre_cutoff" in df.columns and "division_name" in df.columns:
+    if (
+        als_cols
+        and "owned_division_pre_cutoff" in df.columns
+        and "division_name" in df.columns
+    ):
         try:
             # Persist per-division owner centroids where available
             for div, g in df.groupby("division_name", dropna=False):
@@ -136,7 +143,14 @@ def _apply_eligibility_and_centroid(
                 except Exception:
                     g_owners = pd.DataFrame(columns=df.columns)
                 if not g_owners.empty:
-                    c = g_owners[als_cols].apply(pd.to_numeric, errors="coerce").fillna(0.0).astype(float).mean(axis=0).to_numpy(dtype=float)
+                    c = (
+                        g_owners[als_cols]
+                        .apply(pd.to_numeric, errors="coerce")
+                        .fillna(0.0)
+                        .astype(float)
+                        .mean(axis=0)
+                        .to_numpy(dtype=float)
+                    )
                     try:
                         p = _als_centroid_path_for_div(div)
                         p.parent.mkdir(parents=True, exist_ok=True)
@@ -146,7 +160,14 @@ def _apply_eligibility_and_centroid(
             # Provide a global fallback centroid across all owners (for callers without division context)
             owners_all = df[df["owned_division_pre_cutoff"].astype(bool)]
             if not owners_all.empty:
-                centroid = owners_all[als_cols].apply(pd.to_numeric, errors="coerce").fillna(0.0).astype(float).mean(axis=0).to_numpy(dtype=float)
+                centroid = (
+                    owners_all[als_cols]
+                    .apply(pd.to_numeric, errors="coerce")
+                    .fillna(0.0)
+                    .astype(float)
+                    .mean(axis=0)
+                    .to_numpy(dtype=float)
+                )
         except Exception:
             # If anything goes wrong, fall back to legacy global path behavior below
             pass
@@ -159,7 +180,9 @@ def _apply_eligibility_and_centroid(
             else:
                 owners = pd.DataFrame(columns=df.columns)
             if not owners.empty:
-                centroid = owners[als_cols].astype(float).mean(axis=0).to_numpy(dtype=float)
+                centroid = (
+                    owners[als_cols].astype(float).mean(axis=0).to_numpy(dtype=float)
+                )
                 try:
                     ALS_CENTROID_PATH.parent.mkdir(parents=True, exist_ok=True)
                     np.save(ALS_CENTROID_PATH, centroid)
@@ -183,7 +206,9 @@ def _apply_eligibility_and_centroid(
         if aals_cols and "owned_division_pre_cutoff" in df.columns:
             a_owners = df[df["owned_division_pre_cutoff"].astype(bool)]
             if not a_owners.empty:
-                a_centroid = a_owners[aals_cols].astype(float).mean(axis=0).to_numpy(dtype=float)
+                a_centroid = (
+                    a_owners[aals_cols].astype(float).mean(axis=0).to_numpy(dtype=float)
+                )
                 try:
                     ASSETS_ALS_CENTROID_PATH.parent.mkdir(parents=True, exist_ok=True)
                     np.save(ASSETS_ALS_CENTROID_PATH, a_centroid)
@@ -255,11 +280,7 @@ def _compute_als_norm(
         empty = pd.Series(np.zeros(len(df)), index=df.index, dtype=float)
         return empty, empty.copy()
 
-    mat = (
-        df[als_cols]
-        .apply(pd.to_numeric, errors="coerce")
-        .fillna(0.0)
-    )
+    mat = df[als_cols].apply(pd.to_numeric, errors="coerce").fillna(0.0)
     if mat.empty:
         empty = pd.Series(np.zeros(len(df)), index=df.index, dtype=float)
         return empty, empty.copy()
@@ -271,12 +292,12 @@ def _compute_als_norm(
     valid_rows = raw_strength > 0
 
     # If division context exists, compute similarities per-division with division-specific centroids when available
-    if 'division_name' in df.columns:
-        for div, g in df.groupby('division_name', dropna=False):
+    if "division_name" in df.columns:
+        for div, g in df.groupby("division_name", dropna=False):
             idx = g.index
             sub = (
                 g[als_cols]
-                .apply(pd.to_numeric, errors='coerce')
+                .apply(pd.to_numeric, errors="coerce")
                 .fillna(0.0)
                 .to_numpy(dtype=float)
             )
@@ -296,13 +317,17 @@ def _compute_als_norm(
             if centroid_vec is None:
                 try:
                     owned_mask = None
-                    if 'owned_division_pre_cutoff' in g.columns:
-                        owned_mask = g['owned_division_pre_cutoff'].astype(bool).to_numpy()
+                    if "owned_division_pre_cutoff" in g.columns:
+                        owned_mask = (
+                            g["owned_division_pre_cutoff"].astype(bool).to_numpy()
+                        )
                     if owned_mask is not None and owned_mask.any():
                         centroid_vec = (
-                            g.loc[g['owned_division_pre_cutoff'].astype(bool), als_cols]
-                            .apply(pd.to_numeric, errors='coerce').fillna(0.0)
-                            .mean(axis=0).to_numpy(dtype=float)
+                            g.loc[g["owned_division_pre_cutoff"].astype(bool), als_cols]
+                            .apply(pd.to_numeric, errors="coerce")
+                            .fillna(0.0)
+                            .mean(axis=0)
+                            .to_numpy(dtype=float)
                         )
                 except Exception:
                     centroid_vec = None
@@ -314,20 +339,26 @@ def _compute_als_norm(
                     if sub_valid_mask.any():
                         centroid_vec = (
                             g.loc[idx[sub_valid_mask], als_cols]
-                            .apply(pd.to_numeric, errors='coerce')
-                            .fillna(0.0).mean(axis=0).to_numpy(dtype=float)
+                            .apply(pd.to_numeric, errors="coerce")
+                            .fillna(0.0)
+                            .mean(axis=0)
+                            .to_numpy(dtype=float)
                         )
                     else:
                         centroid_vec = (
                             g[als_cols]
-                            .apply(pd.to_numeric, errors='coerce').fillna(0.0)
-                            .mean(axis=0).to_numpy(dtype=float)
+                            .apply(pd.to_numeric, errors="coerce")
+                            .fillna(0.0)
+                            .mean(axis=0)
+                            .to_numpy(dtype=float)
                         )
                 except Exception:
                     centroid_vec = (
                         g[als_cols]
-                        .apply(pd.to_numeric, errors='coerce').fillna(0.0)
-                        .mean(axis=0).to_numpy(dtype=float)
+                        .apply(pd.to_numeric, errors="coerce")
+                        .fillna(0.0)
+                        .mean(axis=0)
+                        .to_numpy(dtype=float)
                     )
             # Compute similarities for valid rows in this group
             try:
@@ -347,8 +378,10 @@ def _compute_als_norm(
         else:
             try:
                 valid_mask = valid_rows
-                if 'owned_division_pre_cutoff' in df.columns:
-                    owned_mask = df['owned_division_pre_cutoff'].astype(bool) & valid_mask
+                if "owned_division_pre_cutoff" in df.columns:
+                    owned_mask = (
+                        df["owned_division_pre_cutoff"].astype(bool) & valid_mask
+                    )
                 else:
                     owned_mask = valid_mask
                 if owned_mask.any():
@@ -386,13 +419,21 @@ def _compute_expected_value(df: pd.DataFrame, cfg=None) -> pd.Series:
     Prefers rfm__all__gp_sum__12m if present; otherwise returns zeros.
     Applies cap at cfg.whitespace.ev_cap_percentile when available.
     """
-    ev_cols = [c for c in df.columns if str(c).lower() in {"rfm__all__gp_sum__12m", "gp_sum_last_12m"}]
+    ev_cols = [
+        c
+        for c in df.columns
+        if str(c).lower() in {"rfm__all__gp_sum__12m", "gp_sum_last_12m"}
+    ]
     if not ev_cols:
         return pd.Series(np.zeros(len(df)), index=df.index, dtype=float)
-    raw = pd.to_numeric(df[ev_cols[0]], errors='coerce').fillna(0.0)
+    raw = pd.to_numeric(df[ev_cols[0]], errors="coerce").fillna(0.0)
     cap = None
     try:
-        if cfg is not None and getattr(getattr(cfg, 'whitespace', object()), 'ev_cap_percentile', None) is not None:
+        if (
+            cfg is not None
+            and getattr(getattr(cfg, "whitespace", object()), "ev_cap_percentile", None)
+            is not None
+        ):
             p = float(cfg.whitespace.ev_cap_percentile)
             if 0.0 < p <= 1.0:
                 cap = float(raw.quantile(p))
@@ -403,7 +444,9 @@ def _compute_expected_value(df: pd.DataFrame, cfg=None) -> pd.Series:
     return _percentile_normalize(raw)
 
 
-def _score_p_icp(df: pd.DataFrame, model, feat_cols: Iterable[str] | None = None) -> pd.Series:
+def _score_p_icp(
+    df: pd.DataFrame, model, feat_cols: Iterable[str] | None = None
+) -> pd.Series:
     """Score calibrated ICP probabilities using ``model``.
 
     When ``feat_cols`` is ``None`` the function falls back to using all numeric
@@ -433,12 +476,15 @@ def _score_p_icp(df: pd.DataFrame, model, feat_cols: Iterable[str] | None = None
         drop_cols = [c for c in num.columns if c.lower() in known]
         if drop_cols:
             num = num.drop(columns=drop_cols)
-        if hasattr(model, "n_features_in_") and num.shape[1] > int(model.n_features_in_):
+        if hasattr(model, "n_features_in_") and num.shape[1] > int(
+            model.n_features_in_
+        ):
             X = num.iloc[:, : int(model.n_features_in_)]
         else:
             X = num
     X = X.apply(pd.to_numeric, errors="coerce").fillna(0.0)
     return pd.Series(model.predict_proba(X)[:, 1], index=df.index)
+
 
 def _apply_eligibility(df: pd.DataFrame, cfg) -> tuple[pd.DataFrame, dict]:
     """Apply whitespace eligibility rules and track exclusion counts.
@@ -459,21 +505,31 @@ def _apply_eligibility(df: pd.DataFrame, cfg) -> tuple[pd.DataFrame, dict]:
     if elig:
         owned_drop_total = 0
         # Transaction-based ownership exclusion (last-12m proxy)
-        if getattr(elig, "exclude_if_owned_ever", False) and "owned_division_pre_cutoff" in df.columns:
+        if (
+            getattr(elig, "exclude_if_owned_ever", False)
+            and "owned_division_pre_cutoff" in df.columns
+        ):
             owned_mask_tx = df["owned_division_pre_cutoff"].astype(bool)
             cond_tx = owned_mask_tx & mask
             owned_drop_total += int(cond_tx.sum())
             mask &= ~cond_tx
         # Optional: exclude if active assets indicate ownership in the same division
         try:
-            if getattr(elig, "exclude_if_active_assets", False) and "division_name" in df.columns:
+            if (
+                getattr(elig, "exclude_if_active_assets", False)
+                and "division_name" in df.columns
+            ):
                 # For each division, look for a matching per-division assets flag column
-                divs = sorted(set(df['division_name'].astype(str).dropna().unique()))
+                divs = sorted(set(df["division_name"].astype(str).dropna().unique()))
                 dropped_here = 0
                 for d in divs:
                     col = f"owns_assets_div_{_norm_division(d).lower()}"
                     if col in df.columns:
-                        m = (df['division_name'].astype(str) == d) & df[col].astype(bool) & mask
+                        m = (
+                            (df["division_name"].astype(str) == d)
+                            & df[col].astype(bool)
+                            & mask
+                        )
                         dropped_here += int(m.sum())
                         mask &= ~m
                 owned_drop_total += dropped_here
@@ -486,7 +542,7 @@ def _apply_eligibility(df: pd.DataFrame, cfg) -> tuple[pd.DataFrame, dict]:
             days_thr = 0
         if days_thr > 0 and "division_name" in df.columns:
             try:
-                divs = sorted(set(df['division_name'].astype(str).dropna().unique()))
+                divs = sorted(set(df["division_name"].astype(str).dropna().unique()))
                 readd = pd.Series(False, index=df.index)
                 for d in divs:
                     col = f"former_owner_div_{_norm_division(d).lower()}"
@@ -494,10 +550,17 @@ def _apply_eligibility(df: pd.DataFrame, cfg) -> tuple[pd.DataFrame, dict]:
                         # Prefer per-division days-since if available
                         dcol = f"assets_days_since_last_expiration_div_{_norm_division(d).lower()}"
                         if dcol in df.columns:
-                            days = pd.to_numeric(df[dcol], errors='coerce').fillna(0)
+                            days = pd.to_numeric(df[dcol], errors="coerce").fillna(0)
                         else:
-                            days = pd.to_numeric(df.get('assets_days_since_last_expiration', 0), errors='coerce').fillna(0)
-                        cand = ((df['division_name'].astype(str) == d) & df[col].astype(bool) & (days >= days_thr))
+                            days = pd.to_numeric(
+                                df.get("assets_days_since_last_expiration", 0),
+                                errors="coerce",
+                            ).fillna(0)
+                        cand = (
+                            (df["division_name"].astype(str) == d)
+                            & df[col].astype(bool)
+                            & (days >= days_thr)
+                        )
                         readd |= cand
                 to_reinclude = readd & (~mask)
                 if to_reinclude.any():
@@ -508,19 +571,28 @@ def _apply_eligibility(df: pd.DataFrame, cfg) -> tuple[pd.DataFrame, dict]:
             except Exception:
                 pass
         counts["owned_excluded"] = int(max(0, owned_drop_total))
-        if getattr(elig, "exclude_if_recent_contact_days", 0) and "days_since_last_contact" in df.columns:
-            rc = pd.to_numeric(df["days_since_last_contact"], errors="coerce").fillna(1e9) <= int(
-                getattr(elig, "exclude_if_recent_contact_days", 0)
-            )
+        if (
+            getattr(elig, "exclude_if_recent_contact_days", 0)
+            and "days_since_last_contact" in df.columns
+        ):
+            rc = pd.to_numeric(df["days_since_last_contact"], errors="coerce").fillna(
+                1e9
+            ) <= int(getattr(elig, "exclude_if_recent_contact_days", 0))
             cond = rc & mask
             counts["recent_contact_excluded"] = int(cond.sum())
             mask &= ~cond
-        if getattr(elig, "exclude_if_open_deal", False) and "has_open_deal" in df.columns:
+        if (
+            getattr(elig, "exclude_if_open_deal", False)
+            and "has_open_deal" in df.columns
+        ):
             od = df["has_open_deal"].astype(bool)
             cond = od & mask
             counts["open_deal_excluded"] = int(cond.sum())
             mask &= ~cond
-        if getattr(elig, "require_region_match", False) and "region_match" in df.columns:
+        if (
+            getattr(elig, "require_region_match", False)
+            and "region_match" in df.columns
+        ):
             mismatch = (~df["region_match"].astype(bool)) & mask
             counts["region_mismatch_excluded"] = int(mismatch.sum())
             mask &= ~mismatch
@@ -536,11 +608,17 @@ def _apply_eligibility(df: pd.DataFrame, cfg) -> tuple[pd.DataFrame, dict]:
     dropped = counts["start_rows"] - counts["kept_rows"]
     if total_excluded != dropped:
         logger.warning(
-            "Eligibility counts mismatch: exclusions=%s dropped=%s", total_excluded, dropped
+            "Eligibility counts mismatch: exclusions=%s dropped=%s",
+            total_excluded,
+            dropped,
         )
     else:
-        logger.info("Eligibility applied: %s kept, %s dropped", counts["kept_rows"], dropped)
+        logger.info(
+            "Eligibility applied: %s kept, %s dropped", counts["kept_rows"], dropped
+        )
     return df[mask].copy(), counts
+
+
 def _scale_weights_by_coverage(
     base_weights: Iterable[float],
     als_norm: pd.Series,
@@ -553,17 +631,21 @@ def _scale_weights_by_coverage(
     if len(w) != 4:
         raise ValueError("Expected 4 weights: [p_icp_pct, lift, als, ev]")
     adjustments: Dict[str, float] = {}
+
     def coverage(s: pd.Series) -> float:
         arr = pd.to_numeric(s, errors="coerce").fillna(0.0)
         return float((arr > 0).mean())
+
     cov_lift = coverage(lift_norm)
     cov_als = coverage(als_signal if als_signal is not None else als_norm)
+
     # Downweight components with low coverage; keep p_icp and ev fixed
     # Scale factor = min(1, cov/threshold) so when cov<th, shrink proportionally
     def factor(cov: float) -> float:
         if not math.isfinite(cov) or cov <= 0:
             return 0.0
         return min(1.0, cov / max(1e-9, threshold))
+
     f_lift = factor(cov_lift)
     f_als = factor(cov_als)
     adjustments["aff_weight_factor"] = f_lift
@@ -603,7 +685,9 @@ def _scale_weights_by_coverage(
     return w_div, adjustments
 
 
-def _compute_item2vec_norm(df: pd.DataFrame, owner_centroid: np.ndarray | None = None) -> pd.Series:
+def _compute_item2vec_norm(
+    df: pd.DataFrame, owner_centroid: np.ndarray | None = None
+) -> pd.Series:
     """Compute item2vec similarity to owner centroid if i2v features present.
 
     Returns normalized [0,1] similarities; zeros if no features.
@@ -626,7 +710,10 @@ def _compute_item2vec_norm(df: pd.DataFrame, owner_centroid: np.ndarray | None =
     # Percentile normalize
     return _percentile_normalize(pd.Series(sim, index=df.index))
 
-def _compute_assets_als_norm(df: pd.DataFrame, owner_centroid: np.ndarray | None = None) -> pd.Series:
+
+def _compute_assets_als_norm(
+    df: pd.DataFrame, owner_centroid: np.ndarray | None = None
+) -> pd.Series:
     """Compute assets-ALS similarity with per-division centroids when possible.
 
     - If a cached centroid exists for the division (assets_als_owner_centroid_<division>.npy), use it.
@@ -638,8 +725,14 @@ def _compute_assets_als_norm(df: pd.DataFrame, owner_centroid: np.ndarray | None
 
         _cfg = _load_config()
         assets_cfg = getattr(getattr(_cfg, "features", object()), "assets_als", None)
-        max_rows = int(getattr(assets_cfg, "max_rows", 20_000)) if assets_cfg is not None else 20_000
-        max_cols = int(getattr(assets_cfg, "max_cols", 200)) if assets_cfg is not None else 200
+        max_rows = (
+            int(getattr(assets_cfg, "max_rows", 20_000))
+            if assets_cfg is not None
+            else 20_000
+        )
+        max_cols = (
+            int(getattr(assets_cfg, "max_cols", 200)) if assets_cfg is not None else 200
+        )
     except Exception:
         max_rows = 20_000
         max_cols = 200
@@ -652,7 +745,7 @@ def _compute_assets_als_norm(df: pd.DataFrame, owner_centroid: np.ndarray | None
     if len(df) > max_rows or len(cols) > max_cols:
         return pd.Series(np.zeros(len(df)), index=df.index, dtype=float)
     # If no division column, do a global computation
-    if 'division_name' not in df.columns:
+    if "division_name" not in df.columns:
         mat = df[cols].astype(float)
         if mat.empty:
             return pd.Series(np.zeros(len(df)), index=df.index, dtype=float)
@@ -669,7 +762,7 @@ def _compute_assets_als_norm(df: pd.DataFrame, owner_centroid: np.ndarray | None
             return pd.Series(np.zeros(len(df)), index=df.index, dtype=float)
 
     out = pd.Series(np.zeros(len(df)), index=df.index, dtype=float)
-    for div, g in df.groupby('division_name', dropna=False):
+    for div, g in df.groupby("division_name", dropna=False):
         idx = g.index
         sub = g[cols].astype(float)
         if sub.empty:
@@ -690,7 +783,12 @@ def _compute_assets_als_norm(df: pd.DataFrame, owner_centroid: np.ndarray | None
                 owns_col = f"owns_assets_div_{str(div).strip().lower()}"
                 try:
                     if owns_col in g.columns and g[owns_col].astype(bool).any():
-                        centroid_vec = g.loc[g[owns_col].astype(bool), cols].astype(float).mean(axis=0).to_numpy(dtype=float)
+                        centroid_vec = (
+                            g.loc[g[owns_col].astype(bool), cols]
+                            .astype(float)
+                            .mean(axis=0)
+                            .to_numpy(dtype=float)
+                        )
                         try:
                             path.parent.mkdir(parents=True, exist_ok=True)
                             np.save(path, centroid_vec)
@@ -701,8 +799,16 @@ def _compute_assets_als_norm(df: pd.DataFrame, owner_centroid: np.ndarray | None
             if centroid_vec is None:
                 # Fallback to transaction-based owned centroid or global mean
                 try:
-                    if 'owned_division_pre_cutoff' in g.columns and g['owned_division_pre_cutoff'].astype(bool).any():
-                        centroid_vec = g.loc[g['owned_division_pre_cutoff'].astype(bool), cols].astype(float).mean(axis=0).to_numpy(dtype=float)
+                    if (
+                        "owned_division_pre_cutoff" in g.columns
+                        and g["owned_division_pre_cutoff"].astype(bool).any()
+                    ):
+                        centroid_vec = (
+                            g.loc[g["owned_division_pre_cutoff"].astype(bool), cols]
+                            .astype(float)
+                            .mean(axis=0)
+                            .to_numpy(dtype=float)
+                        )
                     else:
                         centroid_vec = sub.mean(axis=0).to_numpy(dtype=float)
                 except Exception:
@@ -718,15 +824,15 @@ def _compute_assets_als_norm(df: pd.DataFrame, owner_centroid: np.ndarray | None
 def _explain(row: pd.Series) -> str:
     # Short reason, emphasize strongest 1-2 drivers, keep compliant
     parts: List[str] = []
-    p = float(row.get('p_icp', 0.0))
+    p = float(row.get("p_icp", 0.0))
     if p >= 0.80:
         parts.append(f"High p={p:.2f}")
     elif p >= 0.65:
         parts.append(f"Good p={p:.2f}")
     # Consider affinity and EV
-    lift = float(row.get('lift_norm', 0.0))
-    als = float(row.get('als_norm', 0.0))
-    ev = float(row.get('EV_norm', 0.0))
+    lift = float(row.get("lift_norm", 0.0))
+    als = float(row.get("als_norm", 0.0))
+    ev = float(row.get("EV_norm", 0.0))
     drivers: List[str] = []
     if lift >= 0.7:
         drivers.append("affinity")
@@ -740,7 +846,18 @@ def _explain(row: pd.Series) -> str:
         parts.append("Ranked opportunity")
     txt = "; ".join(parts)
     # guard length and tokens (basic)
-    forbidden = {"race", "gender", "religion", "ssn", "social security", "age", "ethnicity", "disability", "veteran", "pregnan"}
+    forbidden = {
+        "race",
+        "gender",
+        "religion",
+        "ssn",
+        "social security",
+        "age",
+        "ethnicity",
+        "disability",
+        "veteran",
+        "pregnan",
+    }
     low = txt.lower()
     if any(t in low for t in forbidden):
         txt = "High likelihood"
@@ -752,10 +869,14 @@ def _explain(row: pd.Series) -> str:
 
 @dataclass
 class RankInputs:
-    scores: pd.DataFrame  # columns: division_name, customer_id, icp_score, (optional) bought_in_division, EV proxy columns
+    scores: (
+        pd.DataFrame
+    )  # columns: division_name, customer_id, icp_score, (optional) bought_in_division, EV proxy columns
 
 
-def rank_whitespace(inputs: RankInputs, *, weights: Iterable[float] = (0.60, 0.20, 0.10, 0.10)) -> pd.DataFrame:
+def rank_whitespace(
+    inputs: RankInputs, *, weights: Iterable[float] = (0.60, 0.20, 0.10, 0.10)
+) -> pd.DataFrame:
     df = inputs.scores.copy()
     # Preserve incoming customer_id dtype; downstream merges handle casting as needed
     if df.empty:
@@ -766,21 +887,31 @@ def rank_whitespace(inputs: RankInputs, *, weights: Iterable[float] = (0.60, 0.2
     if df.empty:
         return df
     # Per-division normalization of p_icp to percentile
-    df['p_icp'] = pd.to_numeric(df['icp_score'], errors='coerce').fillna(0.0)
-    df['p_icp_pct'] = df.groupby('division_name')['p_icp'].transform(_percentile_normalize)
+    df["p_icp"] = pd.to_numeric(df["icp_score"], errors="coerce").fillna(0.0)
+    df["p_icp_pct"] = df.groupby("division_name")["p_icp"].transform(
+        _percentile_normalize
+    )
     # Affinity lift and ALS similarity
     lift_norm_series = _compute_affinity_lift(df)
     lift_cov = float(lift_norm_series.attrs.get("coverage", 0.0))
     lift_src = lift_norm_series.attrs.get("source_column")
-    df['lift_norm'] = lift_norm_series
-    txn_als_norm, txn_signal_strength = _compute_als_norm(df, owner_centroid=als_centroid)
+    df["lift_norm"] = lift_norm_series
+    txn_als_norm, txn_signal_strength = _compute_als_norm(
+        df, owner_centroid=als_centroid
+    )
     txn_als_norm = txn_als_norm.astype(float)
-    txn_signal_strength = pd.to_numeric(txn_signal_strength, errors='coerce').fillna(0.0)
+    txn_signal_strength = pd.to_numeric(txn_signal_strength, errors="coerce").fillna(
+        0.0
+    )
 
-    assets_cols = [c for c in df.columns if c.startswith('als_assets_f')]
+    assets_cols = [c for c in df.columns if c.startswith("als_assets_f")]
     assets_als_present = bool(assets_cols)
     try:
-        assets_norm = _compute_assets_als_norm(df, owner_centroid=None).astype(float) if assets_als_present else None
+        assets_norm = (
+            _compute_assets_als_norm(df, owner_centroid=None).astype(float)
+            if assets_als_present
+            else None
+        )
     except Exception:
         assets_norm = None
     if assets_norm is None:
@@ -788,24 +919,39 @@ def rank_whitespace(inputs: RankInputs, *, weights: Iterable[float] = (0.60, 0.2
 
     try:
         assets_signal_strength = (
-            df[assets_cols]
-            .apply(pd.to_numeric, errors='coerce')
-            .fillna(0.0)
-            .abs()
-            .sum(axis=1)
-            .astype(float)
-        ) if assets_als_present else None
+            (
+                df[assets_cols]
+                .apply(pd.to_numeric, errors="coerce")
+                .fillna(0.0)
+                .abs()
+                .sum(axis=1)
+                .astype(float)
+            )
+            if assets_als_present
+            else None
+        )
     except Exception:
         assets_signal_strength = None
     if assets_signal_strength is None:
-        assets_signal_strength = pd.Series(np.zeros(len(df)), index=df.index, dtype=float)
+        assets_signal_strength = pd.Series(
+            np.zeros(len(df)), index=df.index, dtype=float
+        )
 
     try:
         from gosales.utils.config import load_config
+
         _cfg = load_config()
-        als_thr = float(getattr(getattr(_cfg, 'whitespace', object()), 'als_coverage_threshold', 0.30))
-        use_i2v = bool(getattr(getattr(_cfg, 'features', object()), 'use_item2vec', False))
-        blend_cfg = getattr(getattr(_cfg, 'whitespace', object()), 'als_blend_weights', [0.5, 0.5])
+        als_thr = float(
+            getattr(
+                getattr(_cfg, "whitespace", object()), "als_coverage_threshold", 0.30
+            )
+        )
+        use_i2v = bool(
+            getattr(getattr(_cfg, "features", object()), "use_item2vec", False)
+        )
+        blend_cfg = getattr(
+            getattr(_cfg, "whitespace", object()), "als_blend_weights", [0.5, 0.5]
+        )
     except Exception:
         als_thr = 0.30
         use_i2v = False
@@ -836,7 +982,9 @@ def rank_whitespace(inputs: RankInputs, *, weights: Iterable[float] = (0.60, 0.2
     als_norm = als_norm.fillna(0.0)
     txn_positive_mask = txn_signal_strength.fillna(0.0) > 0.0
     assets_positive_mask = (
-        assets_signal_strength.fillna(0.0) > 0.0 if assets_signal_strength is not None else pd.Series(False, index=df.index)
+        assets_signal_strength.fillna(0.0) > 0.0
+        if assets_signal_strength is not None
+        else pd.Series(False, index=df.index)
     )
     if assets_als_present:
         assets_only_mask = (~txn_positive_mask) & assets_positive_mask
@@ -850,33 +998,37 @@ def rank_whitespace(inputs: RankInputs, *, weights: Iterable[float] = (0.60, 0.2
         if assets_als_present and txn_positive_mask.any():
             idx = txn_positive_mask[txn_positive_mask].index
             als_norm.loc[idx] = np.maximum(
-                pd.to_numeric(als_norm.loc[idx], errors='coerce').fillna(0.0).to_numpy(),
-                pd.to_numeric(assets_norm.loc[idx], errors='coerce').fillna(0.0).to_numpy(),
+                pd.to_numeric(als_norm.loc[idx], errors="coerce")
+                .fillna(0.0)
+                .to_numpy(),
+                pd.to_numeric(assets_norm.loc[idx], errors="coerce")
+                .fillna(0.0)
+                .to_numpy(),
             )
     except Exception:
         pass
     # Opportunistically fill any remaining zero-ALS rows with item2vec if present, regardless of
     # coverage threshold. This only applies where both txn and assets are missing.
     try:
-        i2v_present_any = any(c.startswith('i2v_f') for c in df.columns)
+        i2v_present_any = any(c.startswith("i2v_f") for c in df.columns)
     except Exception:
         i2v_present_any = False
     if i2v_present_any:
         i2v_norm_any = _compute_item2vec_norm(df, owner_centroid=None)
-        zero_vals = pd.to_numeric(als_norm, errors='coerce').fillna(0.0) <= 0.0
+        zero_vals = pd.to_numeric(als_norm, errors="coerce").fillna(0.0) <= 0.0
         no_txn = ~txn_positive_mask
         no_assets = ~assets_positive_mask
         fill_i2v_mask = zero_vals & no_txn & no_assets
         if fill_i2v_mask.any():
             als_norm.loc[fill_i2v_mask] = i2v_norm_any[fill_i2v_mask]
-    df['als_norm'] = als_norm
+    df["als_norm"] = als_norm
     # Fallback bounding occurs in low-coverage branch below; do not alter normal-case values.
     # Preserve baseline ALS norms for rows with intrinsic transaction signal so fallbacks
     # can be bounded against genuine embeddings.
-    baseline_als_norm = df['als_norm'].copy()
+    baseline_als_norm = df["als_norm"].copy()
 
     combined_signal = txn_signal_strength.add(assets_signal_strength, fill_value=0.0)
-    df['_als_signal_strength'] = combined_signal
+    df["_als_signal_strength"] = combined_signal
     zero_signal_mask = combined_signal.fillna(0.0) <= 0.0
 
     try:
@@ -884,7 +1036,9 @@ def rank_whitespace(inputs: RankInputs, *, weights: Iterable[float] = (0.60, 0.2
     except Exception:
         cov_txn = 0.0
     try:
-        cov_assets = float((assets_signal_strength > 0).mean()) if assets_als_present else 0.0
+        cov_assets = (
+            float((assets_signal_strength > 0).mean()) if assets_als_present else 0.0
+        )
     except Exception:
         cov_assets = 0.0
     try:
@@ -909,9 +1063,12 @@ def rank_whitespace(inputs: RankInputs, *, weights: Iterable[float] = (0.60, 0.2
     if cov_combined < als_thr:
         mask_zero_als = zero_signal_mask
         if assets_als_present and mask_zero_als.any():
-            df.loc[mask_zero_als, 'als_norm'] = assets_norm[mask_zero_als]
-            combined_signal.loc[mask_zero_als] = combined_signal.loc[mask_zero_als] + assets_signal_strength.loc[mask_zero_als]
-        i2v_present = any(c.startswith('i2v_f') for c in df.columns)
+            df.loc[mask_zero_als, "als_norm"] = assets_norm[mask_zero_als]
+            combined_signal.loc[mask_zero_als] = (
+                combined_signal.loc[mask_zero_als]
+                + assets_signal_strength.loc[mask_zero_als]
+            )
+        i2v_present = any(c.startswith("i2v_f") for c in df.columns)
         if use_i2v or i2v_present:
             i2v_norm = _compute_item2vec_norm(df, owner_centroid=None)
             mask_i2v = mask_zero_als
@@ -919,45 +1076,59 @@ def rank_whitespace(inputs: RankInputs, *, weights: Iterable[float] = (0.60, 0.2
                 mask_i2v = mask_i2v & (assets_signal_strength.fillna(0.0) <= 0.0)
             if not mask_i2v.any():
                 mask_i2v = (
-                    pd.to_numeric(df['als_norm'], errors='coerce').fillna(0.0) <= 0
+                    pd.to_numeric(df["als_norm"], errors="coerce").fillna(0.0) <= 0
                 ) & mask_zero_als
             if mask_i2v.any():
-                df.loc[mask_i2v, 'als_norm'] = i2v_norm[mask_i2v]
+                df.loc[mask_i2v, "als_norm"] = i2v_norm[mask_i2v]
         pos_mask = combined_signal.fillna(0.0) > 0
         if pos_mask.any():
-            pos_vals = pd.to_numeric(df.loc[pos_mask, 'als_norm'], errors='coerce').fillna(0.0)
+            pos_vals = pd.to_numeric(
+                df.loc[pos_mask, "als_norm"], errors="coerce"
+            ).fillna(0.0)
             if pos_vals.max() <= 0:
-                df.loc[pos_mask, 'als_norm'] = 1.0
-        # Bound fallback ALS scores by genuine transaction-driven embeddings to prevent
-        # zero-signal accounts from outranking real ALS coverage.
-        # Bound all non-transaction ALS rows (including assets-only and i2v-only) to be below
-        # the strongest transaction-driven embedding when applying heavy fallback logic.
-        fallback_rows = ~txn_positive_mask
-        baseline_txn_vals = baseline_als_norm.loc[txn_positive_mask]
-        if fallback_rows.any() and not baseline_txn_vals.empty:
-            fallback_cap = float(baseline_txn_vals.max())
-            if math.isfinite(fallback_cap) and fallback_cap > 0:
-                cap_value = max(0.0, fallback_cap - 1e-6)
-                df.loc[fallback_rows, 'als_norm'] = df.loc[fallback_rows, 'als_norm'].clip(
-                    lower=0.0,
-                    upper=cap_value if cap_value > 0 else fallback_cap,
-                )
-        df['_als_signal_strength'] = combined_signal
+                df.loc[pos_mask, "als_norm"] = 1.0
+        df["_als_signal_strength"] = combined_signal
+    # Bound fallback ALS scores by genuine transaction-driven embeddings so pure fallback rows
+    # cannot outrank accounts with real transaction signal, regardless of global coverage.
+    fallback_rows = ~txn_positive_mask
+    baseline_txn_vals = pd.to_numeric(
+        baseline_als_norm.loc[txn_positive_mask], errors="coerce"
+    ).dropna()
+    if fallback_rows.any() and not baseline_txn_vals.empty:
+        fallback_cap = float(baseline_txn_vals.max())
+        if math.isfinite(fallback_cap) and fallback_cap > 0:
+            cap_value = max(0.0, fallback_cap - 1e-6)
+            fallback_vals = pd.to_numeric(
+                df.loc[fallback_rows, "als_norm"], errors="coerce"
+            ).fillna(0.0)
+            df.loc[fallback_rows, "als_norm"] = fallback_vals.clip(
+                lower=0.0,
+                upper=cap_value if cap_value > 0 else fallback_cap,
+            )
     # EV proxy with cap and normalization
     try:
         from gosales.utils.config import load_config
+
         cfg = load_config()
     except Exception:
         cfg = None
-    df['EV_norm'] = _compute_expected_value(df, cfg)
+    df["EV_norm"] = _compute_expected_value(df, cfg)
 
     # Ensure numeric types before blending
-    for _col in ['p_icp_pct', 'lift_norm', 'als_norm', 'EV_norm']:
-        df[_col] = pd.to_numeric(df.get(_col, 0.0), errors='coerce').fillna(0.0)
+    for _col in ["p_icp_pct", "lift_norm", "als_norm", "EV_norm"]:
+        df[_col] = pd.to_numeric(df.get(_col, 0.0), errors="coerce").fillna(0.0)
 
     # Scale weights by signal coverage (global or by segment)
     try:
-        als_cov_thr = float(getattr(getattr(cfg, 'whitespace', object()), 'als_coverage_threshold', 0.30)) if cfg else 0.30
+        als_cov_thr = (
+            float(
+                getattr(
+                    getattr(cfg, "whitespace", object()), "als_coverage_threshold", 0.30
+                )
+            )
+            if cfg
+            else 0.30
+        )
     except Exception:
         als_cov_thr = 0.30
 
@@ -965,33 +1136,49 @@ def rank_whitespace(inputs: RankInputs, *, weights: Iterable[float] = (0.60, 0.2
     seg_cols_cfg: List[str] = []
     seg_min_rows = 0
     try:
-        seg_cols_cfg = list(getattr(getattr(cfg, 'whitespace', object()), 'segment_columns', []))
-        seg_min_rows = int(getattr(getattr(cfg, 'whitespace', object()), 'segment_min_rows', 250))
+        seg_cols_cfg = list(
+            getattr(getattr(cfg, "whitespace", object()), "segment_columns", [])
+        )
+        seg_min_rows = int(
+            getattr(getattr(cfg, "whitespace", object()), "segment_min_rows", 250)
+        )
     except Exception:
         seg_cols_cfg = []
         seg_min_rows = 250
 
     # Derive size_bin if requested and feasible
-    if any(c.lower() == 'size_bin' for c in seg_cols_cfg) and 'size_bin' not in df.columns:
+    if (
+        any(c.lower() == "size_bin" for c in seg_cols_cfg)
+        and "size_bin" not in df.columns
+    ):
         base_size_col = None
-        for cand in ['total_gp_all_time', 'rfm__all__gp_sum__12m', 'transactions_last_12m', 'rfm__all__tx_n__12m']:
+        for cand in [
+            "total_gp_all_time",
+            "rfm__all__gp_sum__12m",
+            "transactions_last_12m",
+            "rfm__all__tx_n__12m",
+        ]:
             if cand in df.columns:
                 base_size_col = cand
                 break
         if base_size_col is not None:
             try:
-                q = pd.qcut(pd.to_numeric(df[base_size_col], errors='coerce').fillna(0.0), 3, labels=['small','mid','large'])
-                df['size_bin'] = q.astype(str)
+                q = pd.qcut(
+                    pd.to_numeric(df[base_size_col], errors="coerce").fillna(0.0),
+                    3,
+                    labels=["small", "mid", "large"],
+                )
+                df["size_bin"] = q.astype(str)
             except Exception:
                 pass
 
     seg_cols = [c for c in seg_cols_cfg if c in df.columns]
     global_w_adj, global_adj = _scale_weights_by_coverage(
         list(weights),
-        df['als_norm'],
-        df['lift_norm'],
+        df["als_norm"],
+        df["lift_norm"],
         threshold=als_cov_thr,
-        als_signal=df['_als_signal_strength'],
+        als_signal=df["_als_signal_strength"],
     )
     weight_log: Dict[str, Any] = {
         "base": copy.deepcopy(global_adj.get("base_weights", {})),
@@ -1002,7 +1189,7 @@ def rank_whitespace(inputs: RankInputs, *, weights: Iterable[float] = (0.60, 0.2
     }
 
     if seg_cols:
-        df['score'] = 0.0
+        df["score"] = 0.0
 
         def _normalize_key_value(value: Any) -> Any:
             if pd.isna(value):
@@ -1022,54 +1209,58 @@ def rank_whitespace(inputs: RankInputs, *, weights: Iterable[float] = (0.60, 0.2
             if seg_size < seg_min_rows:
                 w_adj, adj = _scale_weights_by_coverage(
                     list(weights),
-                    df.loc[idx, 'als_norm'],
-                    df.loc[idx, 'lift_norm'],
+                    df.loc[idx, "als_norm"],
+                    df.loc[idx, "lift_norm"],
                     threshold=als_cov_thr,
-                    als_signal=df.loc[idx, '_als_signal_strength'],
+                    als_signal=df.loc[idx, "_als_signal_strength"],
                 )
             else:
                 w_adj, adj = _scale_weights_by_coverage(
                     list(weights),
-                    g['als_norm'],
-                    g['lift_norm'],
+                    g["als_norm"],
+                    g["lift_norm"],
                     threshold=als_cov_thr,
-                    als_signal=g['_als_signal_strength'],
+                    als_signal=g["_als_signal_strength"],
                 )
             sc = (
-                w_adj[0] * g['p_icp_pct'] +
-                w_adj[1] * g['lift_norm'] +
-                w_adj[2] * g['als_norm'] +
-                w_adj[3] * g['EV_norm']
+                w_adj[0] * g["p_icp_pct"]
+                + w_adj[1] * g["lift_norm"]
+                + w_adj[2] * g["als_norm"]
+                + w_adj[3] * g["EV_norm"]
             ).astype(float)
-            df.loc[idx, 'score'] = sc
+            df.loc[idx, "score"] = sc
             seg_entry = copy.deepcopy(adj)
-            seg_entry['segment_key'] = key_map
-            seg_entry['segment_size'] = seg_size
-            seg_entry['uses_global_weights'] = bool(seg_size < seg_min_rows)
-            weight_log['segments'].append(seg_entry)
+            seg_entry["segment_key"] = key_map
+            seg_entry["segment_size"] = seg_size
+            seg_entry["uses_global_weights"] = bool(seg_size < seg_min_rows)
+            weight_log["segments"].append(seg_entry)
     else:
         champion_score = (
-            global_w_adj[0] * df['p_icp_pct'] +
-            global_w_adj[1] * df['lift_norm'] +
-            global_w_adj[2] * df['als_norm'] +
-            global_w_adj[3] * df['EV_norm']
+            global_w_adj[0] * df["p_icp_pct"]
+            + global_w_adj[1] * df["lift_norm"]
+            + global_w_adj[2] * df["als_norm"]
+            + global_w_adj[3] * df["EV_norm"]
         ).astype(float)
-        df['score'] = champion_score
+        df["score"] = champion_score
 
-    weight_log['global']['context'] = 'global'
-    weight_log['global']['segment_size'] = int(len(df))
-    df.attrs['coverage'] = copy.deepcopy(coverage_meta)
-    df.attrs['weight_adjustments'] = copy.deepcopy(weight_log)
+    weight_log["global"]["context"] = "global"
+    weight_log["global"]["segment_size"] = int(len(df))
+    df.attrs["coverage"] = copy.deepcopy(coverage_meta)
+    df.attrs["weight_adjustments"] = copy.deepcopy(weight_log)
 
     # Optional challenger: simple logistic meta-learner over normalized components
     try:
         _cfg = cfg
-        challenger_on = bool(getattr(getattr(_cfg, 'whitespace', object()), 'challenger_enabled', False))
-        challenger_model = str(getattr(getattr(_cfg, 'whitespace', object()), 'challenger_model', 'lr'))
+        challenger_on = bool(
+            getattr(getattr(_cfg, "whitespace", object()), "challenger_enabled", False)
+        )
+        challenger_model = str(
+            getattr(getattr(_cfg, "whitespace", object()), "challenger_model", "lr")
+        )
     except Exception:
         challenger_on = False
-        challenger_model = 'lr'
-    if challenger_on and challenger_model == 'lr':
+        challenger_model = "lr"
+    if challenger_on and challenger_model == "lr":
         try:
             from sklearn.linear_model import LogisticRegression
 
@@ -1079,30 +1270,41 @@ def rank_whitespace(inputs: RankInputs, *, weights: Iterable[float] = (0.60, 0.2
                 df[c] = 0.0
             Xmeta = df[feat_cols].to_numpy(dtype=float)
             # Pseudo-label: use p_icp as soft target for ranking consistency; this is a heuristic challenger
-            ysoft = df['p_icp'].to_numpy(dtype=float)
+            ysoft = df["p_icp"].to_numpy(dtype=float)
             # Fit Platt-like logistic on the normalized components to approximate p_icp ordering
             # Guard: small C for stability; deterministic
-            clf = LogisticRegression(C=1.0, solver='liblinear', random_state=42, max_iter=200)
+            clf = LogisticRegression(
+                C=1.0, solver="liblinear", random_state=42, max_iter=200
+            )
             # Binarize soft target around its median to allow logistic to learn a separating surface
             import numpy as _np
+
             ybin = (ysoft >= _np.nanmedian(ysoft)).astype(int)
             if _np.unique(ybin).size >= 2:
                 clf.fit(Xmeta, ybin)
-                df['score_challenger'] = clf.decision_function(Xmeta).astype(float)
+                df["score_challenger"] = clf.decision_function(Xmeta).astype(float)
             else:
-                df['score_challenger'] = champion_score
+                df["score_challenger"] = champion_score
         except Exception:
-            df['score_challenger'] = champion_score
+            df["score_challenger"] = champion_score
     else:
-        df['score_challenger'] = champion_score
+        df["score_challenger"] = champion_score
 
     # Stable tie-breakers on champion score
-    df = df.sort_values(by=['division_name', 'score', 'p_icp', 'customer_id'], ascending=[True, False, False, True], kind='mergesort')
+    df = df.sort_values(
+        by=["division_name", "score", "p_icp", "customer_id"],
+        ascending=[True, False, False, True],
+        kind="mergesort",
+    )
 
     # Cooldown: de-emphasize accounts surfaced recently without action
     try:
-        cooldown_days = int(getattr(getattr(cfg, 'whitespace', object()), 'cooldown_days', 0))
-        cooldown_factor = float(getattr(getattr(cfg, 'whitespace', object()), 'cooldown_factor', 1.0))
+        cooldown_days = int(
+            getattr(getattr(cfg, "whitespace", object()), "cooldown_days", 0)
+        )
+        cooldown_factor = float(
+            getattr(getattr(cfg, "whitespace", object()), "cooldown_factor", 1.0)
+        )
     except Exception:
         cooldown_days = 0
         cooldown_factor = 1.0
@@ -1110,41 +1312,63 @@ def rank_whitespace(inputs: RankInputs, *, weights: Iterable[float] = (0.60, 0.2
     if (
         cooldown_days > 0
         and cooldown_factor < 1.0
-        and 'days_since_last_surfaced' in df.columns
+        and "days_since_last_surfaced" in df.columns
     ):
-        days = pd.to_numeric(df['days_since_last_surfaced'], errors='coerce').fillna(cooldown_days + 1)
+        days = pd.to_numeric(df["days_since_last_surfaced"], errors="coerce").fillna(
+            cooldown_days + 1
+        )
         mask = days < cooldown_days
         if mask.any():
-            df.loc[mask, 'score'] = df.loc[mask, 'score'] * cooldown_factor
+            df.loc[mask, "score"] = df.loc[mask, "score"] * cooldown_factor
             # Refresh ordering after score adjustment
-            df = df.sort_values(by=['division_name', 'score', 'p_icp', 'customer_id'], ascending=[True, False, False, True], kind='mergesort')
+            df = df.sort_values(
+                by=["division_name", "score", "p_icp", "customer_id"],
+                ascending=[True, False, False, True],
+                kind="mergesort",
+            )
 
     # Explanations
-    df['nba_reason'] = df.apply(_explain, axis=1)
+    df["nba_reason"] = df.apply(_explain, axis=1)
     # Executive-friendly percentiles and letter grades
     try:
         # p_icp percentile is already in p_icp_pct; derive letter grade
-        df['p_icp_grade'] = assign_letter_grades_from_percentiles(pd.to_numeric(df.get('p_icp_pct', 0.0), errors='coerce').fillna(0.0))
+        df["p_icp_grade"] = assign_letter_grades_from_percentiles(
+            pd.to_numeric(df.get("p_icp_pct", 0.0), errors="coerce").fillna(0.0)
+        )
     except Exception:
-        df['p_icp_grade'] = 'F'
+        df["p_icp_grade"] = "F"
     try:
         # Champion score percentile and grade per division
-        if 'score' in df.columns and 'division_name' in df.columns:
-            pct = df.groupby('division_name')['score'].rank(method='average', pct=True).astype(float)
-            df['score_pct'] = pct
-            df['score_grade'] = assign_letter_grades_from_percentiles(pct)
+        if "score" in df.columns and "division_name" in df.columns:
+            pct = (
+                df.groupby("division_name")["score"]
+                .rank(method="average", pct=True)
+                .astype(float)
+            )
+            df["score_pct"] = pct
+            df["score_grade"] = assign_letter_grades_from_percentiles(pct)
         else:
-            df['score_pct'] = 0.0
-            df['score_grade'] = 'F'
+            df["score_pct"] = 0.0
+            df["score_grade"] = "F"
     except Exception:
-        df['score_pct'] = 0.0
-        df['score_grade'] = 'F'
+        df["score_pct"] = 0.0
+        df["score_grade"] = "F"
     # Output columns
     out_cols = [
-        'customer_id', 'customer_name', 'division_name',
-        'score', 'score_pct', 'score_grade', 'score_challenger',
-        'p_icp', 'p_icp_pct', 'p_icp_grade', 'lift_norm', 'als_norm', 'EV_norm',
-        'nba_reason'
+        "customer_id",
+        "customer_name",
+        "division_name",
+        "score",
+        "score_pct",
+        "score_grade",
+        "score_challenger",
+        "p_icp",
+        "p_icp_pct",
+        "p_icp_grade",
+        "lift_norm",
+        "als_norm",
+        "EV_norm",
+        "nba_reason",
     ]
     present = [c for c in out_cols if c in df.columns]
     return df[present].reset_index(drop=True)
@@ -1156,4 +1380,3 @@ def save_ranked_whitespace(df: pd.DataFrame, *, cutoff_tag: str | None = None) -
     path = OUTPUTS_DIR / name
     df.to_csv(path, index=False)
     return path
-
