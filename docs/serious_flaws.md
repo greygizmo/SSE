@@ -14,7 +14,7 @@ Status: Fixed - `gosales.pipeline.score_all` now raises when holdout validation 
 Previously, `score_all()` swallowed errors from `validate_holdout` and continued reporting success, so no regression gate could fail. The pipeline now fails the run unless holdout gating is explicitly disabled.
 
 ## 5. Holdout gate evaluates against labels that are always zero
-The holdout gate reads `bought_in_division` directly from `icp_scores.csv`, but those values come from the inference feature matrix and reflect whether a customer bought before the cutoff. During scoring there are no post-cutoff purchases, so the column is uniformly zero and every metric the gate computes is meaningless.
+Status: Fixed - the gate now enriches `icp_scores` with true holdout outcomes sourced via the configured holdout loaders before computing metrics (`gosales/pipeline/validate_holdout.py`, `gosales/validation/holdout_data.py`).
 
 # Serious Issues Identified in GoSales Engine
 

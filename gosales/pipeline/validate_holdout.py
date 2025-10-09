@@ -19,6 +19,8 @@ from sklearn import metrics as skm
 
 from gosales.utils.logger import get_logger
 from gosales.utils.paths import OUTPUTS_DIR
+from gosales.utils.config import load_config
+from gosales.validation.holdout_data import load_holdout_buyers
 
 
 logger = get_logger(__name__)
@@ -61,18 +63,67 @@ def validate_holdout(
     df = pd.read_csv(icp_scores_csv)
     df = df.dropna(subset=["icp_score"])
 
+    cfg = load_config()
+    run_cfg = getattr(cfg, "run", object())
+    default_cutoff = getattr(run_cfg, "cutoff_date", None)
+    try:
+        default_window = int(getattr(run_cfg, "prediction_window_months", 6) or 6)
+    except Exception:
+        default_window = 6
+
     gates = gates or {"auc": 0.70, "lift_at_10": 2.0, "cal_mae": 0.10}
     results: List[Dict[str, float]] = []
     status_ok = True
 
     for div, g in df.groupby("division_name"):
-        y = (
+        scores = pd.to_numeric(g["icp_score"], errors="coerce").fillna(0.0).to_numpy()
+
+        if "customer_id" in g.columns:
+            customer_series = pd.to_numeric(g["customer_id"], errors="coerce").astype("Int64")
+        else:
+            customer_series = pd.Series(dtype="Int64")
+
+        y_series = (
             pd.to_numeric(g.get("bought_in_division", 0), errors="coerce")
             .fillna(0)
             .astype(int)
-            .to_numpy()
         )
-        scores = pd.to_numeric(g["icp_score"], errors="coerce").fillna(0.0).to_numpy()
+
+        if "cutoff_date" in g.columns:
+            cutoff_val = pd.to_datetime(g["cutoff_date"].iloc[0], errors="coerce")
+        else:
+            cutoff_val = None
+        if (cutoff_val is None or pd.isna(cutoff_val)) and default_cutoff is not None:
+            cutoff_val = pd.to_datetime(default_cutoff, errors="coerce")
+
+        if "prediction_window_months" in g.columns:
+            try:
+                window_months = int(float(g["prediction_window_months"].iloc[0]))
+            except Exception:
+                window_months = default_window
+        else:
+            window_months = default_window
+
+        applied_holdout = False
+        if cutoff_val is not None and not pd.isna(cutoff_val) and not customer_series.empty:
+            try:
+                holdout = load_holdout_buyers(cfg, str(div), cutoff_val, int(window_months))
+                if holdout.buyers is not None and not holdout.buyers.empty:
+                    holdout_ids = set(int(x) for x in holdout.buyers.dropna().tolist())
+                    mask = customer_series.isin(holdout_ids)
+                    y_series = mask.astype(int)
+                    applied_holdout = True
+                    if holdout.source:
+                        logger.info(
+                            "Holdout gate using %d buyers from %s for division %s",
+                            int(mask.sum()),
+                            holdout.source,
+                            div,
+                        )
+            except Exception as err:
+                logger.warning("Holdout enrichment failed for %s: %s", div, err)
+
+        y = y_series.to_numpy()
         if len(y) == 0:
             continue
 
@@ -117,6 +168,7 @@ def validate_holdout(
             "brier": brier,
             "cal_mae": cal_mae,
             "lift_at_10": lift10,
+            "holdout_applied": bool(applied_holdout),
         }
         results.append(res)
 
