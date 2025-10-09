@@ -12,4 +12,6 @@ Resolved 2025-10-09: Fallback ALS rows are now clipped below the strongest trans
 
 #4. The same function tries to fill zero-ALS rows with item2vec scores, but those rows remain flagged as zero-signal (_als_signal_strength never updated). Subsequent weighting treats them as uncovered and pushes their ALS percentile back to the floor, so the advertised item2vec fallback never surfaces in the output (also exposed by the failing test).
 
+Resolved 2025-10-09: Item2vec fallback now contributes to ALS signal strength and coverage, ensuring weight scaling recognizes these rows while keeping their scores below genuine transaction embeddings.
+
 #5. When segment-based weighting is enabled, rank_whitespace writes segment scores but still references champion_score—which is only defined in the non-segment path—so any run with segment_columns configured will raise an UnboundLocalError before returning results.

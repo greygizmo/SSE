@@ -937,6 +937,25 @@ def rank_whitespace(
             np.zeros(len(df)), index=df.index, dtype=float
         )
 
+    i2v_cols = [c for c in df.columns if c.startswith("i2v_f")]
+    try:
+        i2v_signal_strength = (
+            (
+                df[i2v_cols]
+                .apply(pd.to_numeric, errors="coerce")
+                .fillna(0.0)
+                .abs()
+                .sum(axis=1)
+                .astype(float)
+            )
+            if i2v_cols
+            else None
+        )
+    except Exception:
+        i2v_signal_strength = None
+    if i2v_signal_strength is None:
+        i2v_signal_strength = pd.Series(np.zeros(len(df)), index=df.index, dtype=float)
+
     try:
         from gosales.utils.config import load_config
 
@@ -1010,7 +1029,7 @@ def rank_whitespace(
     # Opportunistically fill any remaining zero-ALS rows with item2vec if present, regardless of
     # coverage threshold. This only applies where both txn and assets are missing.
     try:
-        i2v_present_any = any(c.startswith("i2v_f") for c in df.columns)
+        i2v_present_any = bool(i2v_cols)
     except Exception:
         i2v_present_any = False
     if i2v_present_any:
@@ -1027,9 +1046,12 @@ def rank_whitespace(
     # can be bounded against genuine embeddings.
     baseline_als_norm = df["als_norm"].copy()
 
-    combined_signal = txn_signal_strength.add(assets_signal_strength, fill_value=0.0)
-    df["_als_signal_strength"] = combined_signal
-    zero_signal_mask = combined_signal.fillna(0.0) <= 0.0
+    base_signal = txn_signal_strength.add(assets_signal_strength, fill_value=0.0)
+    zero_signal_mask = base_signal.fillna(0.0) <= 0.0
+    i2v_only_strength = i2v_signal_strength.where(
+        (~txn_positive_mask) & (~assets_positive_mask), 0.0
+    )
+    combined_signal = base_signal.add(i2v_only_strength, fill_value=0.0)
 
     try:
         cov_txn = float((txn_signal_strength > 0).mean())
@@ -1042,6 +1064,10 @@ def rank_whitespace(
     except Exception:
         cov_assets = 0.0
     try:
+        cov_i2v = float((i2v_signal_strength > 0).mean())
+    except Exception:
+        cov_i2v = 0.0
+    try:
         cov_combined = float((combined_signal > 0).mean())
     except Exception:
         cov_combined = 0.0
@@ -1053,6 +1079,8 @@ def rank_whitespace(
     }
     if assets_als_present:
         coverage_meta["als_assets"] = float(cov_assets)
+    if cov_i2v > 0:
+        coverage_meta["als_i2v"] = float(cov_i2v)
     coverage_meta["als_blend_weights"] = {
         "transaction": float(blend_txn),
         "assets": float(blend_assets),
@@ -1068,7 +1096,7 @@ def rank_whitespace(
                 combined_signal.loc[mask_zero_als]
                 + assets_signal_strength.loc[mask_zero_als]
             )
-        i2v_present = any(c.startswith("i2v_f") for c in df.columns)
+        i2v_present = bool(i2v_cols)
         if use_i2v or i2v_present:
             i2v_norm = _compute_item2vec_norm(df, owner_centroid=None)
             mask_i2v = mask_zero_als
@@ -1087,6 +1115,8 @@ def rank_whitespace(
             ).fillna(0.0)
             if pos_vals.max() <= 0:
                 df.loc[pos_mask, "als_norm"] = 1.0
+        df["_als_signal_strength"] = combined_signal
+    else:
         df["_als_signal_strength"] = combined_signal
     # Bound fallback ALS scores by genuine transaction-driven embeddings so pure fallback rows
     # cannot outrank accounts with real transaction signal, regardless of global coverage.

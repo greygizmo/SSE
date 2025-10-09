@@ -13,6 +13,7 @@ from gosales.pipeline.rank_whitespace import (
     rank_whitespace,
 )
 from gosales.pipeline.rank_whitespace import _als_centroid_path_for_div
+import gosales.pipeline.rank_whitespace as rw
 
 
 def test_scale_weights_by_coverage_scales_and_normalizes():
@@ -144,6 +145,16 @@ def test_assets_only_rows_are_capped_when_coverage_high():
 
 
 def test_rank_whitespace_item2vec_only_fills_remaining_zero_rows(monkeypatch):
+    captured: dict[str, pd.Series | None] = {}
+
+    original_scale = rw._scale_weights_by_coverage
+
+    def _capture_scale(*args, **kwargs):
+        captured["als_signal"] = kwargs.get("als_signal")
+        return original_scale(*args, **kwargs)
+
+    monkeypatch.setattr(rw, "_scale_weights_by_coverage", _capture_scale)
+
     cfg = SimpleNamespace(
         whitespace=SimpleNamespace(
             als_coverage_threshold=0.9,
@@ -186,6 +197,12 @@ def test_rank_whitespace_item2vec_only_fills_remaining_zero_rows(monkeypatch):
     assert res.loc["c3", "als_norm"] == pytest.approx(i2v_norm.loc["c3"], abs=1e-5)
     # Asset fallback should not underperform i2v for row c2
     assert res.loc["c2", "als_norm"] >= res.loc["c3", "als_norm"]
+    # Item2vec fallback should register signal coverage
+    assert captured.get("als_signal") is not None
+    als_signal = captured["als_signal"]
+    assert float(als_signal.iloc[2]) > 0  # c3 index
+    assert res.attrs["coverage"]["als"] > 0.25
+    assert res.attrs["coverage"].get("als_i2v", 0.0) > 0
 
 
 def test_division_specific_owner_als_centroid_no_leakage(tmp_path, monkeypatch):
