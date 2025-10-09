@@ -3,6 +3,7 @@ import sqlite3
 from pathlib import Path
 
 import pytest
+from sqlalchemy import create_engine
 
 from gosales.pipeline import score_all
 from gosales.utils import config as config_mod
@@ -95,3 +96,77 @@ Beta LLC,Beta Limited,beta.com,Technology,Technology-General,Sample,2
         assert cur.fetchone()[0] > 0
         cur = conn.execute("SELECT COUNT(*) FROM dim_customer")
         assert cur.fetchone()[0] >= 2
+
+
+def test_score_all_holdout_failure_propagates(monkeypatch, tmp_path):
+    for var in ["AZSQL_SERVER", "AZSQL_DB", "AZSQL_USER", "AZSQL_PWD"]:
+        monkeypatch.delenv(var, raising=False)
+
+    cfg = copy.deepcopy(config_mod.load_config())
+    cfg.database.sqlite_path = tmp_path / "primary.db"
+    cfg.database.curated_sqlite_path = tmp_path / "curated.db"
+    cfg.paths.raw = (tmp_path / "raw").resolve()
+    cfg.paths.staging = (tmp_path / "staging").resolve()
+    cfg.paths.curated = (tmp_path / "curated").resolve()
+    cfg.paths.outputs = (tmp_path / "outputs").resolve()
+
+    cfg.paths.raw.mkdir(parents=True, exist_ok=True)
+    cfg.paths.staging.mkdir(parents=True, exist_ok=True)
+    cfg.paths.curated.mkdir(parents=True, exist_ok=True)
+    cfg.paths.outputs.mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr(config_mod, "load_config", lambda *args, **kwargs: cfg)
+    monkeypatch.setattr(db_mod, "load_config", lambda *args, **kwargs: cfg)
+    monkeypatch.setattr(score_all, "load_config", lambda *args, **kwargs: cfg)
+    monkeypatch.setattr(build_star_mod, "load_config", lambda *args, **kwargs: cfg)
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    outputs_dir = cfg.paths.outputs
+    models_dir = tmp_path / "models"
+    models_dir.mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr(paths_mod, "DATA_DIR", data_dir)
+    monkeypatch.setattr(paths_mod, "OUTPUTS_DIR", outputs_dir)
+    monkeypatch.setattr(paths_mod, "MODELS_DIR", models_dir)
+    monkeypatch.setattr(score_all, "DATA_DIR", data_dir)
+    monkeypatch.setattr(score_all, "OUTPUTS_DIR", outputs_dir)
+    monkeypatch.setattr(score_all, "MODELS_DIR", models_dir)
+
+    primary_engine = create_engine(f"sqlite:///{cfg.database.sqlite_path}")
+    curated_engine = create_engine(f"sqlite:///{cfg.database.curated_sqlite_path}")
+    monkeypatch.setattr(score_all, "get_db_connection", lambda: primary_engine)
+    monkeypatch.setattr(db_mod, "get_curated_connection", lambda: curated_engine)
+    monkeypatch.setattr(score_all, "validate_connection", lambda engine: True)
+
+    monkeypatch.setattr(load_csv_mod, "load_csv_to_db", lambda *args, **kwargs: None)
+    monkeypatch.setattr(score_all, "load_csv_to_db", lambda *args, **kwargs: None)
+    monkeypatch.setattr(score_all, "build_star_schema", lambda *args, **kwargs: {"status": "ok"})
+    monkeypatch.setattr(score_all, "compute_label_audit", lambda *args, **kwargs: None)
+    monkeypatch.setattr(score_all, "_prune_legacy_model_dirs", lambda *args, **kwargs: None)
+
+    from gosales.features import engine as features_engine
+
+    monkeypatch.setattr(features_engine, "create_feature_matrix", lambda *args, **kwargs: None)
+
+    def fake_generate_scoring_outputs(*args, run_manifest=None, **kwargs):
+        path = outputs_dir / "icp_scores.csv"
+        path.write_text(
+            "division_name,icp_score,bought_in_division\nSolidworks,0.8,0\n",
+            encoding="utf-8",
+        )
+        if isinstance(run_manifest, dict):
+            run_manifest["icp_scores"] = str(path)
+        return path
+
+    monkeypatch.setattr(score_all, "generate_scoring_outputs", fake_generate_scoring_outputs)
+    monkeypatch.setattr(score_all, "_derive_targets", lambda: ["Solidworks"])
+    monkeypatch.setattr(score_all.subprocess, "run", lambda *args, **kwargs: None)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("simulated holdout failure")
+
+    monkeypatch.setattr(score_all, "validate_holdout", boom)
+
+    with pytest.raises(RuntimeError, match="Hold-out validation step failed"):
+        score_all.score_all()

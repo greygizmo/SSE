@@ -43,6 +43,7 @@ A division-focused Ideal Customer Profile (ICP) & Whitespace engine. The pipelin
 - **Phase 5 — Forward Validation / Holdout**
   - CLI: `python -m gosales.validation.forward --division Solidworks --cutoff 2024-12-31 --window-months 6 --capacity-grid 5,10,20 --accounts-per-rep-grid 10,25`
   - Holdout labels source: DB-first when `validation.holdout_source: auto` (or `--holdout-source db|auto`), filtered to `(cutoff, cutoff+window]` for the target division; falls back to `gosales/data/holdout/*.csv` when DB is unavailable.
+  - Pipeline gate: `validation.holdout_required: true` (default) makes `gosales.pipeline.score_all` fail when holdout validation errors or returns a failing status; set to false only for dry runs.
   - Artifacts per division/cutoff in `gosales/outputs/validation/<division>/<cutoff>/`: `validation_frame.parquet`, `gains.csv`, `calibration.csv`, `topk_scenarios*.csv`, `segment_performance.csv`, `metrics.json`, `drift.json`
   - Phase 3 emits `train_scores_*` and `train_feature_sample_*` to support drift
 

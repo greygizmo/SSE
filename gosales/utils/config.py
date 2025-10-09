@@ -227,6 +227,7 @@ class ValidationConfig:
     ks_threshold: float = 0.15
     psi_threshold: float = 0.25
     cal_mae_threshold: float = 0.03
+    holdout_required: bool = True
     # Leakage Gauntlet thresholds for shift-14 check
     shift14_epsilon_auc: float = 0.01
     shift14_epsilon_lift10: float = 0.25
@@ -632,6 +633,7 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
             gauntlet_mask_tail_days=int(val_cfg.get("gauntlet_mask_tail_days", 14)),
             gauntlet_purge_days=int(val_cfg.get("gauntlet_purge_days", 30)),
             gauntlet_label_buffer_days=int(val_cfg.get("gauntlet_label_buffer_days", 0)),
+            holdout_required=bool(val_cfg.get("holdout_required", True)),
             holdout_source=str(val_cfg.get("holdout_source", "auto")),
             holdout_db_object=(str(val_cfg.get("holdout_db_object")).strip() if val_cfg.get("holdout_db_object") else None),
         ),

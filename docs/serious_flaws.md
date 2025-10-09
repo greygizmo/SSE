@@ -10,7 +10,8 @@ Status: Fixed - the legacy DB-writing entry point has been removed. Holdout eval
 Status: Fixed - `validate_against_holdout` has been replaced with a no-op compatibility shim. There are no transactional writes to `fact_transactions`; users must run `gosales.validation.forward` for holdout analysis (`gosales/pipeline/validate_holdout.py`).
 
 ## 4. End-to-end pipeline treats holdout validation as best-effort
-`score_all()` always swallows errors from `validate_holdout` and keeps reporting success, so no regression gate can ever fail a release run. This defeats the purpose of the holdout guardrails the repository documents.
+Status: Fixed - `gosales.pipeline.score_all` now raises when holdout validation errors or gates fail unless `validation.holdout_required` is disabled (gosales/pipeline/score_all.py).
+Previously, `score_all()` swallowed errors from `validate_holdout` and continued reporting success, so no regression gate could fail. The pipeline now fails the run unless holdout gating is explicitly disabled.
 
 ## 5. Holdout gate evaluates against labels that are always zero
 The holdout gate reads `bought_in_division` directly from `icp_scores.csv`, but those values come from the inference feature matrix and reflect whether a customer bought before the cutoff. During scoring there are no post-cutoff purchases, so the column is uniformly zero and every metric the gate computes is meaningless.

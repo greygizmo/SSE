@@ -9,6 +9,7 @@ our production DAG.
 from pathlib import Path
 import os
 import argparse
+import json
 from datetime import datetime
 from typing import Optional, Sequence, Iterable
 
@@ -477,9 +478,14 @@ def score_all(segment: str | None = None, *, training_cutoffs: Sequence[str] | N
     
             # --- 7. Hold-out validation & gates (Phase 5) ---
             try:
+                holdout_cfg = getattr(cfg, "validation", object())
+                holdout_required = bool(getattr(holdout_cfg, "holdout_required", True))
+            except Exception:
+                holdout_required = True
+
+            try:
                 icp_path = Path(run_manifest.get("icp_scores") or (icp_scores_path or OUTPUTS_DIR / "icp_scores.csv"))
                 if icp_path.exists():
-                    # Derive a year tag from cutoff (simple heuristic: cutoff year + 1)
                     year_tag = None
                     try:
                         y = int(str(run_manifest.get("cutoff", "")).split("-")[0]) if isinstance(run_manifest, dict) else None
@@ -487,10 +493,33 @@ def score_all(segment: str | None = None, *, training_cutoffs: Sequence[str] | N
                             year_tag = str(y + 1)
                     except Exception:
                         year_tag = None
-                    validate_holdout(icp_scores_csv=str(icp_path), year_tag=year_tag)
+                    result_path = validate_holdout(icp_scores_csv=str(icp_path), year_tag=year_tag)
+                    holdout_status = None
+                    if result_path:
+                        try:
+                            payload = json.loads(Path(result_path).read_text(encoding="utf-8"))
+                            holdout_status = str(payload.get("status", "")).strip().lower()
+                        except FileNotFoundError:
+                            if holdout_required:
+                                raise
+                            logger.warning("Hold-out metrics file %s missing (continuing: holdout_required=False)", result_path)
+                        except Exception as parse_err:
+                            if holdout_required:
+                                raise RuntimeError(f"Failed to inspect hold-out metrics: {parse_err}") from parse_err
+                            logger.warning("Failed to inspect hold-out metrics (%s); continuing because holdout_required is false", parse_err)
+                        if holdout_status and holdout_status not in {"ok"}:
+                            message = f"Hold-out validation reported failing status '{holdout_status}'"
+                            if holdout_required:
+                                raise RuntimeError(message)
+                            logger.warning(message + " (continuing because holdout_required is false)")
             except Exception as e:
-                logger.warning(f"Hold-out validation step failed (non-blocking): {e}")
-    
+                message = f"Hold-out validation step failed: {e}"
+                if holdout_required:
+                    logger.exception(message)
+                    _record_run_failure(ctx, message)
+                    raise RuntimeError(message) from e
+                logger.warning(message + " (continuing because validation.holdout_required is false)")
+            
             logger.info("GoSales scoring pipeline finished successfully!")
     finally:
         if seg_list is not None:
