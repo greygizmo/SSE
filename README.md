@@ -67,6 +67,7 @@ git clone https://github.com/your-org/gosales-engine.git && cd gosales-engine
 python -m venv .venv
 .venv\Scripts\activate.ps1
 pip install -r gosales/requirements.txt
+#   The bundle now includes Click, which powers all pipeline CLIs
 
 # 2) Place your raw sales data
 # The main training data (e.g., 2023-2024)

@@ -12,6 +12,7 @@ implicit
 mlxtend
 streamlit
 plotly>=5.0
+click>=8.1,<9
 prefect
 python-dotenv
 ruff
