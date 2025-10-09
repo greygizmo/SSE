@@ -1218,6 +1218,13 @@ def rank_whitespace(
         "als_coverage_threshold": float(als_cov_thr),
     }
 
+    global_champion_score = (
+        global_w_adj[0] * df["p_icp_pct"]
+        + global_w_adj[1] * df["lift_norm"]
+        + global_w_adj[2] * df["als_norm"]
+        + global_w_adj[3] * df["EV_norm"]
+    ).astype(float)
+
     if seg_cols:
         df["score"] = 0.0
 
@@ -1265,18 +1272,13 @@ def rank_whitespace(
             seg_entry["uses_global_weights"] = bool(seg_size < seg_min_rows)
             weight_log["segments"].append(seg_entry)
     else:
-        champion_score = (
-            global_w_adj[0] * df["p_icp_pct"]
-            + global_w_adj[1] * df["lift_norm"]
-            + global_w_adj[2] * df["als_norm"]
-            + global_w_adj[3] * df["EV_norm"]
-        ).astype(float)
-        df["score"] = champion_score
+        df["score"] = global_champion_score
 
     weight_log["global"]["context"] = "global"
     weight_log["global"]["segment_size"] = int(len(df))
     df.attrs["coverage"] = copy.deepcopy(coverage_meta)
     df.attrs["weight_adjustments"] = copy.deepcopy(weight_log)
+    fallback_score = df["score"].copy()
 
     # Optional challenger: simple logistic meta-learner over normalized components
     try:
@@ -1314,11 +1316,11 @@ def rank_whitespace(
                 clf.fit(Xmeta, ybin)
                 df["score_challenger"] = clf.decision_function(Xmeta).astype(float)
             else:
-                df["score_challenger"] = champion_score
+                df["score_challenger"] = fallback_score
         except Exception:
-            df["score_challenger"] = champion_score
+            df["score_challenger"] = fallback_score
     else:
-        df["score_challenger"] = champion_score
+        df["score_challenger"] = fallback_score
 
     # Stable tie-breakers on champion score
     df = df.sort_values(

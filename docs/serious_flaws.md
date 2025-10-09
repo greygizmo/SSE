@@ -15,3 +15,5 @@ Resolved 2025-10-09: Fallback ALS rows are now clipped below the strongest trans
 Resolved 2025-10-09: Item2vec fallback now contributes to ALS signal strength and coverage, ensuring weight scaling recognizes these rows while keeping their scores below genuine transaction embeddings.
 
 #5. When segment-based weighting is enabled, rank_whitespace writes segment scores but still references champion_score—which is only defined in the non-segment path—so any run with segment_columns configured will raise an UnboundLocalError before returning results.
+
+Resolved 2025-10-09: Segment-aware runs now compute a global fallback score up front and reuse per-segment scores when challenger mode is off or fails, eliminating the champion_score reference and keeping legacy challengers deterministic.

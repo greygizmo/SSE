@@ -255,3 +255,36 @@ def test_division_specific_owner_als_centroid_no_leakage(tmp_path, monkeypatch):
     assert float(res_b.loc["b3", "als_norm"]) == 0.0  # zero vector yields zero norm
     # At least one valid row should have positive ALS norm
     assert (res_b.loc[["b1", "b2"], "als_norm"] > 0).any()
+
+
+def test_segment_weighting_populates_challenger_without_champion(monkeypatch):
+    cfg = SimpleNamespace(
+        whitespace=SimpleNamespace(
+            als_coverage_threshold=0.3,
+            als_blend_weights=[1.0, 0.0],
+            segment_columns=["region"],
+            segment_min_rows=1,
+            challenger_enabled=False,
+            challenger_model="lr",
+        ),
+        features=SimpleNamespace(use_item2vec=False),
+        run=SimpleNamespace(cutoff_date=None, prediction_window_months=6),
+    )
+    monkeypatch.setattr("gosales.utils.config.load_config", lambda: cfg)
+
+    df = pd.DataFrame(
+        {
+            "division_name": ["A", "A", "A"],
+            "customer_id": ["c1", "c2", "c3"],
+            "icp_score": [0.9, 0.7, 0.5],
+            "region": ["west", "east", "east"],
+            "als_f0": [0.4, 0.2, 0.1],
+            "als_f1": [0.3, 0.1, 0.0],
+            "mb_lift_max": [0.1, 0.2, 0.0],
+        }
+    )
+
+    res = rank_whitespace(RankInputs(scores=df))
+    assert "score" in res.columns
+    assert "score_challenger" in res.columns
+    assert res["score_challenger"].equals(res["score"])
