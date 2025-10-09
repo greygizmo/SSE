@@ -149,7 +149,7 @@ def test_generate_scoring_outputs_records_whitespace_artifact(tmp_path, monkeypa
         )
 
     monkeypatch.setattr(sc, "score_customers_for_division", fake_score_customers)
-    monkeypatch.setattr(sc, "generate_whitespace_opportunities", lambda engine: pl.DataFrame())
+    monkeypatch.setattr(sc, "generate_whitespace_opportunities", lambda engine, *_, **__: pl.DataFrame())
     monkeypatch.setattr(sc, "validate_whitespace_schema", lambda path: {})
     monkeypatch.setattr(sc, "write_schema_report", lambda report, path: None)
 
@@ -243,7 +243,7 @@ def test_generate_scoring_outputs_applies_segment_allocation(tmp_path, monkeypat
         "score_customers_for_division",
         lambda engine, division_name, model_path, **kwargs: score_frame.clone(),
     )
-    monkeypatch.setattr(sc, "generate_whitespace_opportunities", lambda engine: pl.DataFrame())
+    monkeypatch.setattr(sc, "generate_whitespace_opportunities", lambda engine, *_, **__: pl.DataFrame())
     monkeypatch.setattr(sc, "validate_whitespace_schema", lambda path: {})
     monkeypatch.setattr(sc, "write_schema_report", lambda report, path: None)
 
@@ -324,7 +324,7 @@ def test_generate_scoring_outputs_records_fallback_icp_path(tmp_path, monkeypatc
         }
     )
     monkeypatch.setattr(sc, "score_customers_for_division", lambda *a, **k: scores_df)
-    monkeypatch.setattr(sc, "generate_whitespace_opportunities", lambda engine: pl.DataFrame())
+    monkeypatch.setattr(sc, "generate_whitespace_opportunities", lambda engine, *_, **__: pl.DataFrame())
     monkeypatch.setattr(sc, "validate_whitespace_schema", lambda path: {})
     monkeypatch.setattr(sc, "write_schema_report", lambda report, path: None)
 

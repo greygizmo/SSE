@@ -4,13 +4,16 @@ from gosales.pipeline.score_customers import generate_whitespace_opportunities
 
 
 def _seed(engine):
-    transactions = pd.DataFrame([
-        {"customer_id": 1, "order_date": "2024-01-01", "product_division": "A", "gross_profit": 100},
-        {"customer_id": 1, "order_date": "2024-02-15", "product_division": "B", "gross_profit": 50},
-        {"customer_id": 2, "order_date": "2023-12-01", "product_division": "A", "gross_profit": 20},
-    ])
+    transactions = pd.DataFrame(
+        [
+            {"customer_id": 1, "order_date": "2024-01-01", "product_division": "A", "gross_profit": 100},
+            {"customer_id": 1, "order_date": "2024-02-15", "product_division": "B", "gross_profit": 50},
+            {"customer_id": 2, "order_date": "2023-12-01", "product_division": "A", "gross_profit": 20},
+            {"customer_id": 3, "order_date": "2024-01-05", "product_division": "B", "gross_profit": 80},
+        ]
+    )
     transactions.to_sql("fact_transactions", engine, if_exists="replace", index=False)
-    pd.DataFrame({"customer_id": [1, 2]}).to_sql("dim_customer", engine, if_exists="replace", index=False)
+    pd.DataFrame({"customer_id": [1, 2, 3]}).to_sql("dim_customer", engine, if_exists="replace", index=False)
 
 
 def test_whitespace_score_is_continuous(tmp_path):
@@ -57,3 +60,23 @@ def test_whitespace_uses_aggregated_queries(tmp_path, monkeypatch):
     assert not df.is_empty()
     assert observed_queries
     assert any("GROUP BY customer_id" in q or "DISTINCT product_division" in q for q in observed_queries)
+
+
+def test_whitespace_respects_cutoff(tmp_path):
+    eng = create_engine(f"sqlite:///{tmp_path}/ws_cutoff.db")
+    _seed(eng)
+
+    df_future = generate_whitespace_opportunities(eng)
+    df_cut = generate_whitespace_opportunities(eng, cutoff_date="2024-01-31")
+
+    def _has_row(df, customer, division):
+        if {"customer_id", "whitespace_division"}.issubset(set(df.columns)):
+            pdf = df.to_pandas()
+            mask = (pdf["customer_id"].astype(str) == str(customer)) & (
+                pdf["whitespace_division"].str.lower() == division.lower()
+            )
+            return mask.any()
+        return False
+
+    assert not _has_row(df_future, 1, "B"), "Future-aware heuristic should treat post-cutoff purchase as owned."
+    assert _has_row(df_cut, 1, "B"), "Cutoff-aware heuristic must expose divisions purchased only after cutoff."

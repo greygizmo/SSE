@@ -1082,13 +1082,13 @@ def _fact_transactions_columns(engine) -> set[str]:
         return set()
 
 
-def generate_whitespace_opportunities(engine):
+def generate_whitespace_opportunities(engine, cutoff_date: str | None = None):
     """Generate whitespace opportunities with a lightweight scoring heuristic.
 
-    This heuristic blends normalized purchase frequency, recency and total
-    gross profit to produce a ``whitespace_score`` in ``[0, 1]``.  Each
-    feature is scaled to ``[0, 1]`` across all customers and combined using
-    weights ``0.5, 0.3, 0.2`` respectively.
+    The heuristic blends normalized purchase frequency, recency, and total gross
+    profit to produce a ``whitespace_score`` on ``[0, 1]``. When ``cutoff_date`` is
+    provided and ``fact_transactions`` exposes ``order_date``, all aggregates are
+    computed using rows with ``order_date <= cutoff_date`` to remain leakage-safe.
     """
     logger.info("Generating whitespace opportunities...")
     try:
@@ -1106,6 +1106,29 @@ def generate_whitespace_opportunities(engine):
         has_order_date = "order_date" in columns
         has_gross_profit = "gross_profit" in columns
 
+        cutoff_ts = None
+        if cutoff_date:
+            try:
+                cutoff_ts = pd.to_datetime(cutoff_date)
+                if pd.isna(cutoff_ts):
+                    logger.warning("Whitespace cutoff %s parsed to NaT; ignoring cutoff filter.", cutoff_date)
+                    cutoff_ts = None
+            except Exception as exc:
+                logger.warning("Unable to parse whitespace cutoff %s (%s); ignoring cutoff filter.", cutoff_date, exc)
+                cutoff_ts = None
+        if cutoff_ts is not None and not has_order_date:
+            logger.warning(
+                "Whitespace cutoff %s requested but fact_transactions has no order_date; using full history.",
+                cutoff_date,
+            )
+            cutoff_ts = None
+
+        params: dict[str, Any] = {}
+        cutoff_filter = ""
+        if cutoff_ts is not None:
+            params["cutoff_date"] = cutoff_ts.to_pydatetime()
+            cutoff_filter = " WHERE order_date <= :cutoff_date"
+
         summary_query = [
             "SELECT customer_id, COUNT(*) AS purchase_count",
         ]
@@ -1117,43 +1140,44 @@ def generate_whitespace_opportunities(engine):
             summary_query.append(", SUM(COALESCE(gross_profit, 0)) AS total_gp")
         else:
             summary_query.append(", 0.0 AS total_gp")
-        summary_query.append(" FROM fact_transactions GROUP BY customer_id ORDER BY customer_id")
-        summary_pd = pd.read_sql("".join(summary_query), engine)
+        summary_query.append(" FROM fact_transactions")
+        summary_query.append(cutoff_filter)
+        summary_query.append(" GROUP BY customer_id ORDER BY customer_id")
+        summary_pd = pd.read_sql("".join(summary_query), engine, params=params or None)
         if has_order_date and "last_purchase" in summary_pd.columns:
             summary_pd["last_purchase"] = pd.to_datetime(summary_pd["last_purchase"], errors="coerce")
         if summary_pd.empty:
             logger.info("fact_transactions has no rows; no whitespace opportunities to emit.")
             return pl.DataFrame()
 
-        divisions_pd = pd.read_sql(
-            """
-            SELECT DISTINCT product_division
-            FROM fact_transactions
-            WHERE product_division IS NOT NULL
-            ORDER BY product_division
-            """,
-            engine,
+        div_where = ["product_division IS NOT NULL"]
+        if cutoff_ts is not None:
+            div_where.append("order_date <= :cutoff_date")
+        div_query = (
+            "SELECT DISTINCT product_division FROM fact_transactions"
+            + (" WHERE " + " AND ".join(div_where) if div_where else "")
+            + " ORDER BY product_division"
         )
+        divisions_pd = pd.read_sql(div_query, engine, params=params or None)
         if divisions_pd.empty:
             logger.info("No product divisions found in fact_transactions; skipping whitespace heuristic.")
             return pl.DataFrame()
 
-        cust_divisions_pd = pd.read_sql(
-            """
-            SELECT customer_id, product_division
-            FROM fact_transactions
-            WHERE product_division IS NOT NULL
-            GROUP BY customer_id, product_division
-            ORDER BY customer_id, product_division
-            """,
-            engine,
+        cust_where = ["product_division IS NOT NULL"]
+        if cutoff_ts is not None:
+            cust_where.append("order_date <= :cutoff_date")
+        cust_query = (
+            "SELECT customer_id, product_division FROM fact_transactions"
+            + (" WHERE " + " AND ".join(cust_where) if cust_where else "")
+            + " GROUP BY customer_id, product_division ORDER BY customer_id, product_division"
         )
+        cust_divisions_pd = pd.read_sql(cust_query, engine, params=params or None)
 
         if has_order_date:
-            range_pd = pd.read_sql(
-                "SELECT MAX(order_date) AS max_order_date, MIN(order_date) AS min_order_date FROM fact_transactions",
-                engine,
-            )
+            rng_query = "SELECT MAX(order_date) AS max_order_date, MIN(order_date) AS min_order_date FROM fact_transactions"
+            if cutoff_ts is not None:
+                rng_query += " WHERE order_date <= :cutoff_date"
+            range_pd = pd.read_sql(rng_query, engine, params=params or None)
             range_pd["max_order_date"] = pd.to_datetime(range_pd["max_order_date"], errors="coerce")
             range_pd["min_order_date"] = pd.to_datetime(range_pd["min_order_date"], errors="coerce")
             max_order_date = range_pd.at[0, "max_order_date"]
@@ -1181,7 +1205,10 @@ def generate_whitespace_opportunities(engine):
         freq_max = max(summary_pl["purchase_count"].max(), 1.0)
         gp_max = max(summary_pl["total_gp"].max(), 1.0)
         fallback_ts = pd.Timestamp("1970-01-01")
-        if has_order_date and pd.notna(max_order_date) and pd.notna(min_order_date):
+        if cutoff_ts is not None:
+            ref_date = pd.to_datetime(cutoff_ts)
+            min_date = pd.to_datetime(min_order_date) if pd.notna(min_order_date) else ref_date
+        elif has_order_date and pd.notna(max_order_date) and pd.notna(min_order_date):
             ref_date = pd.to_datetime(max_order_date)
             min_date = pd.to_datetime(min_order_date)
         else:
@@ -1407,7 +1434,13 @@ def generate_scoring_outputs(
                     and normalize_division("Post_Processing") not in available_keys
                 )
                 if need_pp:
-                    ws_df = generate_whitespace_opportunities(engine)
+                    fallback_cutoff = cutoff_date
+                    if fallback_cutoff is None and run_manifest is not None:
+                        try:
+                            fallback_cutoff = run_manifest.get("cutoff")
+                        except Exception:
+                            fallback_cutoff = None
+                    ws_df = generate_whitespace_opportunities(engine, cutoff_date=fallback_cutoff)
                     if not ws_df.is_empty():
                         ws_pp = ws_df.filter(
                             pl.col("whitespace_division")
@@ -1576,7 +1609,13 @@ def generate_scoring_outputs(
                 try:
                     cfg = load_config()
                     if bool(getattr(cfg.whitespace, 'shadow_mode', False)):
-                        legacy = generate_whitespace_opportunities(engine)
+                        fallback_cutoff = cutoff_date
+                        if fallback_cutoff is None and run_manifest is not None:
+                            try:
+                                fallback_cutoff = run_manifest.get("cutoff")
+                            except Exception:
+                                fallback_cutoff = None
+                        legacy = generate_whitespace_opportunities(engine, cutoff_date=fallback_cutoff)
                         if not legacy.is_empty():
                             legacy_pd = legacy.to_pandas()
                             legacy_pd.rename(columns={"whitespace_division": "division_name", "whitespace_score": "score"}, inplace=True)
