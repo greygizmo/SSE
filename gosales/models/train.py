@@ -112,6 +112,140 @@ def _collect_topn_ids(
     return topn
 
 
+def _gate_population(
+    df: pd.DataFrame,
+    cfg_obj,
+    division: str,
+    cutoff: str,
+    artifact_slug: str,
+    *,
+    segment: str | None = None,
+    cold_only: bool = False,
+    include_prospects: bool = False,
+    logger_prefix: str = "Training population",
+    write_summary: bool = True,
+) -> tuple[pd.DataFrame, int, int, int, str | None]:
+    """Apply warm/cold gating consistent with feature build and return filtered frame."""
+
+    try:
+        warm_window = int(getattr(getattr(cfg_obj, "population", object()), "warm_window_months", 12) or 12)
+    except Exception:
+        warm_window = 12
+
+    pre = len(df)
+    if pre == 0:
+        return df, 0, 0, 0, None
+
+    days_col = "rfm__all__recency_days__life"
+    try:
+        if days_col in df.columns:
+            days = pd.to_numeric(df[days_col], errors="coerce").fillna(1e9)
+            warm = days <= float(warm_window * 30)
+        else:
+            warm_col = f"rfm__all__tx_n__{warm_window}m"
+            if warm_col in df.columns:
+                warm = pd.to_numeric(df[warm_col], errors="coerce").fillna(0.0) > 0
+            elif warm_window == 18 and all(c in df.columns for c in ["rfm__all__tx_n__24m", "rfm__all__tx_n__6m"]):
+                v24 = pd.to_numeric(df["rfm__all__tx_n__24m"], errors="coerce").fillna(0.0)
+                v6 = pd.to_numeric(df["rfm__all__tx_n__6m"], errors="coerce").fillna(0.0)
+                warm = (v24 - v6) > 0
+            elif "rfm__all__tx_n__12m" in df.columns:
+                warm = pd.to_numeric(df["rfm__all__tx_n__12m"], errors="coerce").fillna(0.0) > 0
+            elif "rfm__all__tx_n__24m" in df.columns:
+                warm = pd.to_numeric(df["rfm__all__tx_n__24m"], errors="coerce").fillna(0.0) > 0
+            else:
+                warm = pd.Series(False, index=df.index)
+    except Exception:
+        warm = pd.Series(False, index=df.index)
+
+    try:
+        assets_active = pd.to_numeric(df.get("assets_active_total", 0), errors="coerce").fillna(0.0) > 0
+    except Exception:
+        assets_active = pd.Series(False, index=df.index)
+    try:
+        assets_on_subs = pd.to_numeric(df.get("assets_on_subs_total", 0), errors="coerce").fillna(0.0) > 0
+    except Exception:
+        assets_on_subs = pd.Series(False, index=df.index)
+
+    cold = (~warm) & (assets_active | assets_on_subs)
+    warm_n = int(warm.sum())
+    cold_n = int(cold.sum())
+    prospects_excluded = max(0, int(pre - (warm_n + cold_n)))
+
+    mask = None
+    population_label = "all_customers"
+    seg = str(segment).lower() if segment else None
+    if seg == "warm":
+        mask = warm
+        population_label = "warm"
+        msg = f"{logger_prefix} filtered to warm customers (warm_window={warm_window}m)"
+    elif cold_only or seg == "cold":
+        mask = cold
+        population_label = "cold" if seg == "cold" else "cold_only"
+        msg = f"{logger_prefix} filtered to cold customers (warm_window={warm_window}m)"
+    elif not include_prospects:
+        mask = warm | cold
+        population_label = "warm_cold"
+        msg = f"{logger_prefix} filtered (warm|cold; warm_window={warm_window}m)"
+    else:
+        msg = None
+
+    if mask is not None:
+        df_filtered = df[mask].reset_index(drop=True)
+        post = len(df_filtered)
+        prospects_excluded = max(0, int(pre - (warm_n + cold_n)))
+        logger.info(
+            "%s @ %s: %d -> %d rows (warm=%d, cold=%d, prospects_excluded=%d)",
+            msg,
+            cutoff,
+            pre,
+            post,
+            warm_n,
+            cold_n,
+            prospects_excluded,
+        )
+        if write_summary:
+            try:
+                summary_path = OUTPUTS_DIR / f"population_gating_{artifact_slug}_{cutoff}.csv"
+                pd.DataFrame(
+                    [
+                        {
+                            "cutoff": cutoff,
+                            "pre_rows": int(pre),
+                            "post_rows": int(post),
+                            "warm": int(warm_n),
+                            "cold": int(cold_n),
+                            "prospects_excluded": int(prospects_excluded),
+                            "population": population_label,
+                        }
+                    ]
+                ).to_csv(summary_path, index=False)
+            except Exception:
+                pass
+        return df_filtered, warm_n, cold_n, prospects_excluded, population_label
+
+    if write_summary and not include_prospects:
+        try:
+            summary_path = OUTPUTS_DIR / f"population_gating_{artifact_slug}_{cutoff}.csv"
+            pd.DataFrame(
+                [
+                    {
+                        "cutoff": cutoff,
+                        "pre_rows": int(pre),
+                        "post_rows": int(pre),
+                        "warm": int(warm_n),
+                        "cold": int(cold_n),
+                        "prospects_excluded": int(prospects_excluded),
+                        "population": population_label,
+                    }
+                ]
+            ).to_csv(summary_path, index=False)
+        except Exception:
+            pass
+
+    return df.reset_index(drop=True), warm_n, cold_n, prospects_excluded, population_label
+
+
 def _compute_topk_lifts(
     y_valid: np.ndarray,
     probs: np.ndarray,
@@ -896,97 +1030,30 @@ def main(
                 fm.write_parquet(out_path)
             except Exception:
                 pass
+
             if fm.is_empty():
                 logger.warning(f"Empty feature matrix for cutoff {cutoff}")
                 continue
+
             df = fm.to_pandas()
             # Optional gating: exclude prospect accounts; optionally keep only cold customers.
             try:
-                include_prospects = bool(getattr(getattr(cfg, 'population', object()), 'include_prospects', False))
+                include_prospects = bool(getattr(getattr(cfg, "population", object()), "include_prospects", False))
             except Exception:
                 include_prospects = False
-            try:
-                # Warm window (months) configurable; default to 12
-                try:
-                    warm_window = int(getattr(getattr(cfg, 'population', object()), 'warm_window_months', 12) or 12)
-                except Exception:
-                    warm_window = 12
-                # Prefer recency-based warm flag if available (days since last order <= N months)
-                days_col = 'rfm__all__recency_days__life'
-                if days_col in df.columns:
-                    days = pd.to_numeric(df[days_col], errors='coerce').fillna(1e9)
-                    # Approximate month length at 30 days for gating; conservative
-                    warm = days <= float(warm_window * 30)
-                else:
-                    # Fallback: use exact window tx counts or 24m-6m for 18m
-                    warm_col = f'rfm__all__tx_n__{warm_window}m'
-                    if warm_col in df.columns:
-                        warm = pd.to_numeric(df[warm_col], errors='coerce').fillna(0.0) > 0
-                    elif warm_window == 18 and all(c in df.columns for c in ['rfm__all__tx_n__24m','rfm__all__tx_n__6m']):
-                        v24 = pd.to_numeric(df['rfm__all__tx_n__24m'], errors='coerce').fillna(0.0)
-                        v6 = pd.to_numeric(df['rfm__all__tx_n__6m'], errors='coerce').fillna(0.0)
-                        warm = (v24 - v6) > 0
-                    else:
-                        # Fallback: use 12m if available, else any available window <= 24m
-                        if 'rfm__all__tx_n__12m' in df.columns:
-                            warm = pd.to_numeric(df['rfm__all__tx_n__12m'], errors='coerce').fillna(0.0) > 0
-                        elif 'rfm__all__tx_n__24m' in df.columns:
-                            warm = pd.to_numeric(df['rfm__all__tx_n__24m'], errors='coerce').fillna(0.0) > 0
-                        else:
-                            warm = pd.Series(False, index=df.index)
-                assets_active = pd.to_numeric(df.get('assets_active_total', 0), errors='coerce').fillna(0.0) > 0
-                assets_on_subs = pd.to_numeric(df.get('assets_on_subs_total', 0), errors='coerce').fillna(0.0) > 0
-                cold = (~warm) & (assets_active | assets_on_subs)
-                mask = None
-                msg = None
-                pre = len(df)
-                warm_n = int(warm.sum())
-                cold_n = int(cold.sum())
-                # Segment-aware gating: CLI --segment takes precedence over cold_only
-                if segment and str(segment).lower() == 'warm':
-                    mask = warm
-                    msg = f"Training population filtered to warm customers (warm_window={warm_window}m)"
-                elif cold_only or (segment and str(segment).lower() == 'cold'):
-                    mask = cold
-                    msg = f"Training population filtered to cold customers (warm_window={warm_window}m)"
-                elif not include_prospects:
-                    mask = warm | cold
-                    msg = f"Training population filtered (warm|cold; warm_window={warm_window}m)"
-                if mask is not None:
-                    df = df[mask].reset_index(drop=True)
-                    post = len(df)
-                    prospects_excluded = max(0, int(pre - (warm_n + cold_n)))
-                    logger.info(
-                        "%s @ %s: %d -> %d rows (warm=%d, cold=%d, prospects_excluded=%d)",
-                        msg,
-                        cutoff,
-                        pre,
-                        post,
-                        warm_n,
-                        cold_n,
-                        prospects_excluded,
-                    )
-                    # Persist a tiny gating summary for diagnostics
-                    try:
-                        from gosales.utils.paths import OUTPUTS_DIR as _OUT
-                        import pandas as _pd
-                        _pd.DataFrame([
-                            {
-                                "cutoff": cutoff,
-                                "pre_rows": int(pre),
-                                "post_rows": int(post),
-                                "warm": int(warm_n),
-                                "cold": int(cold_n),
-                                "prospects_excluded": int(prospects_excluded),
-                            }
-                        ]).to_csv(_OUT / f"population_gating_{artifact_slug}_{cutoff}.csv", index=False)
-                    except Exception:
-                        pass
-                    if df.empty:
-                        logger.warning("No eligible customer rows after population filter for cutoff %s", cutoff)
-                        continue
-            except Exception as _e:
-                logger.warning(f"Customer-only gating (train) skipped due to error: {_e}")
+            df, warm_n, cold_n, prospects_excluded, population_label = _gate_population(
+                df,
+                cfg,
+                division,
+                cutoff,
+                artifact_slug,
+                segment=segment,
+                cold_only=cold_only,
+                include_prospects=include_prospects,
+            )
+            if df.empty:
+                logger.warning("No eligible customer rows after population filter for cutoff %s", cutoff)
+                continue
             if 'bought_in_division' not in df.columns:
                 logger.warning("Missing target column for cutoff %s", cutoff)
                 continue
@@ -1258,6 +1325,25 @@ def main(
         label_buffer_days=label_buffer_days,
     )
     df_final = fm_final.to_pandas()
+    try:
+        include_prospects = bool(getattr(getattr(cfg, "population", object()), "include_prospects", False))
+    except Exception:
+        include_prospects = False
+    df_final, warm_final, cold_final, prospects_final, population_label_final = _gate_population(
+        df_final,
+        cfg,
+        division,
+        last_cut,
+        f"{artifact_slug}_final",
+        segment=segment,
+        cold_only=cold_only,
+        include_prospects=include_prospects,
+        logger_prefix="Final training population",
+        write_summary=False,
+    )
+    if df_final.empty:
+        logger.warning("Final training population empty after gating; aborting training for %s", division)
+        return
     y_final = df_final['bought_in_division'].astype(int).values
     X_final_raw = df_final.drop(columns=['customer_id', 'bought_in_division'])
     final_coverage_series = X_final_raw.notna().mean()
@@ -1506,7 +1592,17 @@ def main(
                 "scale_pos_weight": spw,
             },
         }
-        _metadata["population"] = "cold_only" if cold_only else "customer"
+        if population_label_final:
+            _metadata["population"] = population_label_final
+        elif cold_only:
+            _metadata["population"] = "cold_only"
+        else:
+            _metadata["population"] = "customer"
+        _metadata["population_counts"] = {
+            "warm": int(warm_final),
+            "cold": int(cold_final),
+            "prospects_excluded": int(prospects_final),
+        }
         if cold_only:
             _metadata["model_variant"] = "cold"
     except Exception:

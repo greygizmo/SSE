@@ -82,11 +82,11 @@ features:
   add_missingness_flags: true
   use_eb_smoothing: true
   use_market_basket: true
-  use_als_embeddings: false
+  use_als_embeddings: true
   als_lookback_months: 24
   use_item2vec: false
   # Optional: run ALS over assets rollups (guarded sizes)
-  use_assets_als: false
+  use_assets_als: true
   assets_als:
     max_rows: 80000
     max_cols: 200

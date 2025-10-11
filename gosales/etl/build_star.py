@@ -479,22 +479,35 @@ def build_star_schema(engine, config_path: str | Path | None = None, rebuild: bo
 
     # Preserve raw sales_log data for Branch/Rep features
     # This ensures we have the original Branch and Rep information available
+    # Column case can vary by source (e.g., 'Branch' from CSV/DB vs 'branch').
+    # Build a tolerant selector that aliases whatever exists to lowercase names.
+    branch_src = "branch" if "branch" in sales_log.columns else ("Branch" if "Branch" in sales_log.columns else None)
+    rep_src = "rep" if "rep" in sales_log.columns else ("Rep" if "Rep" in sales_log.columns else None)
+
+    select_exprs = [
+        pl.col("CustomerId"),
+        pl.col("Rec Date"),
+        (pl.col(branch_src).alias("branch") if branch_src else pl.lit(None).alias("branch")),
+        (pl.col(rep_src).alias("rep") if rep_src else pl.lit(None).alias("rep")),
+        pl.col("Customer"),
+        pl.col("Division"),
+        pl.col("invoice_date") if "invoice_date" in sales_log.columns else pl.lit(None).alias("invoice_date"),
+        pl.col("InvoiceId") if "InvoiceId" in sales_log.columns else pl.lit(None).alias("InvoiceId"),
+    ]
+
     fact_sales_log_raw = (
         sales_log.lazy()
-        .select([
-            "CustomerId", "Rec Date", "branch", "rep", "Customer",
-            "Division", "invoice_date", "InvoiceId"
-        ])
+        .select(select_exprs)
         .rename({
             "CustomerId": "customer_id",
             "Rec Date": "order_date",
             "Customer": "customer_name",
-            "Division": "division"
+            "Division": "division",
         })
         .with_columns([
             # Ensure consistent string typing for customer_id
             normalize_identifier_expr(pl.col("customer_id")).alias("customer_id"),
-            # Preserve original columns for feature engineering (already lowercase)
+            # Preserve original columns for feature engineering (now lowercase)
             pl.col("branch").cast(pl.Utf8),
             pl.col("rep").cast(pl.Utf8),
             pl.coalesce([

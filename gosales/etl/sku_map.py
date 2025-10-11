@@ -87,6 +87,15 @@ def get_sku_mapping() -> Dict[str, Dict[str, str]]:
             "family": "SWX",
             "sale_type": "Support_Subscription",
         },
+        # Safe alias: some sources emit "Success Plan GP" (space) for GP column
+        # while keeping the quantity header with underscores. Map it to the
+        # same canonical division so curated fact_transactions captures GP.
+        "Success Plan GP": {
+            "qty_col": "Success_Plan_Qty",
+            "division": "Success Plan",
+            "family": "SWX",
+            "sale_type": "Support_Subscription",
+        },
 
         # Hardware ecosystem signals (predictors for Printers)
         # Assuming supplies = consumables
@@ -357,7 +366,8 @@ def get_model_targets(model: str) -> Tuple[str, ...]:
     if model_norm == "services":
         return tuple(x for x in ("Services",) if x in m)
     if model_norm == "success_plan":
-        return tuple(x for x in ("Success_Plan",) if x in m)
+        # Support alias where GP header appears as "Success Plan GP" while qty uses underscores
+        return tuple(x for x in ("Success_Plan", "Success Plan GP") if x in m)
     if model_norm == "training":
         return tuple(x for x in ("Training",) if x in m)
     if model_norm == "simulation":

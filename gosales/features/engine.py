@@ -1508,7 +1508,19 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
         pass
 
     # Fill nulls globally after flags are created to ensure downstream typing
+    # Preserve recency semantics: missing recency should be large (not zero), so warm gating remains correct.
     try:
+        # First, explicitly fill recency-related columns with a high sentinel
+        recency_cols = [
+            'rfm__all__recency_days__life',
+            'rfm__div__recency_days__life',
+            'days_since_last_order',
+            f'days_since_last_{division_name}_order',
+        ]
+        for col in recency_cols:
+            if col in feature_matrix_pd.columns:
+                feature_matrix_pd[col] = pd.to_numeric(feature_matrix_pd[col], errors='coerce').fillna(999.0)
+        # Then, fill remaining NaNs with 0 to preserve prior behavior for other features
         feature_matrix_pd = feature_matrix_pd.fillna(0)
     except Exception:
         pass
