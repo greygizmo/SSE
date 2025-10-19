@@ -252,11 +252,11 @@ whitespace:
   segment_min_rows: 250
 
 validation:
-  bootstrap_n: 1000
+  bootstrap_n: 150
   top_k_percents: [5, 10, 20]
   capacity_grid: [5, 10, 20]
   ev_cap_percentile: 0.95
-  segment_columns: [industry, industry_sub, region, territory]
+  segment_columns: []
   ks_threshold: 0.15
   psi_threshold: 0.25
   holdout_required: true

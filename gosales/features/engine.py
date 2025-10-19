@@ -429,7 +429,15 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
     elif use_alias:
         label_filter = division_col.is_in(alias_divisions)
     else:
-        label_filter = division_col == norm_division_name
+        # Allow goal-based targeting when product_goal exists in transactions
+        goal_col = (
+            pl.col("product_goal")
+            .cast(pl.Utf8)
+            .str.strip_chars()
+            .str.to_lowercase()
+        )
+        # Use OR filter: prefer goal match if present; otherwise division match
+        label_filter = (goal_col == norm_division_name) | (division_col == norm_division_name)
     if cutoff_date:
         logger.info(f"Using cutoff date: {cutoff_date} (features from data <= cutoff)")
         logger.info(f"Target: purchases in {prediction_window_months} months after cutoff")
@@ -439,8 +447,9 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
         eligible_ids: set[str] | None = None
         # Use case-insensitive division filter to avoid missing rows due to casing
         division_filter = ", ".join(f"'{normalize_division(d)}'" for d in division_set())
-        base_cols_with_qty = "customer_id, order_date, product_division, product_sku, gross_profit, quantity"
-        base_cols_no_qty = "customer_id, order_date, product_division, product_sku, gross_profit"
+        # Attempt to include product_goal where available; fall back gracefully if missing
+        base_cols_with_qty = "customer_id, order_date, product_division, product_goal, product_sku, gross_profit, quantity"
+        base_cols_no_qty = "customer_id, order_date, product_division, product_goal, product_sku, gross_profit"
 
         def _read_sql(sql: str, params: dict | None = None) -> pd.DataFrame:
             chunks = pd.read_sql_query(sql, engine, params=params, chunksize=100_000)
@@ -462,9 +471,20 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
             try:
                 feature_data = _read_sql(feature_sql_qty, {"cutoff": cutoff_date})
             except Exception:
-                feature_data = _read_sql(feature_sql_noqty, {"cutoff": cutoff_date})
-                if not feature_data.empty and 'quantity' not in feature_data.columns:
-                    feature_data['quantity'] = 1.0
+                try:
+                    feature_data = _read_sql(feature_sql_noqty, {"cutoff": cutoff_date})
+                    if not feature_data.empty and 'quantity' not in feature_data.columns:
+                        feature_data['quantity'] = 1.0
+                except Exception:
+                    # Fallback without product_goal entirely
+                    feature_sql_qty2 = feature_sql_qty.replace(", product_goal", "")
+                    feature_sql_noqty2 = feature_sql_noqty.replace(", product_goal", "")
+                    try:
+                        feature_data = _read_sql(feature_sql_qty2, {"cutoff": cutoff_date})
+                    except Exception:
+                        feature_data = _read_sql(feature_sql_noqty2, {"cutoff": cutoff_date})
+                        if not feature_data.empty and 'quantity' not in feature_data.columns:
+                            feature_data['quantity'] = 1.0
             feature_data["order_date"] = pd.to_datetime(feature_data["order_date"])
             has_quantity = 'quantity' in feature_data.columns
 
@@ -473,7 +493,7 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
             cutoff_dt = pd.to_datetime(cutoff_date)
             prediction_end = (cutoff_dt + relativedelta(months=prediction_window_months)).strftime("%Y-%m-%d")
             pred_sql = (
-                "SELECT customer_id, order_date, product_division, product_sku FROM fact_transactions "
+                "SELECT customer_id, order_date, product_division, product_goal, product_sku FROM fact_transactions "
                 "WHERE order_date > :cutoff AND order_date <= :pred_end "
                 f"AND LOWER(TRIM(product_division)) IN ({division_filter})"
             )
@@ -693,10 +713,57 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
                 .str.strip()
                 .str.casefold()
             )
-            mask = pred_div.isin(alias_divisions) if use_alias else (pred_div == norm_division_name)
-        prediction_buyers_df = prediction_data.loc[mask, 'customer_id'].astype(str).unique()
-        division_buyers_pd = pd.DataFrame({'customer_id': prediction_buyers_df, 'bought_in_division': 1})
-        division_buyers = pl.from_pandas(division_buyers_pd).with_columns(pl.col('customer_id').cast(pl.Utf8)).lazy()
+            if use_alias:
+                mask = pred_div.isin(alias_divisions)
+            else:
+                # Optional product_goal targeting when provided via curated facts
+                use_goal = False
+                if 'product_goal' in prediction_data.columns:
+                    pred_goal = prediction_data['product_goal'].astype(str).str.strip().str.casefold()
+                    try:
+                        use_goal = pred_goal.eq(norm_division_name).any()
+                    except Exception:
+                        use_goal = False
+                mask = (prediction_data['product_goal'].astype(str).str.strip().str.casefold() == norm_division_name) if use_goal else (pred_div == norm_division_name)
+
+        # Rollup targeting via line items when division doesn't match aliases/goals/models
+        if not use_custom_targets and not use_alias:
+            try:
+                if 'use_goal' not in locals():
+                    use_goal = False
+            except Exception:
+                use_goal = False
+        use_rollup = False
+        try:
+            if not use_custom_targets and not use_alias and not use_goal:
+                from dateutil.relativedelta import relativedelta as _rd
+                cutoff_dt2 = pd.to_datetime(cutoff_date)
+                pred_end2 = (cutoff_dt2 + _rd(months=prediction_window_months)).strftime("%Y-%m-%d")
+                rollup_q = (
+                    "SELECT CompanyId AS customer_id, Rec_Date AS order_date, item_rollup "
+                    "FROM fact_sales_line WHERE Rec_Date > :cutoff AND Rec_Date <= :pred_end"
+                )
+                rwin = pd.read_sql_query(rollup_q, engine, params={"cutoff": cutoff_dt2.strftime("%Y-%m-%d"), "pred_end": pred_end2})
+                if not rwin.empty and 'item_rollup' in rwin.columns:
+                    # Normalize ids to integer-like strings to match dim_customer
+                    rwin['customer_id'] = pd.to_numeric(rwin['customer_id'], errors='coerce').astype('Int64')
+                    il = rwin['item_rollup'].astype(str).str.strip().str.casefold()
+                    sel = il == norm_division_name
+                    if sel.any():
+                        prediction_buyers_df = rwin.loc[sel, 'customer_id'].astype(str).unique()
+                        use_rollup = True
+            # If rollup buyers were found, override default mask path
+            if use_rollup:
+                division_buyers_pd = pd.DataFrame({'customer_id': prediction_buyers_df, 'bought_in_division': 1})
+                division_buyers = pl.from_pandas(division_buyers_pd).with_columns(pl.col('customer_id').cast(pl.Utf8)).lazy()
+            else:
+                prediction_buyers_df = prediction_data.loc[mask, 'customer_id'].astype(str).unique()
+                division_buyers_pd = pd.DataFrame({'customer_id': prediction_buyers_df, 'bought_in_division': 1})
+                division_buyers = pl.from_pandas(division_buyers_pd).with_columns(pl.col('customer_id').cast(pl.Utf8)).lazy()
+        except Exception:
+            prediction_buyers_df = prediction_data.loc[mask, 'customer_id'].astype(str).unique()
+            division_buyers_pd = pd.DataFrame({'customer_id': prediction_buyers_df, 'bought_in_division': 1})
+            division_buyers = pl.from_pandas(division_buyers_pd).with_columns(pl.col('customer_id').cast(pl.Utf8)).lazy()
         logger.info(f"Target: {len(prediction_buyers_df)} customers bought {division_name} in prediction window")
     else:
         # Original behavior: ever bought in historical data
@@ -957,7 +1024,12 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
             if use_alias:
                 sub_div = fd.loc[mask & (fd['product_division'].astype(str).str.strip().str.casefold().isin(alias_divisions)), ['customer_id', 'order_date', 'gross_profit']]
             else:
-                sub_div = fd.loc[mask & (fd['product_division'].astype(str).str.strip() == norm_division_name), ['customer_id', 'order_date', 'gross_profit']]
+                # If product_goal present and matches target, prefer that; else use division
+                if 'product_goal' in fd.columns:
+                    sub_goal = fd['product_goal'].astype(str).str.strip().str.casefold() == norm_division_name
+                else:
+                    sub_goal = False
+                sub_div = fd.loc[mask & (sub_goal | (fd['product_division'].astype(str).str.strip() == norm_division_name)), ['customer_id', 'order_date', 'gross_profit']]
             tx_n_div = sub_div.groupby('customer_id')['order_date'].count().rename(f'rfm__div__tx_n__{w}m').reset_index()
             gp_sum_div = sub_div.groupby('customer_id')['gross_profit'].sum().rename(f'rfm__div__gp_sum__{w}m').reset_index()
             gp_mean_div = sub_div.groupby('customer_id')['gross_profit'].mean().rename(f'rfm__div__gp_mean__{w}m').reset_index()
@@ -994,7 +1066,11 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
                         if use_alias:
                             sub_div_off = sub_off.loc[sub_off['product_division'].astype(str).str.strip().str.casefold().isin(alias_divisions), ['customer_id','order_date','gross_profit']]
                         else:
-                            sub_div_off = sub_off.loc[sub_off['product_division'].astype(str).str.strip() == norm_division_name, ['customer_id','order_date','gross_profit']]
+                            if 'product_goal' in sub_off.columns:
+                                sub_goal_off = sub_off['product_goal'].astype(str).str.strip().str.casefold() == norm_division_name
+                            else:
+                                sub_goal_off = False
+                            sub_div_off = sub_off.loc[sub_goal_off | (sub_off['product_division'].astype(str).str.strip() == norm_division_name), ['customer_id','order_date','gross_profit']]
                         tx_n_div_off = sub_div_off.groupby('customer_id')['order_date'].count().rename(f'rfm__div__tx_n__{w}m_off{off}d').reset_index()
                         gp_sum_div_off = sub_div_off.groupby('customer_id')['gross_profit'].sum().rename(f'rfm__div__gp_sum__{w}m_off{off}d').reset_index()
                         gp_mean_div_off = sub_div_off.groupby('customer_id')['gross_profit'].mean().rename(f'rfm__div__gp_mean__{w}m_off{off}d').reset_index()
