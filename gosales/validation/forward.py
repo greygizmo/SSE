@@ -169,26 +169,75 @@ def main(division: str, cutoff: str, window_months: int, holdout_source: str | N
             return
 
         vf = _build_validation_frame(division, cutoff, window_months, cfg)
+        # Optional gating: restrict to customers (warm|cold), exclude prospects
+        # Mirrors gating used in Phase 4 scoring to keep validation focused on customer accounts
+        try:
+            pop = getattr(cfg, "population", object())
+            include_prospects = bool(getattr(pop, "include_prospects", False))
+        except Exception:
+            include_prospects = False
+        if not include_prospects:
+            try:
+                warm = pd.to_numeric(vf.get("rfm__all__tx_n__12m", 0), errors="coerce").fillna(0.0) > 0
+                assets_active = pd.to_numeric(vf.get("assets_active_total", 0), errors="coerce").fillna(0.0) > 0
+                assets_on_subs = pd.to_numeric(vf.get("assets_on_subs_total", 0), errors="coerce").fillna(0.0) > 0
+                cold = (~warm) & (assets_active | assets_on_subs)
+                pre_n = int(len(vf))
+                vf = vf[warm | cold].reset_index(drop=True)
+                post_n = int(len(vf))
+                try:
+                    # Emit minimal gating summary under validation outputs for traceability
+                    _g_path = OUTPUTS_DIR / "validation" / division.lower() / cutoff / "population_gating_validation.csv"
+                    _g_path.parent.mkdir(parents=True, exist_ok=True)
+                    pd.DataFrame([
+                        {
+                            "division": division.lower(),
+                            "cutoff": cutoff,
+                            "pre_rows": pre_n,
+                            "post_rows": post_n,
+                        }
+                    ]).to_csv(_g_path, index=False)
+                    try:
+                        artifacts["population_gating_validation.csv"] = str(_g_path)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+                logger.info(
+                    "Validation gating applied (customers only): %d -> %d rows",
+                    pre_n,
+                    post_n,
+                )
+            except Exception as _e:
+                logger.warning(f"Validation customer-only gating skipped due to error: {_e}")
+        vf["customer_id"] = pd.to_numeric(vf["customer_id"], errors="coerce").astype("Int64")
         # Join holdout labels from DB (preferred) or CSVs based on config/CLI
+        used_source = None
         try:
             holdout = load_holdout_buyers(cfg, division, pd.to_datetime(cutoff), window_months, source_override=holdout_source)
+            used_source = holdout.source
             if holdout.buyers is not None and not holdout.buyers.empty:
-                labels_df = pd.DataFrame({'customer_id': holdout.buyers, 'holdout_bought': 1})
-                vf['customer_id'] = pd.to_numeric(vf['customer_id'], errors='coerce').astype('Int64')
+                labels_df = pd.DataFrame({'customer_id': holdout.buyers.astype("Int64"), 'holdout_bought': 1})
                 vf = vf.merge(labels_df, on='customer_id', how='left')
                 vf['holdout_bought'] = vf['holdout_bought'].fillna(0).astype(int)
                 if 'bought_in_division' in vf.columns:
                     vf.drop(columns=['bought_in_division'], inplace=True)
                 vf.rename(columns={'holdout_bought': 'bought_in_division'}, inplace=True)
-                if holdout.realized_gp is not None:
-                    gp_df = holdout.realized_gp
-                    ccol = 'CustomerId' if 'CustomerId' in gp_df.columns else ('customer_id' if 'customer_id' in gp_df.columns else None)
-                    if ccol:
-                        vf = vf.merge(gp_df.rename(columns={ccol: 'customer_id'}), on='customer_id', how='left')
-                        vf['holdout_gp'] = vf['holdout_gp'].fillna(0.0)
-            used_source = holdout.source
+            if holdout.realized_gp is not None and not holdout.realized_gp.empty:
+                gp_df = holdout.realized_gp.copy()
+                if 'CustomerId' in gp_df.columns and 'customer_id' not in gp_df.columns:
+                    gp_df = gp_df.rename(columns={'CustomerId': 'customer_id'})
+                gp_df['customer_id'] = pd.to_numeric(gp_df['customer_id'], errors='coerce').astype('Int64')
+                gp_df = gp_df.dropna(subset=['customer_id'])
+                value_cols = [c for c in gp_df.columns if c != 'customer_id']
+                if 'holdout_gp' not in gp_df.columns and value_cols:
+                    gp_df = gp_df.rename(columns={value_cols[0]: 'holdout_gp'})
+                if 'holdout_gp' in gp_df.columns:
+                    gp_df['holdout_gp'] = pd.to_numeric(gp_df['holdout_gp'], errors='coerce').fillna(0.0)
+                    vf = vf.merge(gp_df[['customer_id', 'holdout_gp']], on='customer_id', how='left')
+                    vf['holdout_gp'] = vf['holdout_gp'].fillna(0.0)
         except Exception:
-            pass
+            used_source = None
     
         # Persist validation frame parquet
         out_dir = OUTPUTS_DIR / 'validation' / division.lower() / cutoff

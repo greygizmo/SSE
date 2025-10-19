@@ -13,8 +13,8 @@ from gosales.whitespace.als import build_als
     sys.platform.startswith("win"), reason="resource module not available on Windows"
 )
 def test_build_als_generates_top_n_recommendations(tmp_path, monkeypatch):
-    # Create mock fact_orders table
-    fact_orders = pl.DataFrame(
+    # Create mock fact_transactions table
+    fact_transactions = pl.DataFrame(
         {
             "customer_id": ["cust-1", "cust-1", "cust-2", "cust-2", "cust-3", "cust-3"],
             "item": ["A", "B", "B", "C", "C", "D"],
@@ -22,7 +22,7 @@ def test_build_als_generates_top_n_recommendations(tmp_path, monkeypatch):
     )
 
     # Mock the database read
-    monkeypatch.setattr(pl, "read_database", lambda query, engine: fact_orders)
+    monkeypatch.setattr(pl, "read_database", lambda query, engine: fact_transactions)
 
     output = tmp_path / "als.csv"
 
@@ -40,7 +40,7 @@ def test_build_als_generates_top_n_recommendations(tmp_path, monkeypatch):
 
 
 def test_build_als_handles_non_string_items(tmp_path, monkeypatch):
-    fact_orders = pl.DataFrame(
+    fact_transactions = pl.DataFrame(
         {
             "customer_id": pl.Series(
                 ["cust-1", "cust-1", "cust-2", "cust-2"], dtype=pl.Utf8
@@ -49,7 +49,7 @@ def test_build_als_handles_non_string_items(tmp_path, monkeypatch):
         }
     )
 
-    monkeypatch.setattr(pl, "read_database", lambda query, engine: fact_orders)
+    monkeypatch.setattr(pl, "read_database", lambda query, engine: fact_transactions)
 
     class DummyALS:
         def __init__(self, *args, **kwargs):

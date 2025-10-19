@@ -7,17 +7,19 @@ snapshots.  Orchestrators and ad-hoc scripts import these helpers when they need
 to rebuild or inspect the curated layer.
 """
 
-import polars as pl
-import pandas as pd
 import json
+import re
+import hashlib
+from pathlib import Path
+
+import pandas as pd
+import polars as pl
 try:
     from rapidfuzz import process, fuzz
     FUZZY_AVAILABLE = True
 except Exception:
     FUZZY_AVAILABLE = False
 from sqlalchemy import text
-from pathlib import Path
-import hashlib
 from gosales.utils.db import get_db_connection, get_curated_connection
 from gosales.utils.sql import validate_identifier, ensure_allowed_identifier
 from gosales.sql.queries import select_all
@@ -36,8 +38,18 @@ from gosales.etl.contracts import (
     violations_to_dataframe,
     check_date_parse_and_bounds,
 )
+from gosales.etl import build_fact_sales_line, summarise_sales_header
+from gosales.etl.sales_line import get_rollup_goal_mappings
 
 logger = get_logger(__name__)
+
+_ROLLUP_NORMALIZE_RE = re.compile(r"[^0-9a-z]+")
+
+
+def _normalize_rollup_key(label: str | None) -> str:
+    if not label:
+        return ""
+    return " ".join(_ROLLUP_NORMALIZE_RE.sub(" ", str(label).strip().lower()).split())
 
 def _checksum_parquet(parquet_path: Path) -> str:
     h = hashlib.sha256()
@@ -52,7 +64,14 @@ def _ensure_parquet_dirs(curated_dir: Path) -> None:
     (curated_dir / "dim").mkdir(parents=True, exist_ok=True)
 
 
-def build_star_schema(engine, config_path: str | Path | None = None, rebuild: bool = False, staging_only: bool = False, fail_soft: bool = False):
+def build_star_schema(
+    engine,
+    config_path: str | Path | None = None,
+    rebuild: bool = False,
+    staging_only: bool = False,
+    fail_soft: bool = False,
+    use_line_item_facts: bool | None = None,
+):
     """
     Builds a tidy, analytics-ready star schema from the raw sales_log data.
     
@@ -69,6 +88,15 @@ def build_star_schema(engine, config_path: str | Path | None = None, rebuild: bo
     """
     logger.info("Building star schema with new tidy transaction model...")
     cfg = load_config(config_path)
+    if use_line_item_facts is not None:
+        try:
+            cfg.etl.line_items.use_line_item_facts = bool(use_line_item_facts)
+        except Exception as override_error:  # pragma: no cover - defensive log
+            logger.warning(
+                "Unable to override line-item toggle via parameter (use_line_item_facts=%s): %s",
+                use_line_item_facts,
+                override_error,
+            )
     curated_dir = Path(cfg.paths.curated)
     _ensure_parquet_dirs(curated_dir)
 
@@ -79,6 +107,7 @@ def build_star_schema(engine, config_path: str | Path | None = None, rebuild: bo
             # Use curated engine and transactional DDL to allow rollback on failure
             with get_curated_connection().begin() as connection:
                 connection.execute(text("DROP TABLE IF EXISTS fact_transactions;"))
+                connection.execute(text("DROP TABLE IF EXISTS fact_sales_line;"))
                 connection.execute(text("DROP TABLE IF EXISTS dim_customer;"))
                 connection.execute(text("DROP TABLE IF EXISTS dim_product;"))
                 connection.execute(text("DROP TABLE IF EXISTS dim_date;"))
@@ -121,6 +150,40 @@ def build_star_schema(engine, config_path: str | Path | None = None, rebuild: bo
 
     # Engines: source (raw) and curated (write target)
     curated_engine = get_curated_connection()
+
+    # Optional: build the new line-item fact in parallel with legacy processing
+    line_items_cfg = getattr(getattr(cfg, "etl", object()), "line_items", None)
+    use_line_items = bool(getattr(line_items_cfg, "use_line_item_facts", True))
+    if use_line_items:
+        logger.info("Building fact_sales_line from line-item sales detail source...")
+        try:
+            fact_sales_line = build_fact_sales_line(engine=engine, config_path=config_path, cfg=cfg)
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.exception("Failed to build fact_sales_line: %s", exc)
+            fact_sales_line = pl.DataFrame()
+
+        if fact_sales_line.is_empty():
+            logger.warning("fact_sales_line is empty; skipping write")
+        else:
+            sort_cols = [col for col in ["Sales_Order", "Rec_Date", "Item_internalid"] if col in fact_sales_line.columns]
+            if sort_cols:
+                fact_sales_line = fact_sales_line.sort(sort_cols, nulls_last=True)
+
+            fact_sales_line.write_database("fact_sales_line", curated_engine, if_table_exists="replace")
+            fact_line_parquet = curated_dir / "fact" / "fact_sales_line.parquet"
+            fact_sales_line.write_parquet(fact_line_parquet)
+            logger.info("fact_sales_line ready: %d rows", len(fact_sales_line))
+
+            try:
+                from gosales.etl import summarise_sales_header
+
+                fact_sales_header = summarise_sales_header(fact_sales_line)
+                fact_sales_header.write_database("fact_sales_header", curated_engine, if_table_exists="replace")
+                fact_header_parquet = curated_dir / "fact" / "fact_sales_header.parquet"
+                fact_sales_header.write_parquet(fact_header_parquet)
+                logger.info("fact_sales_header ready: %d rows", len(fact_sales_header))
+            except Exception as exc:
+                logger.warning("Unable to build fact_sales_header from line items: %s", exc)
 
     # Read the raw data from the database using pandas first, then convert to polars
     logger.info("Reading sales_log table...")
@@ -745,6 +808,7 @@ def build_star_schema(engine, config_path: str | Path | None = None, rebuild: bo
     # --- 2. Define SKU and Division Mapping ---
     # Centralized mapping for unpivot operation.
     sku_mapping = get_sku_mapping()
+    rollup_goal_lookup, rollup_division_lookup = get_rollup_goal_mappings(engine=engine, cfg=cfg)
 
     # --- 3. Unpivot the data to create fact_transactions ---
     logger.info("Unpivoting sales_log to create fact_transactions table...")
@@ -759,6 +823,9 @@ def build_star_schema(engine, config_path: str | Path | None = None, rebuild: bo
     for gp_col, details in sku_mapping.items():
         qty_col = details['qty_col']
         division = details['division']
+        norm_key = _normalize_rollup_key(gp_col)
+        canonical_division = rollup_division_lookup.get(norm_key, division)
+        goal_value = rollup_goal_lookup.get(norm_key)
 
         if gp_col in sales_log.columns and qty_col in sales_log.columns:
             # Melt for the current SKU
@@ -768,7 +835,8 @@ def build_star_schema(engine, config_path: str | Path | None = None, rebuild: bo
                 .filter(pl.col(gp_col).is_not_null() | pl.col(qty_col).is_not_null())
                 .with_columns([
                     pl.lit(gp_col).alias("product_sku"),
-                    pl.lit(division).alias("product_division")
+                    pl.lit(canonical_division).alias("product_division"),
+                    pl.lit(goal_value, dtype=pl.Utf8).alias("product_goal"),
                 ])
                 .rename({gp_col: "gross_profit", qty_col: "quantity"})
                 .collect()
@@ -831,10 +899,16 @@ def build_star_schema(engine, config_path: str | Path | None = None, rebuild: bo
                 mask = fact_transactions_pd['product_sku'] == sku_key
                 if mask.any():
                     # Map row-wise using source Division column
-                    fact_transactions_pd.loc[mask, 'product_division'] = (
+                    mapped_divisions = (
                         fact_transactions_pd.loc[mask, 'Division']
-                        .map(lambda x: route.get(str(x).strip(), fact_transactions_pd.loc[mask, 'product_division'].iloc[0]))
                     )
+                    fact_transactions_pd.loc[mask, 'product_division'] = mapped_divisions.map(
+                        lambda x: route.get(str(x).strip(), fact_transactions_pd.loc[mask, 'product_division'].iloc[0])
+                    )
+                    if 'product_goal' in fact_transactions_pd.columns:
+                        goal_override = rollup_goal_lookup.get(_normalize_rollup_key(sku_key))
+                        if goal_override:
+                            fact_transactions_pd.loc[mask, 'product_goal'] = goal_override
     except Exception as e:
         logger.warning(f"Division routing step skipped/failed: {e}")
 
@@ -845,7 +919,18 @@ def build_star_schema(engine, config_path: str | Path | None = None, rebuild: bo
     
     # Normalize division strings (trim) and select/sort final columns
     fact_transactions_pd['product_division'] = fact_transactions_pd['product_division'].astype(str).str.strip()
-    final_cols = ['customer_id', 'order_date', 'product_sku', 'product_division', 'gross_profit', 'quantity']
+    if 'product_goal' in fact_transactions_pd.columns:
+        fact_transactions_pd['product_goal'] = fact_transactions_pd['product_goal'].astype(object)
+        goal_mask = fact_transactions_pd['product_goal'].notna()
+        if goal_mask.any():
+            fact_transactions_pd.loc[goal_mask, 'product_goal'] = (
+                fact_transactions_pd.loc[goal_mask, 'product_goal'].astype(str).str.strip()
+            )
+        fact_transactions_pd.loc[~goal_mask, 'product_goal'] = None
+    final_cols = ['customer_id', 'order_date', 'product_sku', 'product_division']
+    if 'product_goal' in fact_transactions_pd.columns:
+        final_cols.append('product_goal')
+    final_cols.extend(['gross_profit', 'quantity'])
     if 'invoice_id' in fact_transactions_pd.columns:
         final_cols.insert(1, 'invoice_id')
     fact_transactions_pd = fact_transactions_pd[final_cols] \
@@ -1002,11 +1087,29 @@ if __name__ == "__main__":
     parser.add_argument("--rebuild", action="store_true")
     parser.add_argument("--staging-only", action="store_true")
     parser.add_argument("--fail-soft", action="store_true")
+    parser.add_argument(
+        "--use-line-items",
+        dest="use_line_items",
+        action="store_true",
+        help="Enable line-item fact build (writes fact_sales_line).",
+    )
+    parser.add_argument(
+        "--no-use-line-items",
+        dest="use_line_items",
+        action="store_false",
+        help="Force-disable line-item fact build.",
+    )
+    parser.set_defaults(use_line_items=None)
     args = parser.parse_args()
 
     with run_context("PHASE0") as rc:
         # Persist resolved config
         cfg = load_config(args.config)
+        if args.use_line_items is not None:
+            try:
+                cfg.etl.line_items.use_line_item_facts = bool(args.use_line_items)
+            except Exception:
+                logger.warning("Unable to set line-item toggle for recorded manifest")
         runs_dir = Path(rc["run_dir"])
         runs_dir.mkdir(parents=True, exist_ok=True)
         resolved_path = runs_dir / "config_resolved.yaml"
@@ -1019,5 +1122,12 @@ if __name__ == "__main__":
             pass
 
         db_engine = get_db_connection()
-        build_star_schema(db_engine, config_path=args.config, rebuild=args.rebuild, staging_only=args.staging_only, fail_soft=args.fail_soft)
+        build_star_schema(
+            db_engine,
+            config_path=args.config,
+            rebuild=args.rebuild,
+            staging_only=args.staging_only,
+            fail_soft=args.fail_soft,
+            use_line_item_facts=args.use_line_items,
+        )
 

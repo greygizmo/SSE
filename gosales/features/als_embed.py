@@ -4,6 +4,7 @@ from typing import Tuple
 
 import pandas as pd
 import polars as pl
+import numpy as np
 
 from scipy.sparse import coo_matrix, csr_matrix
 from threadpoolctl import threadpool_limits
@@ -53,6 +54,7 @@ def customer_als_embeddings(
     reg: float = 0.1,
     alpha: float = 10.0,
     lookback_months: int | None = 12,
+    lag_days: int | None = None,
 ) -> pl.DataFrame:
     """Compute ALS-style customer embeddings from transaction history.
 
@@ -73,26 +75,50 @@ def customer_als_embeddings(
         return pl.DataFrame(data)
 
     # Build interactions from feature period only
-    tx = pd.read_sql(
-        "SELECT customer_id, order_date, product_sku, quantity FROM fact_transactions",
-        engine,
-    )
+    # Prefer line-grain transactions with quantities and GP for positive-feedback weights
+    try:
+        tx = pd.read_sql(
+            "SELECT customer_id, order_date, product_sku, quantity, gross_profit FROM fact_transactions",
+            engine,
+        )
+    except Exception:
+        tx = pd.read_sql(
+            "SELECT customer_id, order_date, product_sku, quantity FROM fact_transactions",
+            engine,
+        )
     if tx.empty:
         return _empty_embeddings()
     tx['order_date'] = pd.to_datetime(tx['order_date'], errors='coerce')
     cutoff_dt = pd.to_datetime(cutoff)
+    effective_end = cutoff_dt
+    if lag_days is not None:
+        try:
+            lag_days_int = int(lag_days)
+            if lag_days_int > 0:
+                effective_end = cutoff_dt - pd.Timedelta(days=lag_days_int)
+        except Exception:
+            effective_end = cutoff_dt
     if lookback_months is not None:
         start_dt = cutoff_dt - pd.DateOffset(months=lookback_months)
-        tx = tx[(tx['order_date'] <= cutoff_dt) & (tx['order_date'] >= start_dt)].copy()
+        tx = tx[(tx['order_date'] <= effective_end) & (tx['order_date'] >= start_dt)].copy()
     else:
-        tx = tx[(tx['order_date'] <= cutoff_dt)].copy()
+        tx = tx[(tx['order_date'] <= effective_end)].copy()
     if tx.empty:
         return _empty_embeddings()
-    # Weights: total quantity (fallback to 1 if missing)
+    # Weights: combine quantity and positive GP to emphasize meaningful purchases while remaining robust
     tx['quantity'] = pd.to_numeric(tx['quantity'], errors='coerce').fillna(1.0)
+    if 'gross_profit' in tx.columns:
+        gp_pos = pd.to_numeric(tx['gross_profit'], errors='coerce').fillna(0.0)
+        gp_pos = gp_pos.clip(lower=0.0)
+    else:
+        gp_pos = pd.Series([0.0] * len(tx), index=tx.index)
     tx['customer_id'] = tx['customer_id'].astype('string')
     tx['product_sku'] = tx['product_sku'].astype('string')
-    grp = tx.groupby(['customer_id','product_sku'])['quantity'].sum().rename('weight').reset_index()
+    # Simple monotone transform to temper extremes
+    q_term = np.log1p(1.0 + tx['quantity'])
+    gp_term = np.log1p(1.0 + gp_pos)
+    tx['als_weight'] = (q_term + gp_term).astype('float64')
+    grp = tx.groupby(['customer_id','product_sku'])['als_weight'].sum().rename('weight').reset_index()
     if grp.empty:
         return _empty_embeddings()
     mat, user_index, _ = _build_user_item(grp, 'customer_id', 'product_sku', 'weight')

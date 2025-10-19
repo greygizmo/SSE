@@ -8,7 +8,7 @@ import gosales.whitespace.build_lift as build_lift_module
 
 def test_basket_plus_binary_and_lift_finite(tmp_path, monkeypatch):
     engine = create_engine("sqlite://")
-    fact_orders = pl.DataFrame(
+    fact_transactions = pl.DataFrame(
         {
             "customer_id": [
                 1,
@@ -26,7 +26,7 @@ def test_basket_plus_binary_and_lift_finite(tmp_path, monkeypatch):
                 9,
                 10,
             ],
-            "product_name": [
+            "product_sku": [
                 "A",
                 "A",
                 "B",
@@ -44,7 +44,7 @@ def test_basket_plus_binary_and_lift_finite(tmp_path, monkeypatch):
             ],
         }
     )
-    fact_orders.write_database("fact_orders", engine)
+    fact_transactions.write_database("fact_transactions", engine)
 
     captured: dict[str, pd.DataFrame] = {}
 

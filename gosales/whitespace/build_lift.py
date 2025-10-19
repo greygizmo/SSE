@@ -18,21 +18,16 @@ def build_lift(engine, output_path):
     """
     logger.info("Building lift...")
 
-    # Read transactions; prefer fact_transactions(product_sku), fallback to legacy fact_orders(product_name)
-    try:
-        fact_transactions = pl.read_database(
-            "SELECT customer_id, product_sku FROM fact_transactions",
-            engine,
+    # Read transactions from the canonical line-grain fact
+    src = pl.read_database(
+        "SELECT customer_id, product_sku FROM fact_transactions",
+        engine,
+    )
+    if src.is_empty():
+        raise RuntimeError(
+            "fact_transactions is empty; run build_star with line-item facts enabled before computing lift."
         )
-        item_col = "product_sku"
-        src = fact_transactions
-    except Exception:
-        fact_orders = pl.read_database(
-            "SELECT customer_id, product_name FROM fact_orders", engine
-        )
-        fact_orders = fact_orders.rename({"product_name": "product_sku"})
-        item_col = "product_sku"
-        src = fact_orders
+    item_col = "product_sku"
 
     # Create a basket for each customer
     basket = (

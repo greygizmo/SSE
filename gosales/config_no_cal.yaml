@@ -9,6 +9,10 @@ database:
   strict_db: false
   source_tables:
     sales_log: dbo.saleslog
+    sales_detail: dbo.table_saleslog_detail
+    product_info: dbo.table_Product_Info_cleaned_headers
+    product_tags: dbo.analytics_product_tags
+    analytics_order_tags: dbo.analytics_order_tags
     industry_enrichment: csv
     customer_assets_rollups: dbo.customer_asset_rollups
     moneyball_assets: dbo.[Moneyball Assets]
@@ -17,6 +21,10 @@ database:
   - sales_log
   - industry_enrichment
   - dbo.saleslog
+  - dbo.table_saleslog_detail
+    - dbo.table_Product_Info_cleaned_headers
+    - dbo.analytics_product_tags
+    - dbo.analytics_order_tags
   - dbo.customer_asset_rollups
   - dbo.[Moneyball Assets]
   - dbo.items_category_limited
@@ -42,6 +50,30 @@ etl:
     order_date: Rec_Date
     division: division
     customer_name: New_Business
+  line_items:
+    use_line_item_facts: true
+    sources:
+      sales_detail: dbo.table_saleslog_detail
+      product_info: dbo.table_Product_Info_cleaned_headers
+      product_tags: dbo.analytics_product_tags
+      order_tags: dbo.analytics_order_tags
+      customer_asset_rollups: dbo.customer_asset_rollups
+    dedupe:
+      order_column: Sales_Order
+      item_column: Item_internalid
+      revenue_column: Revenue
+      cogs_column: Amount2
+      gross_profit_column: GP
+      term_gross_profit_column: Term_GP
+      last_update_column: last_update
+    behavior:
+      exclude_line_types:
+      - tax
+      - freight
+      - discount_only
+      return_treatment: net_amount
+      kit_handling: prefer_children
+      manual_adjustments_documented: true
   dim_customer:
     sources:
     - sales_log
@@ -124,6 +156,15 @@ features:
     - region
     - territory
     - industry
+  use_usd_monetary: true
+  enable_canonical_division_features: true
+  enable_margin_features: true
+  enable_currency_mix: true
+  enable_rollup_diversity: true
+  enable_returns_features: true
+  enable_order_composition: true
+  enable_trend_features: true
+  enable_tag_als: false
 modeling:
   seed: 42
   folds: 1
@@ -222,6 +263,9 @@ validation:
   - territory
   ks_threshold: 0.15
   psi_threshold: 0.25
+  holdout_required: true
+  holdout_db_object: fact_sales_line
+  holdout_source: auto
   shift14_epsilon_auc: 0.01
   shift14_epsilon_lift10: 0.25
   ablation_epsilon_auc: 0.01

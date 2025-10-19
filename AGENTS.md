@@ -2,7 +2,7 @@
 This repository powers a division-aware Ideal Customer Profile (ICP) and whitespace engine. The stack ingests raw GoSales transactions, builds a curated star schema, engineers leakage-safe features, trains calibrated models, and surfaces ranked opportunities for sales and customer-success teams. The guidance below keeps iterations safe, deterministic, and explainable—especially important because the maintainer is iteratively improving the system and relies on coding agents for assistance.
 ---
 ## 1. Mission, Priorities, and Non‑Negotiables
-1. **Protect determinism and leakage-safety.** Always preserve time-cutoff rules, guarded joins, and deterministic sorting in ETL, features, and scoring. Any stochastic process must be seeded and documented.
+1. **Safeguard determinism and prevent leakage.** Keep time-cutoff rules intact, enforce guarded joins, and maintain deterministic sorting across ETL, feature engineering, and scoring. When randomness is unavoidable, seed it and record the configuration.
 2. **Keep orchestrations resilient.** CLI entry points (`gosales.pipeline.*`, `gosales.validation.*`, `gosales.whitespace.*`) must continue to run end-to-end even when optional artifacts (ALS, SHAP, telemetry) are missing. Prefer graceful fallbacks over hard failures.
 3. **Guard data and secrets.** Never introduce code that reads from non-configured paths, commits large/raw data, or hard-codes credentials. Environment-dependent information lives in `config.yaml`, `.env`, or runtime arguments.
 4. **Explain your work.** Update documentation, config examples, and diagnostics when behavior changes. New features must surface in docs or `reports/` if they affect end users.

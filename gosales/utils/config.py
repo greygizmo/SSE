@@ -44,6 +44,42 @@ class Run:
 
 
 @dataclass
+class LineItemsSources:
+    sales_detail: str = "dbo.table_saleslog_detail"
+    product_info: str = "dbo.table_Product_Info_cleaned_headers"
+    product_tags: str = "dbo.analytics_product_tags"
+    order_tags: str | None = "dbo.analytics_order_tags"
+    customer_asset_rollups: str = "dbo.customer_asset_rollups"
+
+
+@dataclass
+class LineItemsDedupe:
+    order_column: str = "Sales_Order"
+    item_column: str = "Item_internalid"
+    revenue_column: str = "Revenue"
+    cogs_column: str = "Amount2"
+    gross_profit_column: str = "GP"
+    term_gross_profit_column: str = "Term_GP"
+    last_update_column: str = "last_update"
+
+
+@dataclass
+class LineItemsBehavior:
+    exclude_line_types: list[str] = field(default_factory=list)
+    return_treatment: str = "net_amount"
+    kit_handling: str = "prefer_children"
+    manual_adjustments_documented: bool = False
+
+
+@dataclass
+class LineItemsConfig:
+    use_line_item_facts: bool = True
+    sources: LineItemsSources = field(default_factory=LineItemsSources)
+    dedupe: LineItemsDedupe = field(default_factory=LineItemsDedupe)
+    behavior: LineItemsBehavior = field(default_factory=LineItemsBehavior)
+
+
+@dataclass
 class ETL:
     coerce_dates_tz: str = "UTC"
     currency: str = "USD"
@@ -55,6 +91,7 @@ class ETL:
     fuzzy_skip_if_coverage_ge: float = 0.95
     # Source column mapping: use exact DB headers
     source_columns: Dict[str, str] = field(default_factory=dict)
+    line_items: LineItemsConfig = field(default_factory=LineItemsConfig)
 
 
 @dataclass
@@ -139,6 +176,20 @@ class Features:
     fastpath_minimal_return_rows: int = 10_000_000
     # Segment-specific feature allowlists (substring patterns to keep per segment)
     segment_feature_allowlist: Dict[str, list[str]] = field(default_factory=dict)
+    # Line-item derived feature toggles
+    use_usd_monetary: bool = True
+    enable_canonical_division_features: bool = True
+    enable_margin_features: bool = True
+    enable_currency_mix: bool = True
+    enable_rollup_diversity: bool = True
+    enable_returns_features: bool = True
+    enable_order_composition: bool = True
+    enable_trend_features: bool = True
+    enable_tag_als: bool = False
+    # Optional aliases mapping logical rollups (e.g., 'cad') to a list of canonical
+    # product_division values present in curated facts. Keys and values are
+    # normalized downstream via casefold/trim in consumers.
+    division_aliases: Dict[str, list[str]] = field(default_factory=dict)
 
 
 @dataclass
@@ -515,6 +566,46 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
             fuzzy_min_unmatched=int(etl_cfg.get("fuzzy_min_unmatched", 50)),
             fuzzy_skip_if_coverage_ge=float(etl_cfg.get("fuzzy_skip_if_coverage_ge", 0.95)),
             source_columns=dict(etl_cfg.get("source_columns", {})),
+            line_items=LineItemsConfig(
+                use_line_item_facts=bool((etl_cfg.get("line_items") or {}).get("use_line_item_facts", True)),
+                sources=LineItemsSources(
+                    **{
+                        "sales_detail": str(((etl_cfg.get("line_items", {}) or {}).get("sources", {}) or {}).get("sales_detail", LineItemsSources().sales_detail)),
+                        "product_info": str(((etl_cfg.get("line_items", {}) or {}).get("sources", {}) or {}).get("product_info", LineItemsSources().product_info)),
+                        "product_tags": str(((etl_cfg.get("line_items", {}) or {}).get("sources", {}) or {}).get("product_tags", LineItemsSources().product_tags)),
+                        "order_tags": (
+                            str(order_tags_raw)
+                            if (
+                                order_tags_raw := (
+                                    (etl_cfg.get("line_items", {}) or {}).get("sources", {}) or {}
+                                ).get("order_tags", LineItemsSources().order_tags)
+                            )
+                            not in (None, "")
+                            else None
+                        ),
+                        "customer_asset_rollups": str(((etl_cfg.get("line_items", {}) or {}).get("sources", {}) or {}).get("customer_asset_rollups", LineItemsSources().customer_asset_rollups)),
+                    }
+                ),
+                dedupe=LineItemsDedupe(
+                    **{
+                        "order_column": str(((etl_cfg.get("line_items", {}) or {}).get("dedupe", {}) or {}).get("order_column", LineItemsDedupe().order_column)),
+                        "item_column": str(((etl_cfg.get("line_items", {}) or {}).get("dedupe", {}) or {}).get("item_column", LineItemsDedupe().item_column)),
+                        "revenue_column": str(((etl_cfg.get("line_items", {}) or {}).get("dedupe", {}) or {}).get("revenue_column", LineItemsDedupe().revenue_column)),
+                        "cogs_column": str(((etl_cfg.get("line_items", {}) or {}).get("dedupe", {}) or {}).get("cogs_column", LineItemsDedupe().cogs_column)),
+                        "gross_profit_column": str(((etl_cfg.get("line_items", {}) or {}).get("dedupe", {}) or {}).get("gross_profit_column", LineItemsDedupe().gross_profit_column)),
+                        "term_gross_profit_column": str(((etl_cfg.get("line_items", {}) or {}).get("dedupe", {}) or {}).get("term_gross_profit_column", LineItemsDedupe().term_gross_profit_column)),
+                        "last_update_column": str(((etl_cfg.get("line_items", {}) or {}).get("dedupe", {}) or {}).get("last_update_column", LineItemsDedupe().last_update_column)),
+                    }
+                ),
+                behavior=LineItemsBehavior(
+                    **{
+                        "exclude_line_types": list(((etl_cfg.get("line_items", {}) or {}).get("behavior", {}) or {}).get("exclude_line_types", [])),
+                        "return_treatment": str(((etl_cfg.get("line_items", {}) or {}).get("behavior", {}) or {}).get("return_treatment", LineItemsBehavior().return_treatment)),
+                        "kit_handling": str(((etl_cfg.get("line_items", {}) or {}).get("behavior", {}) or {}).get("kit_handling", LineItemsBehavior().kit_handling)),
+                        "manual_adjustments_documented": bool(((etl_cfg.get("line_items", {}) or {}).get("behavior", {}) or {}).get("manual_adjustments_documented", LineItemsBehavior().manual_adjustments_documented)),
+                    }
+                ),
+            ),
         ),
         logging=Logging(
             level=str(log_cfg.get("level", "INFO")),
@@ -567,6 +658,16 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
             sqlite_skip_advanced_rows=int(feat_cfg.get("sqlite_skip_advanced_rows", 10_000_000)),
             fastpath_minimal_return_rows=int(feat_cfg.get("fastpath_minimal_return_rows", 10_000_000)),
             segment_feature_allowlist=dict(feat_cfg.get("segment_feature_allowlist", {})),
+            use_usd_monetary=bool(feat_cfg.get("use_usd_monetary", True)),
+            enable_canonical_division_features=bool(feat_cfg.get("enable_canonical_division_features", True)),
+            enable_margin_features=bool(feat_cfg.get("enable_margin_features", True)),
+            enable_currency_mix=bool(feat_cfg.get("enable_currency_mix", True)),
+            enable_rollup_diversity=bool(feat_cfg.get("enable_rollup_diversity", True)),
+            enable_returns_features=bool(feat_cfg.get("enable_returns_features", True)),
+            enable_order_composition=bool(feat_cfg.get("enable_order_composition", True)),
+            enable_trend_features=bool(feat_cfg.get("enable_trend_features", True)),
+            enable_tag_als=bool(feat_cfg.get("enable_tag_als", False)),
+            division_aliases=dict(feat_cfg.get("division_aliases", {})),
         ),
         modeling=ModelingConfig(
             seed=int(mdl_cfg.get("seed", 42)),

@@ -9,7 +9,6 @@ wrappers and notebooks alike.
 import polars as pl
 import pandas as pd
 import numpy as np
-from datetime import datetime
 from gosales.utils.db import get_db_connection
 from gosales.utils.logger import get_logger
 from gosales.utils import config as cfg
@@ -22,6 +21,364 @@ from gosales.sql.queries import select_all
 
 logger = get_logger(__name__)
 
+
+def _safe_read_sql_query(engine, query: str, params: dict | None = None) -> pd.DataFrame:
+    """Read SQL with tolerant error handling."""
+
+    try:
+        return pd.read_sql_query(query, engine, params=params)
+    except Exception as exc:  # pragma: no cover - diagnostic path
+        try:
+            head = query.strip().splitlines()[0]
+        except Exception:
+            head = query
+        logger.debug(
+            "SQL read failed",
+            extra={"query_head": head, "error": str(exc)},
+        )
+        return pd.DataFrame()
+
+
+def _coerce_flag_series(series: pd.Series, truthy: set[str] | None = None) -> pd.Series:
+    """Convert assorted textual/numeric flag encodings into Int8 indicators."""
+
+    if series is None:
+        return pd.Series(dtype="Int8")
+    truthy_values = {"1", "true", "t", "yes", "y", "on"}
+    if truthy:
+        truthy_values |= {str(val).strip().lower() for val in truthy}
+    numeric = pd.to_numeric(series, errors="coerce")
+    if numeric.notna().any():
+        return (numeric.fillna(0).astype(float) > 0).astype("Int8")
+    series_str = series.astype(str).str.strip().str.lower()
+    return series_str.isin(truthy_values).astype("Int8")
+
+
+def _load_line_item_metadata(engine, cutoff_date: str | None = None) -> pd.DataFrame:
+    """Return lightweight line-item metadata for branch/rep and flag derivations."""
+
+    params = None
+    where_clause = ""
+    if cutoff_date:
+        params = {"cutoff": cutoff_date}
+        where_clause = "WHERE Rec_Date <= :cutoff"
+    query = f"""
+        SELECT
+            CompanyId AS customer_id,
+            Rec_Date AS order_date,
+            Branch AS branch,
+            Rep AS rep,
+            New AS new_flag,
+            New_Business AS new_business_flag,
+            Referral_NS_Field AS referral_ns_field
+        FROM fact_sales_line
+        {where_clause}
+    """
+    df = _safe_read_sql_query(engine, query, params)
+    if df.empty:
+        return df
+    df["customer_id"] = df["customer_id"].astype(str)
+    if "order_date" in df.columns:
+        df["order_date"] = pd.to_datetime(df["order_date"], errors="coerce")
+    return df
+
+
+def _prepare_branch_source(line_meta: pd.DataFrame) -> pd.DataFrame:
+    """Extract branch/rep columns from line metadata, returning empty on missing data."""
+
+    if line_meta.empty:
+        return pd.DataFrame()
+    cols = [c for c in ("customer_id", "order_date", "branch", "rep") if c in line_meta.columns]
+    if not cols:
+        return pd.DataFrame()
+    sl = line_meta[cols].copy()
+    sl = sl.dropna(subset=["customer_id"])
+    if sl.empty:
+        return sl
+    branch_available = "branch" in sl.columns and sl["branch"].notna().any()
+    rep_available = "rep" in sl.columns and sl["rep"].notna().any()
+    if not branch_available and not rep_available:
+        return pd.DataFrame()
+    return sl
+
+
+def _load_branch_rep_curated(engine, cutoff_date: str | None = None) -> pd.DataFrame:
+    """Fallback branch/rep loader using curated raw extracts."""
+
+    params = {"cutoff": cutoff_date} if cutoff_date else None
+    where_clause = " WHERE order_date <= :cutoff" if cutoff_date else ""
+    df = _safe_read_sql_query(
+        engine,
+        f"SELECT customer_id, order_date, branch, rep FROM fact_sales_log_raw{where_clause}",
+        params,
+    )
+    if df.empty:
+        return pd.DataFrame()
+    df["customer_id"] = df["customer_id"].astype(str)
+    if "order_date" in df.columns:
+        df["order_date"] = pd.to_datetime(df["order_date"], errors="coerce")
+    return df
+
+
+def _compute_flags_from_line_meta(line_meta: pd.DataFrame, cutoff_date: str | None = None) -> pd.DataFrame:
+    """Build ever_acr / ever_new_customer flags from line-item metadata."""
+
+    if line_meta.empty:
+        return pd.DataFrame()
+    cols = [c for c in ("customer_id", "order_date", "new_flag", "new_business_flag", "referral_ns_field") if c in line_meta.columns]
+    if not cols:
+        return pd.DataFrame()
+
+    flags = line_meta[cols].copy()
+    flags["customer_id"] = flags["customer_id"].astype(str)
+    if cutoff_date and "order_date" in flags.columns:
+        cutoff_ts = pd.to_datetime(cutoff_date, errors="coerce")
+        if cutoff_ts is not pd.NaT:
+            flags = flags[flags["order_date"] <= cutoff_ts]
+    if flags.empty:
+        return pd.DataFrame()
+
+    new_candidates: list[pd.Series] = []
+    if "new_flag" in flags.columns:
+        new_candidates.append(_coerce_flag_series(flags["new_flag"], {"new"}))
+    if "new_business_flag" in flags.columns:
+        new_candidates.append(_coerce_flag_series(flags["new_business_flag"], {"new", "new customer", "new business"}))
+    if new_candidates:
+        new_stack = pd.concat(new_candidates, axis=1).fillna(0)
+        new_combined = (new_stack.astype(float) > 0).any(axis=1).astype("Int8")
+    else:
+        new_combined = pd.Series(0, index=flags.index, dtype="Int8")
+
+    acr_series = pd.Series(0, index=flags.index, dtype="Int8")
+    if "referral_ns_field" in flags.columns:
+        referral = flags["referral_ns_field"].astype(str).str.strip()
+        mask = referral.str.contains(r"\bACR\b", case=False, regex=True, na=False) | referral.str.contains("account coverage review", case=False, na=False)
+        acr_series = mask.astype("Int8")
+
+    derived = pd.DataFrame(
+        {
+            "customer_id": flags["customer_id"],
+            "ever_new_customer": new_combined,
+            "ever_acr": acr_series,
+        }
+    )
+    return derived.groupby("customer_id", as_index=False).max()
+
+
+def _compute_line_window_features(
+    line_df: pd.DataFrame,
+    *,
+    cutoff_dt: pd.Timestamp,
+    windows: list[int],
+    target_division: str,
+    use_usd: bool,
+    enable_canonical: bool,
+    enable_margin: bool,
+    enable_currency: bool,
+    enable_diversity: bool = False,
+    enable_returns: bool = False,
+    enable_order_comp: bool = False,
+    enable_trend: bool = False,
+) -> list[pd.DataFrame]:
+    """Return per-window customer aggregates derived from fact_sales_line."""
+
+    if line_df is None or line_df.empty:
+        return []
+    if not any([enable_canonical, enable_margin, enable_currency, enable_diversity, enable_returns, enable_order_comp, enable_trend]):
+        return []
+
+    df = line_df.copy()
+    df["order_date"] = pd.to_datetime(df.get("order_date"), errors="coerce")
+    df = df.dropna(subset=["order_date"])
+    if df.empty:
+        return []
+
+    df["customer_id"] = df.get("customer_id").astype(str)
+    df["division_canonical"] = (
+        df.get("division_canonical")
+        .fillna("UNKNOWN")
+        .astype(str)
+        .str.strip()
+        .str.upper()
+    )
+    df["item_rollup"] = (
+        df.get("item_rollup", pd.Series([None] * len(df)))
+        .fillna("unknown")
+        .astype(str)
+        .str.strip()
+        .str.lower()
+    )
+    df["sales_order"] = df.get("Sales_Order", pd.Series([None] * len(df))).astype(str).str.strip()
+
+    revenue_col = None
+    if use_usd and "Revenue_usd" in df.columns:
+        revenue_col = "Revenue_usd"
+    if revenue_col is None and "Revenue" in df.columns:
+        revenue_col = "Revenue"
+    df["revenue_value"] = pd.to_numeric(df.get(revenue_col), errors="coerce").fillna(0.0) if revenue_col else 0.0
+
+    gp_col = None
+    if use_usd and "GP_usd" in df.columns:
+        gp_col = "GP_usd"
+    if gp_col is None and "GP" in df.columns:
+        gp_col = "GP"
+    df["gp_value"] = pd.to_numeric(df.get(gp_col), errors="coerce").fillna(0.0) if gp_col else 0.0
+
+    term_gp_col = None
+    if use_usd and "Term_GP_usd" in df.columns:
+        term_gp_col = "Term_GP_usd"
+    if term_gp_col is None and "Term_GP" in df.columns:
+        term_gp_col = "Term_GP"
+    df["term_gp_value"] = pd.to_numeric(df.get(term_gp_col), errors="coerce").fillna(0.0) if term_gp_col else 0.0
+
+    df["currency_code"] = df.get("SalesOrder_Currency", pd.Series(["UNKNOWN"] * len(df))).astype(str).str.strip().str.upper()
+    df["is_cad"] = (df["currency_code"] == "CAD").astype(float)
+    df["has_fx"] = pd.to_numeric(df.get("USD_CAD_Conversion_rate"), errors="coerce").notna().astype(float)
+
+    if "is_return_line" in df.columns:
+        df["is_return_line"] = pd.to_numeric(df["is_return_line"], errors="coerce").fillna(0.0)
+    else:
+        df["is_return_line"] = (df["revenue_value"] < 0).astype(float)
+
+    target_canonical = normalize_division(target_division).upper() if target_division else ""
+
+    line_frames: list[pd.DataFrame] = []
+
+    for window in windows:
+        if not isinstance(window, (int, float)):
+            continue
+        try:
+            window = int(window)
+        except Exception:
+            continue
+        start = cutoff_dt - pd.DateOffset(months=window)
+        subset = df[(df["order_date"] > start) & (df["order_date"] <= cutoff_dt)]
+        if subset.empty:
+            continue
+
+        grouped = subset.groupby("customer_id", dropna=False)
+        total_revenue = grouped["revenue_value"].sum()
+        total_gp = grouped["gp_value"].sum()
+        total_term_gp = grouped["term_gp_value"].sum()
+        line_counts = grouped.size()
+
+        aggregates = {
+            "customer_id": total_revenue.index.astype(str),
+        }
+
+        if enable_margin:
+            col_total_rev = f"margin__total_revenue_usd__{window}m"
+            col_total_gp = f"margin__total_gp_usd__{window}m"
+            col_total_term = f"margin__total_term_gp_usd__{window}m"
+            aggregates[col_total_rev] = total_revenue.values
+            aggregates[col_total_gp] = total_gp.values
+            aggregates[col_total_term] = total_term_gp.values
+            denom = total_revenue.replace(0.0, np.nan)
+            gp_rate = (total_gp / denom).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+            term_rate = (total_term_gp / denom).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+            aggregates[f"margin__gp_rate__{window}m"] = gp_rate.values
+            aggregates[f"margin__term_gp_rate__{window}m"] = term_rate.values
+
+        if enable_currency:
+            cad_revenue = subset[subset["is_cad"] == 1].groupby("customer_id")["revenue_value"].sum()
+            fx_share = grouped["has_fx"].mean()
+            denom = total_revenue.replace(0.0, np.nan)
+            cad_share = (cad_revenue / denom).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+            aggregates[f"currency__cad_share__{window}m"] = cad_share.reindex(total_revenue.index, fill_value=0.0).values
+            aggregates[f"currency__cad_revenue_usd__{window}m"] = cad_revenue.reindex(total_revenue.index, fill_value=0.0).values
+            aggregates[f"currency__fx_applied_share__{window}m"] = fx_share.reindex(total_revenue.index, fill_value=0.0).values
+
+        if enable_canonical:
+            canonical = subset.groupby(["customer_id", "division_canonical"], dropna=False)["revenue_value"].sum().reset_index()
+            counts = canonical.groupby("customer_id")["division_canonical"].nunique()
+            unknown_rev = canonical[canonical["division_canonical"] == "UNKNOWN"].set_index("customer_id")["revenue_value"]
+            top_rev = canonical.groupby("customer_id")["revenue_value"].max()
+            if target_canonical:
+                target_rev = canonical[canonical["division_canonical"] == target_canonical].set_index("customer_id")["revenue_value"]
+            else:
+                target_rev = pd.Series(dtype=float)
+            denom = total_revenue.replace(0.0, np.nan)
+            aggregates[f"xdiv__canon_unique__{window}m"] = counts.reindex(total_revenue.index, fill_value=0).astype(float).values
+            aggregates[f"xdiv__canon_unknown_share__{window}m"] = (unknown_rev / denom).replace([np.inf, -np.inf], np.nan).reindex(total_revenue.index, fill_value=0.0).fillna(0.0).values
+            aggregates[f"xdiv__canon_top1_share__{window}m"] = (top_rev / denom).replace([np.inf, -np.inf], np.nan).reindex(total_revenue.index, fill_value=0.0).fillna(0.0).values
+            aggregates[f"xdiv__canon_target_share__{window}m"] = (target_rev / denom).replace([np.inf, -np.inf], np.nan).reindex(total_revenue.index, fill_value=0.0).fillna(0.0).values
+
+        if enable_diversity:
+            rollup_group = subset[["customer_id", "item_rollup", "revenue_value"]].copy()
+            rollup_group["item_rollup"] = rollup_group["item_rollup"].fillna("unknown").astype(str).str.strip().str.lower()
+            agg_roll = rollup_group.groupby(["customer_id", "item_rollup"], dropna=False)["revenue_value"].sum().reset_index()
+            roll_counts = agg_roll.groupby("customer_id")["item_rollup"].nunique()
+            denom_rev = total_revenue.replace(0.0, np.nan)
+            shares = agg_roll.copy()
+            shares["share"] = shares["revenue_value"] / shares["customer_id"].map(denom_rev)
+            shares["share"] = shares["share"].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+            hhi = shares.groupby("customer_id")["share"].apply(lambda s: float(np.square(s.values.astype(float)).sum()) if len(s) else 0.0)
+            top_rollup_share = shares.groupby("customer_id")["share"].max()
+            aggregates[f"diversity__rollup_nunique__{window}m"] = roll_counts.reindex(total_revenue.index, fill_value=0).astype(float).values
+            aggregates[f"diversity__rollup_hhi__{window}m"] = hhi.reindex(total_revenue.index, fill_value=0.0).fillna(0.0).values
+            aggregates[f"diversity__rollup_top1_share__{window}m"] = top_rollup_share.reindex(total_revenue.index, fill_value=0.0).fillna(0.0).values
+
+        if enable_returns:
+            return_mask = subset["is_return_line"] > 0.5
+            if return_mask.any():
+                return_counts = subset[return_mask].groupby("customer_id")["is_return_line"].count()
+                return_revenue = subset[return_mask].groupby("customer_id")["revenue_value"].sum()
+                return_gp = subset[return_mask].groupby("customer_id")["gp_value"].sum()
+            else:
+                return_counts = pd.Series(dtype=float)
+                return_revenue = pd.Series(dtype=float)
+                return_gp = pd.Series(dtype=float)
+            denom_lines = line_counts.replace(0, np.nan)
+            denom_rev = total_revenue.replace(0.0, np.nan)
+            denom_gp = total_gp.replace(0.0, np.nan)
+            line_share = (return_counts / denom_lines).replace([np.inf, -np.inf], np.nan)
+            revenue_share = (return_revenue / denom_rev).replace([np.inf, -np.inf], np.nan)
+            gp_share = (return_gp / denom_gp).replace([np.inf, -np.inf], np.nan)
+            aggregates[f"returns__line_share__{window}m"] = line_share.reindex(total_revenue.index, fill_value=0.0).fillna(0.0).values
+            aggregates[f"returns__line_count__{window}m"] = return_counts.reindex(total_revenue.index, fill_value=0.0).values
+            aggregates[f"returns__revenue_share__{window}m"] = revenue_share.reindex(total_revenue.index, fill_value=0.0).fillna(0.0).values
+            aggregates[f"returns__gp_share__{window}m"] = gp_share.reindex(total_revenue.index, fill_value=0.0).fillna(0.0).values
+
+        if enable_order_comp:
+            avg_rev_per_line = (total_revenue / line_counts.replace(0, np.nan)).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+            aggregates[f"order__avg_revenue_per_line_usd__{window}m"] = avg_rev_per_line.reindex(total_revenue.index, fill_value=0.0).values
+
+            orders = subset[["customer_id", "sales_order", "revenue_value"]].copy()
+            orders["sales_order"] = orders["sales_order"].fillna("unknown").astype(str)
+            order_line_counts = orders.groupby(["customer_id", "sales_order"]).size().rename("order_line_count").reset_index()
+            order_revenue = orders.groupby(["customer_id", "sales_order"])["revenue_value"].sum().rename("order_revenue_usd").reset_index()
+            order_stats = order_line_counts.merge(order_revenue, on=["customer_id", "sales_order"], how="outer")
+            if not order_stats.empty:
+                per_customer_order = order_stats.groupby("customer_id").agg(
+                    order_lines_per_order_mean=("order_line_count", "mean"),
+                    order_lines_per_order_max=("order_line_count", "max"),
+                    order_revenue_per_order_mean=("order_revenue_usd", "mean"),
+                    order_revenue_per_order_median=("order_revenue_usd", "median"),
+                )
+                per_customer_order = per_customer_order.rename(
+                    columns={
+                        "order_lines_per_order_mean": f"order__lines_per_order_mean__{window}m",
+                        "order_lines_per_order_max": f"order__lines_per_order_max__{window}m",
+                        "order_revenue_per_order_mean": f"order__avg_revenue_per_order_usd__{window}m",
+                        "order_revenue_per_order_median": f"order__median_revenue_per_order_usd__{window}m",
+                    }
+                )
+                for col in per_customer_order.columns:
+                    aggregates[col] = (
+                        per_customer_order[col]
+                        .reindex(total_revenue.index, fill_value=0.0)
+                        .replace([np.inf, -np.inf], 0.0)
+                        .fillna(0.0)
+                        .values
+                    )
+
+        frame = pd.DataFrame(aggregates)
+        numeric_cols = [c for c in frame.columns if c != "customer_id"]
+        if numeric_cols:
+            frame[numeric_cols] = frame[numeric_cols].replace([np.inf, -np.inf], 0.0).fillna(0.0)
+            line_frames.append(frame)
+
+    return line_frames
 def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, prediction_window_months: int = 6, mask_tail_days: int | None = None, label_buffer_days: int | None = None):
     """
     Creates a rich feature matrix for a specific division for ML training with proper time-based splitting.
@@ -50,6 +407,16 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
     # Detect if caller passed a target model name (e.g., 'Printers') rather than a raw division
     target_skus = tuple(get_model_targets(norm_division_name))
     use_custom_targets = len(target_skus) > 0
+    # Support division aliases (e.g., 'cad' -> ['solidworks','pdm', ...]) from config
+    alias_divisions: list[str] = []
+    try:
+        _cfg = cfg.load_config()
+        raw_alias = getattr(getattr(_cfg, 'features', object()), 'division_aliases', {})  # type: ignore[attr-defined]
+        if isinstance(raw_alias, dict):
+            alias_divisions = [normalize_division(d) for d in (raw_alias.get(norm_division_name, []) or []) if str(d).strip()]
+    except Exception:
+        alias_divisions = []
+    use_alias = (not use_custom_targets) and bool(alias_divisions)
     # Define label filter once for reuse in buyers and feature recency columns
     division_col = (
         pl.col("product_division")
@@ -57,10 +424,12 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
         .str.strip_chars()
         .str.to_lowercase()
     )
-    label_filter = (
-        pl.col("product_sku").is_in(list(target_skus)) if use_custom_targets
-        else division_col == norm_division_name
-    )
+    if use_custom_targets:
+        label_filter = pl.col("product_sku").is_in(list(target_skus))
+    elif use_alias:
+        label_filter = division_col.is_in(alias_divisions)
+    else:
+        label_filter = division_col == norm_division_name
     if cutoff_date:
         logger.info(f"Using cutoff date: {cutoff_date} (features from data <= cutoff)")
         logger.info(f"Target: purchases in {prediction_window_months} months after cutoff")
@@ -324,7 +693,7 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
                 .str.strip()
                 .str.casefold()
             )
-            mask = pred_div == norm_division_name
+            mask = pred_div.isin(alias_divisions) if use_alias else (pred_div == norm_division_name)
         prediction_buyers_df = prediction_data.loc[mask, 'customer_id'].astype(str).unique()
         division_buyers_pd = pd.DataFrame({'customer_id': prediction_buyers_df, 'bought_in_division': 1})
         division_buyers = pl.from_pandas(division_buyers_pd).with_columns(pl.col('customer_id').cast(pl.Utf8)).lazy()
@@ -456,14 +825,17 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
             adv_thr = int(getattr(cfgmod.features, 'sqlite_skip_advanced_rows', 10_000_000))
         except Exception:
             adv_thr = 10_000_000
-        # In test/local SQLite with configured external DB, apply a conservative cap to keep memory bounded
-        try:
-            configured_engine = str(getattr(cfgmod.database, 'engine', '')).strip().lower()
-        except Exception:
-            configured_engine = ''
-        effective_adv_thr = adv_thr
-        if _is_sqlite and configured_engine and configured_engine != 'sqlite':
-            effective_adv_thr = min(adv_thr, 50_000)
+        if adv_thr <= 0:
+            effective_adv_thr = float("inf")
+        else:
+            effective_adv_thr = adv_thr
+            # In test/local SQLite with configured external DB, apply a conservative cap unless explicitly overridden
+            try:
+                configured_engine = str(getattr(cfgmod.database, 'engine', '')).strip().lower()
+            except Exception:
+                configured_engine = ''
+            if _is_sqlite and configured_engine and configured_engine != 'sqlite':
+                effective_adv_thr = min(adv_thr, 50_000)
         if _is_sqlite and len(fd) > effective_adv_thr:
             logger.warning(
                 "Skipping advanced temporal features: rows=%d exceeds limit=%d (sqlite_skip_advanced_rows=%d)",
@@ -474,6 +846,82 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
         window_months = cfgmod.features.windows_months or [3, 6, 12, 24]
         per_customer_frames = []
         per_customer_frames_div = []
+
+        enable_canonical = bool(getattr(cfgmod.features, "enable_canonical_division_features", True))
+        enable_margin = bool(getattr(cfgmod.features, "enable_margin_features", True))
+        enable_currency = bool(getattr(cfgmod.features, "enable_currency_mix", True))
+        enable_rollup_diversity = bool(getattr(cfgmod.features, "enable_rollup_diversity", True))
+        enable_returns_features = bool(getattr(cfgmod.features, "enable_returns_features", True))
+        enable_order_comp = bool(getattr(cfgmod.features, "enable_order_composition", True))
+        enable_trend_features = bool(getattr(cfgmod.features, "enable_trend_features", True))
+        enable_tag_als = bool(getattr(cfgmod.features, "enable_tag_als", False))
+        use_usd_monetary = bool(getattr(cfgmod.features, "use_usd_monetary", True))
+
+        line_df = pd.DataFrame()
+        try:
+            need_line = any(
+                [
+                    enable_canonical,
+                    enable_margin,
+                    enable_currency,
+                    enable_rollup_diversity,
+                    enable_returns_features,
+                    enable_order_comp,
+                    enable_trend_features,
+                ]
+            )
+        except Exception:
+            need_line = True
+
+        if need_line:
+            cutoff_literal_param = pd.to_datetime(cutoff_dt).strftime("%Y-%m-%d") if cutoff_dt is not None else pd.Timestamp.utcnow().strftime("%Y-%m-%d")
+            try:
+                line_query = """
+                    SELECT
+                        CompanyId AS customer_id,
+                        Rec_Date AS order_date,
+                        division_canonical,
+                        item_rollup,
+                        Sales_Order,
+                        Revenue_usd,
+                        Revenue,
+                        GP_usd,
+                        GP,
+                        Term_GP_usd,
+                        Term_GP,
+                        SalesOrder_Currency,
+                        USD_CAD_Conversion_rate,
+                        is_return_line
+                    FROM fact_sales_line
+                    WHERE Rec_Date <= :cutoff
+                """
+                line_df = pd.read_sql_query(line_query, engine, params={"cutoff": cutoff_literal_param})
+            except Exception as exc:
+                logger.warning("Line-item feature load failed with extended columns (%s); retrying without return flag.", exc)
+                try:
+                    
+                    fallback_query = f"""
+                        SELECT
+                            CompanyId AS customer_id,
+                            Rec_Date AS order_date,
+                            division_canonical,
+                            item_rollup,
+                            Sales_Order,
+                            Revenue_usd,
+                            Revenue,
+                            GP_usd,
+                            GP,
+                            Term_GP_usd,
+                            Term_GP,
+                            SalesOrder_Currency,
+                            USD_CAD_Conversion_rate
+                        FROM fact_sales_line
+                        WHERE Rec_Date <= '{cutoff_literal_param}'
+                    """
+                    line_df = pd.read_sql_query(fallback_query, engine)
+                except Exception as fallback_exc:
+                    logger.warning("Line-item feature fallback load failed: %s", fallback_exc)
+                    line_df = pd.DataFrame()
         for w in window_months:
             start_dt = cutoff_dt - pd.DateOffset(months=w)
             effective_end = cutoff_dt
@@ -506,7 +954,10 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
             per_customer_frames.append(agg)
 
             # Division-specific aggregates + margin (gp_pct) proxy over window
-            sub_div = fd.loc[mask & (fd['product_division'].astype(str).str.strip() == norm_division_name), ['customer_id', 'order_date', 'gross_profit']]
+            if use_alias:
+                sub_div = fd.loc[mask & (fd['product_division'].astype(str).str.strip().str.casefold().isin(alias_divisions)), ['customer_id', 'order_date', 'gross_profit']]
+            else:
+                sub_div = fd.loc[mask & (fd['product_division'].astype(str).str.strip() == norm_division_name), ['customer_id', 'order_date', 'gross_profit']]
             tx_n_div = sub_div.groupby('customer_id')['order_date'].count().rename(f'rfm__div__tx_n__{w}m').reset_index()
             gp_sum_div = sub_div.groupby('customer_id')['gross_profit'].sum().rename(f'rfm__div__gp_sum__{w}m').reset_index()
             gp_mean_div = sub_div.groupby('customer_id')['gross_profit'].mean().rename(f'rfm__div__gp_mean__{w}m').reset_index()
@@ -540,7 +991,10 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
                         agg_off = tx_n_off.merge(gp_w_off, on='customer_id', how='outer').merge(gp_mean_off, on='customer_id', how='outer')
                         per_customer_frames.append(agg_off)
                         # Division-specific aggregates (match norm_division_name)
-                        sub_div_off = sub_off.loc[sub_off['product_division'].astype(str).str.strip() == norm_division_name, ['customer_id','order_date','gross_profit']]
+                        if use_alias:
+                            sub_div_off = sub_off.loc[sub_off['product_division'].astype(str).str.strip().str.casefold().isin(alias_divisions), ['customer_id','order_date','gross_profit']]
+                        else:
+                            sub_div_off = sub_off.loc[sub_off['product_division'].astype(str).str.strip() == norm_division_name, ['customer_id','order_date','gross_profit']]
                         tx_n_div_off = sub_div_off.groupby('customer_id')['order_date'].count().rename(f'rfm__div__tx_n__{w}m_off{off}d').reset_index()
                         gp_sum_div_off = sub_div_off.groupby('customer_id')['gross_profit'].sum().rename(f'rfm__div__gp_sum__{w}m_off{off}d').reset_index()
                         gp_mean_div_off = sub_div_off.groupby('customer_id')['gross_profit'].mean().rename(f'rfm__div__gp_mean__{w}m_off{off}d').reset_index()
@@ -549,6 +1003,22 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
             except Exception:
                 pass
 
+        line_feature_frames = _compute_line_window_features(
+            line_df,
+            cutoff_dt=cutoff_dt,
+            windows=window_months,
+            target_division=norm_division_name,
+            use_usd=use_usd_monetary,
+            enable_canonical=enable_canonical,
+            enable_margin=enable_margin,
+            enable_currency=enable_currency,
+            enable_diversity=enable_rollup_diversity,
+            enable_returns=enable_returns_features,
+            enable_order_comp=enable_order_comp,
+            enable_trend=enable_trend_features,
+        ) if not line_df.empty else []
+
+        per_customer_frames.extend(line_feature_frames)
         # Monthly resample for slope/volatility over last 12 months
         last12_mask = (fd['order_date'] > (cutoff_dt - pd.DateOffset(months=12))) & (fd['order_date'] <= cutoff_dt)
         m = fd.loc[last12_mask, ['customer_id', 'order_date', 'gross_profit']].copy()
@@ -723,65 +1193,153 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
         # Attach to features_pd
         features_pd = features_pd.merge(extra, on='customer_id', how='left')
 
+        line_meta_df = _load_line_item_metadata(engine, cutoff_date)
+
         # --- Region (Branch) and Rep features from preserved raw data ---
         try:
-            # Use preserved raw data instead of missing sales_log table
-            raw_data_query = """
-                SELECT customer_id, order_date, branch, rep
-                FROM fact_sales_log_raw
-            """
-            if cutoff_date:
-                raw_data_query += f" WHERE order_date <= '{cutoff_date}'"
+            sl = _prepare_branch_source(line_meta_df)
+            if sl.empty:
+                sl = _load_branch_rep_curated(engine, cutoff_date)
 
-            sl = pd.read_sql(raw_data_query, engine)
+            if sl is None or sl.empty:
+                logger.info("Branch/Rep feature build skipped: no branch data available.")
+            else:
+                if "order_date" in sl.columns:
+                    sl["order_date"] = pd.to_datetime(sl["order_date"], errors='coerce')
+                sl["customer_id"] = sl["customer_id"].astype(str)
+                branch_available = "branch" in sl.columns and sl["branch"].notna().any()
+                rep_available = "rep" in sl.columns and sl["rep"].notna().any()
+                if not branch_available and not rep_available:
+                    logger.info("Branch/Rep feature build skipped: branch and rep columns missing.")
+                else:
+                    import re
 
-            # Ensure proper types - customer_id should already be string from ETL
-            sl['order_date'] = pd.to_datetime(sl['order_date'], errors='coerce')
-            sl = sl.dropna(subset=['customer_id'])
-            # No need for type conversion - customer_id is already string from ETL
-            # Top branches and reps
-            top_branches = sl['branch'].astype(str).str.strip().value_counts().head(30).index.tolist()
-            top_reps = sl['rep'].astype(str).str.strip().value_counts().head(50).index.tolist()
+                    def sanitize_key(text: str) -> str:
+                        if text is None:
+                            return "unknown"
+                        key = str(text).lower().strip()
+                        key = key.replace("&", " and ")
+                        key = re.sub(r"[^0-9a-zA-Z]+", "_", key)
+                        key = re.sub(r"_+", "_", key).strip("_")
+                        return key or "unknown"
 
-            import re
-            def sanitize_key(text: str) -> str:
-                if text is None:
-                    return "unknown"
-                key = str(text).lower().strip()
-                key = key.replace("&", " and ")
-                key = re.sub(r"[^0-9a-zA-Z]+", "_", key)
-                key = re.sub(r"_+", "_", key).strip("_")
-                if not key:
-                    key = "unknown"
-                return key
+                    frames = []
+                    if branch_available:
+                        b = sl[['customer_id', 'branch']].copy()
+                        b['branch'] = b['branch'].astype(str).str.strip()
+                        b['count'] = 1
+                        totals = b.groupby('customer_id')['count'].sum().rename('branch_tx_total')
+                        if enable_order_comp:
+                            branch_nuniq = b.groupby('customer_id')['branch'].nunique().rename('branch__nunique__life')
+                            branch_top = (
+                                b.groupby(['customer_id', 'branch'])['count'].sum().groupby('customer_id').max()
+                                / totals.replace(0, np.nan)
+                            ).rename('branch__top_share__life').replace([np.inf, -np.inf], np.nan).fillna(0.0)
+                            frames.append(pd.concat([branch_nuniq, branch_top], axis=1))
+                        top_branches = (
+                            b['branch']
+                            .value_counts()
+                            .head(30)
+                            .index
+                            .tolist()
+                        )
+                        if top_branches:
+                            b_top = (
+                                b[b['branch'].isin(top_branches)]
+                                .groupby(['customer_id', 'branch'])['count']
+                                .sum()
+                                .unstack(fill_value=0)
+                            )
+                            b_top = b_top.div(totals, axis=0).fillna(0.0)
+                            b_top.columns = [f"branch_share_{sanitize_key(c)}" for c in b_top.columns]
+                            frames.append(b_top)
+                    if rep_available:
+                        r = sl[['customer_id', 'rep']].copy()
+                        r['rep'] = r['rep'].astype(str).str.strip()
+                        r['count'] = 1
+                        totals = r.groupby('customer_id')['count'].sum().rename('rep_tx_total')
+                        if enable_order_comp:
+                            rep_nuniq = r.groupby('customer_id')['rep'].nunique().rename('rep__nuniq__life')
+                            rep_top = (
+                                r.groupby(['customer_id', 'rep'])['count'].sum().groupby('customer_id').max()
+                                / totals.replace(0, np.nan)
+                            ).rename('rep__top_share__life').replace([np.inf, -np.inf], np.nan).fillna(0.0)
+                            frames.append(pd.concat([rep_nuniq, rep_top], axis=1))
+                        top_reps = (
+                            r['rep']
+                            .value_counts()
+                            .head(50)
+                            .index
+                            .tolist()
+                        )
+                        if top_reps:
+                            r_top = (
+                                r[r['rep'].isin(top_reps)]
+                                .groupby(['customer_id', 'rep'])['count']
+                                .sum()
+                                .unstack(fill_value=0)
+                            )
+                            r_top = r_top.div(totals, axis=0).fillna(0.0)
+                            r_top.columns = [f"rep_share_{sanitize_key(c)}" for c in r_top.columns]
+                            frames.append(r_top)
 
-            # Branch share features
-            b = sl[['customer_id', 'branch']].copy()
-            b['branch'] = b['branch'].astype(str).str.strip()
-            b['count'] = 1
-            b_tot = b.groupby('customer_id')['count'].sum().rename('branch_tx_total')
-            b_top = b[b['branch'].isin(top_branches)].groupby(['customer_id', 'branch'])['count'].sum().unstack(fill_value=0)
-            # Normalize to shares
-            b_top = b_top.div(b_tot, axis=0).fillna(0.0)
-            b_top.columns = [f"branch_share_{sanitize_key(c)}" for c in b_top.columns]
-
-            # Rep share features
-            r = sl[['customer_id', 'rep']].copy()
-            r['rep'] = r['rep'].astype(str).str.strip()
-            r['count'] = 1
-            r_tot = r.groupby('customer_id')['count'].sum().rename('rep_tx_total')
-            r_top = r[r['rep'].isin(top_reps)].groupby(['customer_id', 'rep'])['count'].sum().unstack(fill_value=0)
-            r_top = r_top.div(r_tot, axis=0).fillna(0.0)
-            r_top.columns = [f"rep_share_{sanitize_key(c)}" for c in r_top.columns]
-
-            br = b_top.join(r_top, how='outer').reset_index()
-            features_pd = features_pd.merge(br, on='customer_id', how='left')
-            for col in br.columns:
-                if col == 'customer_id':
-                    continue
-                features_pd[col] = features_pd[col].fillna(0.0)
+                    if frames:
+                        br = frames[0]
+                        for frame in frames[1:]:
+                            br = br.join(frame, how='outer')
+                        br = br.reset_index()
+                        features_pd = features_pd.merge(br, on='customer_id', how='left')
+                        for col in br.columns:
+                            if col == 'customer_id':
+                                continue
+                            features_pd[col] = features_pd[col].fillna(0.0)
+                    else:
+                        logger.info("Branch/Rep feature build skipped: insufficient distribution data.")
         except Exception as e:
             logger.warning(f"Branch/Rep feature build failed: {e}")
+
+        if enable_tag_als and not line_df.empty:
+            tag_df = line_df.copy()
+            tag_df["customer_id"] = tag_df["customer_id"].astype(str)
+            revenue_series = None
+            if use_usd_monetary and "Revenue_usd" in tag_df.columns:
+                revenue_series = pd.to_numeric(tag_df["Revenue_usd"], errors="coerce")
+            if revenue_series is None or revenue_series.isna().all():
+                if "Revenue" in tag_df.columns:
+                    revenue_series = pd.to_numeric(tag_df["Revenue"], errors="coerce")
+                else:
+                    revenue_series = pd.Series(0.0, index=tag_df.index)
+            tag_df["revenue_value"] = revenue_series.fillna(0.0)
+            tag_df["item_rollup"] = tag_df.get("item_rollup", pd.Series(["unknown"] * len(tag_df))).fillna("unknown").astype(str).str.strip().str.lower()
+            top_rollups = (
+                tag_df.groupby("item_rollup")["revenue_value"]
+                .sum()
+                .sort_values(ascending=False)
+                .head(10)
+                .index
+                .tolist()
+            )
+            if top_rollups:
+                tag_pivot = (
+                    tag_df[tag_df["item_rollup"].isin(top_rollups)]
+                    .groupby(["customer_id", "item_rollup"])["revenue_value"]
+                    .sum()
+                    .unstack(fill_value=0.0)
+                )
+                totals = tag_df.groupby("customer_id")["revenue_value"].sum().replace(0.0, np.nan)
+                tag_pivot = tag_pivot.div(totals, axis=0).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
+                def _sanitize_tag(name: str) -> str:
+                    cleaned = "".join(ch if ch.isalnum() else "_" for ch in str(name).strip().lower())
+                    return cleaned.strip("_") or "unknown"
+
+                tag_pivot.columns = [f"tagals__share_{_sanitize_tag(col)}" for col in tag_pivot.columns]
+                tag_pivot = tag_pivot.reset_index()
+                features_pd = features_pd.merge(tag_pivot, on="customer_id", how="left")
+                for col in tag_pivot.columns:
+                    if col == "customer_id":
+                        continue
+                    features_pd[col] = features_pd[col].fillna(0.0)
 
         # --- Basket lift / affinity ---
         try:
@@ -1097,15 +1655,15 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
                             rng = _np.random.default_rng(42)
                             X = rng.standard_normal((m, f), dtype=_np.float32) * 0.01
                             Y = rng.standard_normal((n, f), dtype=_np.float32) * 0.01
-                            I = _np.eye(f, dtype=_np.float32)
+                            identity = _np.eye(f, dtype=_np.float32)
                             # ALS iterations with normal equations
                             for _ in range(iters):
                                 # Update X (users)
-                                YtY = Y.T @ Y + reg * I
+                                YtY = Y.T @ Y + reg * identity
                                 Yt = Y.T
                                 X = _np.linalg.solve(YtY, (Yt @ R.T)).T
                                 # Update Y (items)
-                                XtX = X.T @ X + reg * I
+                                XtX = X.T @ X + reg * identity
                                 Xt = X.T
                                 Y = _np.linalg.solve(XtX, (Xt @ R)).T
                             als_cols = {f'als_assets_f{i}': X[:, i] for i in range(f)}
@@ -1117,61 +1675,21 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
     except Exception as e:
         logger.warning(f"Asset features failed: {e}")
 
-    # Flags / indicators aggregated from raw: ACR and New (robust to missing/variant names)
+    # Flags / indicators aggregated from the line-item fact
     try:
-        sl_flags = None
-        try:
-            sl_flags = pd.read_sql("SELECT CustomerId, \"Rec Date\" AS rec_date, * FROM sales_log", engine)
-        except Exception:
-            try:
-                sl_flags = pd.read_sql(select_all('sales_log'), engine)
-                if 'Rec Date' in sl_flags.columns:
-                    sl_flags = sl_flags.rename(columns={'Rec Date': 'rec_date'})
-            except Exception:
-                sl_flags = None
+        agg_flags = _compute_flags_from_line_meta(line_meta_df, cutoff_date)
 
-        if sl_flags is not None and not sl_flags.empty:
-            # Coerce types early
-            sl_flags['rec_date'] = pd.to_datetime(sl_flags.get('rec_date'), errors='coerce')
-            sl_flags['customer_id'] = sl_flags.get('CustomerId', sl_flags.get('customer_id')).astype(str)
-            if cutoff_date and 'rec_date' in sl_flags.columns:
-                sl_flags = sl_flags[sl_flags['rec_date'] <= cutoff_dt]
-
-            def _normalize(col: str) -> str:
-                return str(col).strip().lower().replace('[', '').replace(']', '')
-
-            cols_norm = { _normalize(c): c for c in sl_flags.columns }
-            # Allow a few common variants
-            acr_col = cols_norm.get('acr') or cols_norm.get('is_acr') or cols_norm.get('acr_flag')
-            new_col = cols_norm.get('new') or cols_norm.get('is_new') or cols_norm.get('new_customer')
-
-            agg_parts = []
-            if isinstance(acr_col, str) and acr_col in sl_flags.columns:
-                acr_num = pd.to_numeric(sl_flags[acr_col], errors='coerce').fillna(0).astype('Int8')
-                ever_acr = acr_num.groupby(sl_flags['customer_id']).max().astype('Int8').reset_index(name='ever_acr')
-                agg_parts.append(ever_acr)
-            if isinstance(new_col, str) and new_col in sl_flags.columns:
-                new_num = pd.to_numeric(sl_flags[new_col], errors='coerce').fillna(0).astype('Int8')
-                ever_new = new_num.groupby(sl_flags['customer_id']).max().astype('Int8').reset_index(name='ever_new_customer')
-                agg_parts.append(ever_new)
-
-            if agg_parts:
-                agg_flags = agg_parts[0]
-                for ap in agg_parts[1:]:
-                    agg_flags = agg_flags.merge(ap, on='customer_id', how='outer')
-            else:
-                agg_flags = pd.DataFrame({'customer_id': sl_flags['customer_id'].dropna().astype(str).unique()})
+        if agg_flags.empty:
+            logger.info("Flag aggregation skipped: no ACR/New sources available.")
         else:
-            # No raw flags available; create empty shells based on current feature set
-            agg_flags = pd.DataFrame({'customer_id': features_pd['customer_id'].astype(str).unique()})
-
-        features_pd['customer_id'] = features_pd['customer_id'].astype(str)
-        features_pd = features_pd.merge(agg_flags, on='customer_id', how='left')
-        for c in ['ever_acr', 'ever_new_customer']:
-            if c in features_pd.columns:
-                features_pd[c] = pd.to_numeric(features_pd[c], errors='coerce').fillna(0).astype(int)
-            else:
-                features_pd[c] = 0
+            agg_flags['customer_id'] = agg_flags['customer_id'].astype(str)
+            features_pd['customer_id'] = features_pd['customer_id'].astype(str)
+            features_pd = features_pd.merge(agg_flags, on='customer_id', how='left')
+            for c in ['ever_acr', 'ever_new_customer']:
+                if c in features_pd.columns:
+                    features_pd[c] = pd.to_numeric(features_pd[c], errors='coerce').fillna(0).astype(int)
+                else:
+                    features_pd[c] = 0
     except Exception as e:
         logger.warning(f"Flag aggregation failed: {e}")
 
@@ -1186,11 +1704,17 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
                 db_has_quantity = 'quantity' in (_cols or set())
             except Exception:
                 db_has_quantity = False
+            lag_days = 0
+            try:
+                lag_days = int(getattr(cfgmod.features, 'affinity_lag_days', 60) or 60)
+            except Exception:
+                lag_days = 60
             als_df = pl.DataFrame() if not db_has_quantity else customer_als_embeddings(
                 engine,
                 cutoff_date,
                 factors=16,
                 lookback_months=cfgmod.features.als_lookback_months,
+                lag_days=lag_days,
             )
             if not als_df.is_empty():
                 # Ensure type consistency before joining
@@ -1235,14 +1759,17 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
             fast_thr = int(getattr(cfg.load_config().features, 'fastpath_minimal_return_rows', 10_000_000))
         except Exception:
             fast_thr = 10_000_000
-        # In test/local SQLite with configured external DB, apply a conservative cap to keep memory bounded
-        try:
-            configured_engine = str(getattr(cfg.load_config().database, 'engine', '')).strip().lower()
-        except Exception:
-            configured_engine = ''
-        effective_fast_thr = fast_thr
-        if configured_engine and configured_engine != 'sqlite':
-            effective_fast_thr = min(fast_thr, 50_000)
+        if fast_thr <= 0:
+            effective_fast_thr = float("inf")
+        else:
+            # In test/local SQLite with configured external DB, apply a conservative cap to keep memory bounded
+            try:
+                configured_engine = str(getattr(cfg.load_config().database, 'engine', '')).strip().lower()
+            except Exception:
+                configured_engine = ''
+            effective_fast_thr = fast_thr
+            if configured_engine and configured_engine != 'sqlite':
+                effective_fast_thr = min(fast_thr, 50_000)
         try:
             nrows_fd = len(feature_data)
         except Exception:
@@ -1360,28 +1887,28 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
         cfgf = cfg.load_config().features
         if bool(getattr(cfgf, 'enable_window_deltas', True)):
             # All-scope deltas
-            if all(c in feature_matrix_pd.columns for c in [f'rfm__all__gp_sum__12m', f'rfm__all__gp_sum__24m']):
-                last12 = pd.to_numeric(feature_matrix_pd[f'rfm__all__gp_sum__12m'], errors='coerce').fillna(0.0)
-                tot24 = pd.to_numeric(feature_matrix_pd[f'rfm__all__gp_sum__24m'], errors='coerce').fillna(0.0)
+            if all(c in feature_matrix_pd.columns for c in ['rfm__all__gp_sum__12m', 'rfm__all__gp_sum__24m']):
+                last12 = pd.to_numeric(feature_matrix_pd['rfm__all__gp_sum__12m'], errors='coerce').fillna(0.0)
+                tot24 = pd.to_numeric(feature_matrix_pd['rfm__all__gp_sum__24m'], errors='coerce').fillna(0.0)
                 prev12 = (tot24 - last12).clip(lower=0.0)
                 feature_matrix_pd['rfm__all__gp_sum__delta_12m_prev12m'] = last12 - prev12
                 feature_matrix_pd['rfm__all__gp_sum__ratio_12m_prev12m'] = (last12 / (prev12 + 1e-9)).replace([np.inf, -np.inf], 0.0)
-            if all(c in feature_matrix_pd.columns for c in [f'rfm__all__tx_n__12m', f'rfm__all__tx_n__24m']):
-                last12 = pd.to_numeric(feature_matrix_pd[f'rfm__all__tx_n__12m'], errors='coerce').fillna(0.0)
-                tot24 = pd.to_numeric(feature_matrix_pd[f'rfm__all__tx_n__24m'], errors='coerce').fillna(0.0)
+            if all(c in feature_matrix_pd.columns for c in ['rfm__all__tx_n__12m', 'rfm__all__tx_n__24m']):
+                last12 = pd.to_numeric(feature_matrix_pd['rfm__all__tx_n__12m'], errors='coerce').fillna(0.0)
+                tot24 = pd.to_numeric(feature_matrix_pd['rfm__all__tx_n__24m'], errors='coerce').fillna(0.0)
                 prev12 = (tot24 - last12).clip(lower=0.0)
                 feature_matrix_pd['rfm__all__tx_n__delta_12m_prev12m'] = last12 - prev12
                 feature_matrix_pd['rfm__all__tx_n__ratio_12m_prev12m'] = (last12 / (prev12 + 1e-9)).replace([np.inf, -np.inf], 0.0)
             # Division-scope deltas
-            if all(c in feature_matrix_pd.columns for c in [f'rfm__div__gp_sum__12m', f'rfm__div__gp_sum__24m']):
-                last12 = pd.to_numeric(feature_matrix_pd[f'rfm__div__gp_sum__12m'], errors='coerce').fillna(0.0)
-                tot24 = pd.to_numeric(feature_matrix_pd[f'rfm__div__gp_sum__24m'], errors='coerce').fillna(0.0)
+            if all(c in feature_matrix_pd.columns for c in ['rfm__div__gp_sum__12m', 'rfm__div__gp_sum__24m']):
+                last12 = pd.to_numeric(feature_matrix_pd['rfm__div__gp_sum__12m'], errors='coerce').fillna(0.0)
+                tot24 = pd.to_numeric(feature_matrix_pd['rfm__div__gp_sum__24m'], errors='coerce').fillna(0.0)
                 prev12 = (tot24 - last12).clip(lower=0.0)
                 feature_matrix_pd['rfm__div__gp_sum__delta_12m_prev12m'] = last12 - prev12
                 feature_matrix_pd['rfm__div__gp_sum__ratio_12m_prev12m'] = (last12 / (prev12 + 1e-9)).replace([np.inf, -np.inf], 0.0)
-            if all(c in feature_matrix_pd.columns for c in [f'rfm__div__tx_n__12m', f'rfm__div__tx_n__24m']):
-                last12 = pd.to_numeric(feature_matrix_pd[f'rfm__div__tx_n__12m'], errors='coerce').fillna(0.0)
-                tot24 = pd.to_numeric(feature_matrix_pd[f'rfm__div__tx_n__24m'], errors='coerce').fillna(0.0)
+            if all(c in feature_matrix_pd.columns for c in ['rfm__div__tx_n__12m', 'rfm__div__tx_n__24m']):
+                last12 = pd.to_numeric(feature_matrix_pd['rfm__div__tx_n__12m'], errors='coerce').fillna(0.0)
+                tot24 = pd.to_numeric(feature_matrix_pd['rfm__div__tx_n__24m'], errors='coerce').fillna(0.0)
                 prev12 = (tot24 - last12).clip(lower=0.0)
                 feature_matrix_pd['rfm__div__tx_n__delta_12m_prev12m'] = last12 - prev12
                 feature_matrix_pd['rfm__div__tx_n__ratio_12m_prev12m'] = (last12 / (prev12 + 1e-9)).replace([np.inf, -np.inf], 0.0)

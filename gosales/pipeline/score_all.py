@@ -259,7 +259,12 @@ def _star_build_successful(result, curated_engine) -> bool:
     required_tables = {"dim_customer", "fact_transactions"}
     return required_tables.issubset(tables)
 
-def score_all(segment: str | None = None, *, training_cutoffs: Sequence[str] | None = None):
+def score_all(
+    segment: str | None = None,
+    *,
+    training_cutoffs: Sequence[str] | None = None,
+    use_line_items: bool | None = None,
+):
     """
     Orchestrates the entire GoSales pipeline from data ingestion to final scoring.
 
@@ -291,8 +296,14 @@ def score_all(segment: str | None = None, *, training_cutoffs: Sequence[str] | N
             from gosales.utils.db import get_curated_connection
             curated_engine = get_curated_connection()  # curated (local sqlite)
             # Connection health checks
+            cfg = None
             try:
                 cfg = load_config()
+                if use_line_items is not None:
+                    try:
+                        cfg.etl.line_items.use_line_item_facts = bool(use_line_items)
+                    except Exception:
+                        logger.warning("Unable to override line-item toggle on loaded config")
                 strict = bool(getattr(getattr(cfg, 'database', object()), 'strict_db', False))
             except Exception:
                 strict = False
@@ -311,11 +322,17 @@ def score_all(segment: str | None = None, *, training_cutoffs: Sequence[str] | N
             if seg_list is not None:
                 env_override = os.environ.copy()
                 env_override["GOSALES_POP_BUILD_SEGMENTS"] = ",".join(seg_list)
-    
+
             # --- 2. ETL Phase ---
             logger.info("--- Phase 1: ETL ---")
             # Skip local CSV ingest when a database source is configured
-            cfg = load_config()
+            if cfg is None:
+                cfg = load_config()
+                if use_line_items is not None:
+                    try:
+                        cfg.etl.line_items.use_line_item_facts = bool(use_line_items)
+                    except Exception:
+                        logger.warning("Unable to override line-item toggle on loaded config")
             run_cfg = getattr(cfg, "run", None)
             cutoff_date = str(getattr(run_cfg, "cutoff_date", "2024-06-30") or "2024-06-30")
             prediction_window_months = int(getattr(run_cfg, "prediction_window_months", 6) or 6)
@@ -348,7 +365,10 @@ def score_all(segment: str | None = None, *, training_cutoffs: Sequence[str] | N
                     load_csv_to_db(file_path, table_name, db_engine)
     
             try:
-                star_result = build_star_schema(db_engine)
+                star_result = build_star_schema(
+                    db_engine,
+                    use_line_item_facts=use_line_items,
+                )
             except Exception as exc:
                 message = f"Star schema build raised an exception: {exc}"
                 logger.exception(message)
@@ -539,8 +559,21 @@ if __name__ == "__main__":
         "--training-cutoffs",
         help="Comma-separated list of training cutoff dates (YYYY-MM-DD). Overrides configuration.",
     )
+    parser.add_argument(
+        "--use-line-items",
+        dest="use_line_items",
+        action="store_true",
+        help="Enable line-item fact build for the ETL phase of this run.",
+    )
+    parser.add_argument(
+        "--no-use-line-items",
+        dest="use_line_items",
+        action="store_false",
+        help="Disable line-item fact build regardless of configuration.",
+    )
+    parser.set_defaults(use_line_items=None)
     args = parser.parse_args()
     overrides = None
     if args.training_cutoffs:
         overrides = [c.strip() for c in args.training_cutoffs.split(",") if c.strip()]
-    score_all(segment=args.segment, training_cutoffs=overrides)
+    score_all(segment=args.segment, training_cutoffs=overrides, use_line_items=args.use_line_items)

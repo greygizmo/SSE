@@ -1,0 +1,36 @@
+  challenger_enabled: true
+  challenger_model: lr
+  shadow_mode: false
+  segment_columns:
+  - industry
+  - size_bin
+  segment_min_rows: 250
+validation:
+  bootstrap_n: 1000
+  top_k_percents:
+  - 5
+  - 10
+  - 20
+  capacity_grid:
+  - 5
+  - 10
+  - 20
+  ev_cap_percentile: 0.95
+  segment_columns:
+  - industry
+  - industry_sub
+  - region
+  - territory
+  ks_threshold: 0.15
+  psi_threshold: 0.25
+  holdout_required: true
+  holdout_db_object: fact_sales_line
+  holdout_source: auto
+  shift14_epsilon_auc: 0.01
+  shift14_epsilon_lift10: 0.25
+  ablation_epsilon_auc: 0.01
+  ablation_epsilon_lift10: 0.25
+  gauntlet_mask_tail_days: 60
+  gauntlet_purge_days: 60
+  gauntlet_label_buffer_days: 30
+

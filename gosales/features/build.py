@@ -62,11 +62,16 @@ def main(division: str, cutoff: str, windows: str, config: str, with_eb: bool, w
             # Optional ALS embeddings
             if cfg.features.use_als_embeddings:
                 als_factors = 16
+                try:
+                    lag_days = int(getattr(cfg.features, 'affinity_lag_days', 60) or 60)
+                except Exception:
+                    lag_days = 60
                 als_df = customer_als_embeddings(
                     engine,
                     cut,
                     factors=als_factors,
                     lookback_months=cfg.features.als_lookback_months,
+                    lag_days=lag_days,
                 )
                 if "customer_id" in als_df.columns and als_df.height > 0:
                     fm_id_dtype = fm.schema.get("customer_id")

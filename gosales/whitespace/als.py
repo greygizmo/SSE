@@ -53,14 +53,13 @@ def build_als(engine, output_path, top_n: int = 10):
     """
     logger.info("Building ALS model...")
 
-    # Read transactions: prefer fact_transactions (product_sku), fallback to legacy fact_orders (product_name)
-    try:
-        tx = pl.read_database(
-            "SELECT customer_id, product_sku AS item FROM fact_transactions", engine
-        )
-    except Exception:
-        tx = pl.read_database(
-            "SELECT customer_id, product_name AS item FROM fact_orders", engine
+    # Read transactions from the canonical line-grain fact
+    tx = pl.read_database(
+        "SELECT customer_id, product_sku AS item FROM fact_transactions", engine
+    )
+    if tx.is_empty():
+        raise RuntimeError(
+            "fact_transactions is empty; run build_star with line-item facts enabled before training ALS."
         )
 
     # Create a user-item interaction table (counts)

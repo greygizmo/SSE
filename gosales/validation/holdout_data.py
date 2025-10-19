@@ -9,7 +9,7 @@ import pandas as pd
 
 from gosales.utils.paths import DATA_DIR
 from gosales.etl.sku_map import get_sku_mapping
-from gosales.utils.db import get_db_connection, validate_connection
+from gosales.utils.db import get_db_connection, get_curated_connection, validate_connection
 
 
 @dataclass
@@ -38,12 +38,18 @@ def _resolve_db_object(cfg) -> str:
     except Exception:
         pass
     try:
-        table = getattr(getattr(cfg, "database", object()), "source_tables", {}).get("sales_log", "")
+        use_line_items = bool(getattr(getattr(getattr(cfg, "etl", object()), "line_items", object()), "use_line_item_facts", False))
+        if use_line_items:
+            return "fact_sales_line"
+    except Exception:
+        pass
+    try:
+        table = getattr(getattr(cfg, "database", object()), "source_tables", {}).get("sales_detail", "")
         if table:
             return str(table).strip()
     except Exception:
         pass
-    return "dbo.saleslog"
+    return "dbo.table_saleslog_detail"
 
 
 def _resolve_source_columns(cfg) -> dict[str, str]:
@@ -52,6 +58,13 @@ def _resolve_source_columns(cfg) -> dict[str, str]:
         return {str(k): str(v) for k, v in cols.items()}
     except Exception:
         return {}
+
+
+def _requires_curated_engine(obj: str) -> bool:
+    if not obj:
+        return False
+    normalized = obj.strip().lower()
+    return normalized.startswith("fact_") and (" " not in obj) and ("." not in obj) and ("[" not in obj)
 
 
 def load_holdout_buyers(
@@ -68,25 +81,37 @@ def load_holdout_buyers(
     window_end = cutoff_dt + pd.DateOffset(months=window_months)
 
     def _from_db() -> HoldoutData:
+        obj = _resolve_db_object(cfg)
+        use_curated = _requires_curated_engine(obj)
+
         try:
-            engine = get_db_connection()
+            engine = get_curated_connection() if use_curated else get_db_connection()
         except Exception:
             return HoldoutData(None, None, None)
         if not validate_connection(engine):
             return HoldoutData(None, None, None)
 
-        obj = _resolve_db_object(cfg)
-        cols = _resolve_source_columns(cfg)
-        cust_col = cols.get("customer_id", "CustomerId")
-        date_col = cols.get("order_date", "Rec_Date")
-        div_col = cols.get("division", "Division")
+        if use_curated:
+            division_expr = "COALESCE(division_canonical, division_goal, Division)"
+            sql = (
+                "SELECT CompanyId AS customer_id, Rec_Date AS rec_date, "
+                "COALESCE(GP_usd, GP, 0.0) AS gp_amount "
+                f"FROM {obj} "
+                "WHERE Rec_Date > :cutoff AND Rec_Date <= :window_end "
+                f"AND LOWER(COALESCE(TRIM({division_expr}), '')) = :div_lower"
+            )
+        else:
+            cols = _resolve_source_columns(cfg)
+            cust_col = cols.get("customer_id", "CustomerId")
+            date_col = cols.get("order_date", "Rec_Date")
+            div_col = cols.get("division", "Division")
+            sql = (
+                f"SELECT {cust_col} AS customer_id, {date_col} AS rec_date "
+                f"FROM {obj} "
+                f"WHERE {date_col} > :cutoff AND {date_col} <= :window_end "
+                f"AND LOWER(LTRIM(RTRIM(CAST({div_col} AS NVARCHAR(255))))) = :div_lower"
+            )
 
-        sql = (
-            f"SELECT {cust_col} AS customer_id, {date_col} AS rec_date "
-            f"FROM {obj} "
-            f"WHERE {date_col} > :cutoff AND {date_col} <= :window_end "
-            f"AND LOWER(LTRIM(RTRIM(CAST({div_col} AS NVARCHAR(255))))) = :div_lower"
-        )
         try:
             df = pd.read_sql_query(
                 sql,
@@ -102,10 +127,24 @@ def load_holdout_buyers(
 
         if df.empty or "customer_id" not in df.columns:
             return HoldoutData(None, None, "db")
-        buyers = pd.to_numeric(df["customer_id"], errors="coerce").dropna().astype("Int64")
+
+        df["customer_id"] = pd.to_numeric(df["customer_id"], errors="coerce").astype("Int64")
+
+        gp_map = None
+        if "gp_amount" in df.columns:
+            gp_map = (
+                df[["customer_id", "gp_amount"]]
+                .assign(gp_amount=lambda d: pd.to_numeric(d["gp_amount"], errors="coerce").fillna(0.0))
+                .groupby("customer_id", dropna=False)["gp_amount"]
+                .sum()
+                .reset_index()
+                .rename(columns={"gp_amount": "holdout_gp"})
+            )
+
+        buyers = df["customer_id"].dropna()
         if buyers.empty:
-            return HoldoutData(None, None, "db")
-        return HoldoutData(buyers.drop_duplicates(), None, "db")
+            return HoldoutData(None, gp_map, "db")
+        return HoldoutData(buyers.drop_duplicates(), gp_map, "db")
 
     def _from_csv() -> HoldoutData:
         holdout_dir = DATA_DIR / "holdout"
@@ -146,6 +185,7 @@ def load_holdout_buyers(
                 gp_df["holdout_gp"] = gp_df[div_cols].sum(axis=1)
                 holdout_gp_map = gp_df.groupby(cust_col)["holdout_gp"].sum().reset_index()
                 holdout_gp_map[cust_col] = pd.to_numeric(holdout_gp_map[cust_col], errors="coerce").astype("Int64")
+                holdout_gp_map = holdout_gp_map.rename(columns={cust_col: "customer_id"})
         except Exception:
             holdout_gp_map = None
 

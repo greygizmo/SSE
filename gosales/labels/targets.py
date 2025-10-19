@@ -68,8 +68,19 @@ def build_labels_for_division(
     # Determine if caller passed a custom model (e.g., 'Printers'); if so, match by SKU set
     target_norm = normalize_division(params.division)
     sku_targets = tuple(get_model_targets(target_norm))
+    # Optional division aliases (e.g., 'cad' -> ['solidworks','pdm',...])
+    alias_divisions: list[str] = []
+    try:
+        cfg_obj = cfg.load_config()
+        raw_alias = getattr(getattr(cfg_obj, 'features', object()), 'division_aliases', {})  # type: ignore[attr-defined]
+        if isinstance(raw_alias, dict):
+            alias_divisions = [normalize_division(d) for d in (raw_alias.get(target_norm, []) or []) if str(d).strip()]
+    except Exception:
+        alias_divisions = []
     if sku_targets:
         window_target = window_df[window_df['product_sku'].astype(str).isin(sku_targets)].copy()
+    elif alias_divisions:
+        window_target = window_df[window_df['product_division'].isin(alias_divisions)].copy()
     else:
         window_target = window_df[window_df['product_division'] == target_norm].copy()
     # Optional denylist SKUs exclusion (e.g., trials/POC)
@@ -143,6 +154,13 @@ def build_labels_for_division(
     if sku_targets:
         had_div_df = (
             feature_df[feature_df['product_sku'].astype(str).isin(sku_targets)][['customer_id']]
+            .dropna()
+            .drop_duplicates()
+            .assign(had_div=1)
+        )
+    elif alias_divisions:
+        had_div_df = (
+            feature_df[feature_df['product_division'].isin(alias_divisions)][['customer_id']]
             .dropna()
             .drop_duplicates()
             .assign(had_div=1)
