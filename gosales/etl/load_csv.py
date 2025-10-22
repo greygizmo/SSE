@@ -44,7 +44,6 @@ if __name__ == "__main__":
 
     # Define the CSV files and their corresponding table names
     csv_files = {
-        "Analytics_order_tags.csv": "analytics_order_tags",
         "Analytics_SalesLogs.csv": "analytics_sales_logs",
         "Sales_Log.csv": "sales_log",
         # Industry enrichment lookup (used to build dim_customer)

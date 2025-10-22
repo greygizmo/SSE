@@ -16,6 +16,7 @@ from gosales.etl.sku_map import get_model_targets
 
 
 Mode = Literal["expansion", "all"]
+TargetType = Literal["division", "goal", "rollup"]
 
 
 @dataclass
@@ -28,15 +29,37 @@ class LabelParams:
     # Optional: widen window for sparse divisions up to max_window_months to hit a minimum positives target
     min_positive_target: Optional[int] = None
     max_window_months: int = 12
+    # Which categorization to use for labels: canonical division, Goal, or item_rollup
+    target_type: Optional[TargetType] = None
 
 
 def build_labels_for_division(
     engine,
     params: LabelParams,
 ) -> pl.DataFrame:
-    # Load curated
-    facts = pd.read_sql("SELECT customer_id, order_date, product_division, product_goal, product_sku, gross_profit FROM fact_transactions", engine)
-    customers = pd.read_sql("SELECT customer_id FROM dim_customer", engine)
+    # Load curated (legacy fact for compatibility + customers)
+    try:
+        facts = pd.read_sql("SELECT * FROM fact_transactions", engine)
+        # Keep only relevant columns if present
+        keep_cols = [
+            c
+            for c in (
+                "customer_id",
+                "order_date",
+                "product_division",
+                "product_goal",
+                "product_sku",
+                "gross_profit",
+            )
+            if c in facts.columns
+        ]
+        facts = facts[keep_cols] if keep_cols else pd.DataFrame()
+    except Exception:
+        facts = pd.DataFrame()
+    try:
+        customers = pd.read_sql("SELECT customer_id FROM dim_customer", engine)
+    except Exception:
+        customers = pd.DataFrame()
     if facts.empty or customers.empty:
         return pl.DataFrame()
 
@@ -50,8 +73,11 @@ def build_labels_for_division(
     facts['customer_id'] = facts['customer_id'].astype(str)
     customers['customer_id'] = customers['customer_id'].astype(str)
 
-    # Feature-period activity
-    feature_df = facts[facts['order_date'] <= cutoff_dt].copy()
+    # Feature-period activity (legacy transactions); tolerate missing columns
+    if 'order_date' in facts.columns:
+        feature_df = facts[pd.to_datetime(facts['order_date'], errors='coerce') <= cutoff_dt].copy()
+    else:
+        feature_df = facts.copy()
 
     # Candidates by mode
     if params.mode == "expansion":
@@ -59,12 +85,16 @@ def build_labels_for_division(
     else:
         cand = customers[['customer_id']].dropna().drop_duplicates()
 
-    # Window-period transactions for target division
-    window_df = facts[(facts['order_date'] > cutoff_dt) & (facts['order_date'] <= win_end)].copy()
-    # Normalize division string comparisons to avoid whitespace/case issues
-    window_df['product_division'] = (
-        window_df['product_division'].astype(str).str.strip().str.casefold()
-    )
+    # Window-period transactions (legacy)
+    if 'order_date' in facts.columns:
+        window_df = facts[(facts['order_date'] > cutoff_dt) & (facts['order_date'] <= win_end)].copy()
+    else:
+        window_df = facts.copy()
+    # Normalize string comparisons to avoid whitespace/case issues
+    if 'product_division' in window_df.columns:
+        window_df['product_division'] = (
+            window_df['product_division'].astype(str).str.strip().str.casefold()
+        )
     if 'product_goal' in window_df.columns:
         window_df['product_goal'] = window_df['product_goal'].astype(str).str.strip().str.casefold()
     # Determine if caller passed a custom model (e.g., 'Printers'); if so, match by SKU set
@@ -79,38 +109,90 @@ def build_labels_for_division(
             alias_divisions = [normalize_division(d) for d in (raw_alias.get(target_norm, []) or []) if str(d).strip()]
     except Exception:
         alias_divisions = []
+    # Resolve target type (categorization) from params or config
+    try:
+        cfg_obj = cfg.load_config()
+        cfg_target_type = getattr(getattr(cfg_obj, 'labels', object()), 'target_type', None)
+    except Exception:
+        cfg_target_type = None
+
+    raw_target_type = params.target_type or cfg_target_type or 'division'
+    target_kind = str(raw_target_type or '').strip().lower()
+    if target_kind == 'goal':
+        target_kind = 'division'
+    elif target_kind in {'sub_division', 'sub-division'}:
+        target_kind = 'rollup'
+    if target_kind not in {'division', 'rollup'}:
+        target_kind = 'division'
+    target_type: TargetType = target_kind  # type: ignore[assignment]
+
     rollup_mode = False
+
+    # Helper: read line-item window with gp_value + categorizations
+    def _read_line_window(_end: pd.Timestamp) -> pd.DataFrame:
+        try:
+            sql = (
+                "SELECT CompanyId AS customer_id, Rec_Date AS order_date, "
+                "COALESCE(GP_usd, GP, 0.0) AS gp_value, "
+                "item_rollup, division_goal, division_canonical "
+                "FROM fact_sales_line WHERE Rec_Date > :cutoff AND Rec_Date <= :win_end"
+            )
+            # Use ISO date strings for broad DBAPI compatibility (SQLite, Azure)
+            params_sql = {
+                "cutoff": pd.to_datetime(cutoff_dt).date().isoformat(),
+                "win_end": pd.to_datetime(_end).date().isoformat(),
+            }
+            df = pd.read_sql_query(sql, engine, params=params_sql)
+        except Exception:
+            return pd.DataFrame()
+        if df.empty:
+            return df
+        df['customer_id'] = df['customer_id'].astype(str)
+        # Normalized keys for robust matching
+        norm = lambda s: (
+            s.astype(str).str.strip().str.lower()
+            .str.replace(r"[^0-9a-z]+", " ", regex=True)
+            .str.replace(r"\s+", " ", regex=True)
+            .str.strip()
+        )
+        for col in ("item_rollup", "division_goal", "division_canonical"):
+            if col in df.columns:
+                df[col] = norm(df[col])
+        # Ensure numeric gp_value
+        df['gp_value'] = pd.to_numeric(df.get('gp_value'), errors='coerce').fillna(0.0)
+        # Coerce order_date
+        if 'order_date' in df.columns:
+            df['order_date'] = pd.to_datetime(df['order_date'], errors='coerce')
+        return df
+
     if sku_targets:
         window_target = window_df[window_df['product_sku'].astype(str).isin(sku_targets)].copy()
-    elif alias_divisions:
+    elif alias_divisions and target_type == 'division':
         window_target = window_df[window_df['product_division'].isin(alias_divisions)].copy()
     else:
-        # Goal or rollup fallback
-        if 'product_goal' in window_df.columns and (window_df['product_goal'] == target_norm).any():
-            window_target = window_df[window_df['product_goal'] == target_norm].copy()
-        else:
-            # Attempt rollup via line fact
-            try:
-                q = (
-                    "SELECT CompanyId AS customer_id, Rec_Date AS rec_date, item_rollup "
-                    "FROM fact_sales_line WHERE Rec_Date > :cutoff AND Rec_Date <= :win_end"
-                )
-                rw = pd.read_sql_query(q, engine, params={"cutoff": cutoff_dt, "win_end": win_end})
-                if not rw.empty and 'item_rollup' in rw.columns:
-                    rw['customer_id'] = pd.to_numeric(rw['customer_id'], errors='coerce').astype('Int64')
-                    il = rw['item_rollup'].astype(str).str.strip().str.casefold()
-                    sel = il == target_norm
-                    if sel.any():
-                        window_target = rw.loc[sel, ['customer_id']].copy()
-                        window_target['customer_id'] = window_target['customer_id'].astype(str)
-                        window_target['net_gp_window'] = 0.0
-                        rollup_mode = True
-                    else:
-                        window_target = window_df[window_df['product_division'] == target_norm].copy()
+        # Division (Goal) or rollup selection
+        t = str(target_type).lower()
+        if t == 'rollup':
+            lw = _read_line_window(win_end)
+            if not lw.empty and 'item_rollup' in lw.columns:
+                window_target = lw[lw['item_rollup'] == target_norm].copy()
+                rollup_mode = True
+            else:
+                # Last resort: match canonical division if available; otherwise legacy division
+                if not lw.empty and 'division_canonical' in lw.columns:
+                    window_target = lw[lw['division_canonical'] == target_norm].copy()
                 else:
-                    window_target = window_df[window_df['product_division'] == target_norm].copy()
-            except Exception:
+                    window_target = window_df[window_df.get('product_division') == target_norm].copy()
+        else:
+            lw = _read_line_window(win_end)
+            if not lw.empty and 'division_goal' in lw.columns:
+                window_target = lw[lw['division_goal'] == target_norm].copy()
+            elif 'product_goal' in window_df.columns:
+                window_target = window_df[window_df['product_goal'] == target_norm].copy()
+            elif 'product_division' in window_df.columns and (window_df['product_division'] == target_norm).any():
                 window_target = window_df[window_df['product_division'] == target_norm].copy()
+            else:
+                window_target = pd.DataFrame(columns=['customer_id'])
     # Optional denylist SKUs exclusion (e.g., trials/POC)
     try:
         cfg_obj = cfg.load_config()
@@ -124,14 +206,30 @@ def build_labels_for_division(
                     break
             if col:
                 denylist = dl[col].dropna().astype(str).str.strip().unique().tolist()
-        if denylist:
+        if denylist and 'product_sku' in window_target.columns:
             window_target = window_target[~window_target['product_sku'].astype(str).isin(denylist)].copy()
     except Exception:
         pass
 
     # Net GP per customer in window
     def _compute_labels(df_window: pd.DataFrame) -> pd.DataFrame:
-        net_gp_local = df_window.groupby('customer_id')['gross_profit'].sum().rename('net_gp_window').reset_index()
+        gp_colname = None
+        for gp_cand in ('gross_profit', 'gp_value', 'GP_usd', 'GP'):
+            if gp_cand in df_window.columns:
+                gp_colname = gp_cand
+                break
+        if gp_colname is None:
+            # Nothing to sum; treat as zeros
+            net_gp_local = (
+                df_window[['customer_id']].dropna().drop_duplicates().assign(net_gp_window=0.0)
+            )
+        else:
+            net_gp_local = (
+                df_window.groupby('customer_id')[gp_colname]
+                .sum()
+                .rename('net_gp_window')
+                .reset_index()
+            )
         lab = cand.merge(net_gp_local, on='customer_id', how='left')
         lab['net_gp_window'] = lab['net_gp_window'].fillna(0.0)
         thr = float(params.gp_min_threshold if params.gp_min_threshold is not None else (cfg.load_config().labels.gp_min_threshold or 0.0))
@@ -148,18 +246,34 @@ def build_labels_for_division(
             while pos < int(params.min_positive_target) and widened < int(params.max_window_months):
                 widened = min(int(params.max_window_months), widened + 3)
                 new_end = cutoff_dt + relativedelta(months=widened)
-                window_df_w = facts[(facts['order_date'] > cutoff_dt) & (facts['order_date'] <= new_end)].copy()
-                window_df_w['product_division'] = (
-                    window_df_w['product_division'].astype(str).str.strip().str.casefold()
-                )
+                # Rebuild selection under widened window respecting target_type
                 if sku_targets:
+                    window_df_w = facts[(facts['order_date'] > cutoff_dt) & (facts['order_date'] <= new_end)].copy()
                     window_target_w = window_df_w[
                         window_df_w['product_sku'].astype(str).isin(sku_targets)
                     ].copy()
                 else:
-                    window_target_w = window_df_w[
-                        window_df_w['product_division'] == target_norm
-                    ].copy()
+                    t = str(target_type).lower()
+                    if t == 'rollup':
+                        lw = _read_line_window(new_end)
+                        if not lw.empty and 'item_rollup' in lw.columns:
+                            window_target_w = lw[lw['item_rollup'] == target_norm].copy()
+                        else:
+                            window_target_w = pd.DataFrame(columns=['customer_id'])
+                    else:
+                        lw = _read_line_window(new_end)
+                        if not lw.empty and 'division_goal' in lw.columns:
+                            window_target_w = lw[lw['division_goal'] == target_norm].copy()
+                        else:
+                            window_df_w = facts[(facts['order_date'] > cutoff_dt) & (facts['order_date'] <= new_end)].copy()
+                            if 'product_goal' in window_df_w.columns:
+                                window_df_w['product_goal'] = window_df_w.get('product_goal', '').astype(str).str.strip().str.casefold()
+                                window_target_w = window_df_w[window_df_w['product_goal'] == target_norm].copy()
+                            else:
+                                window_df_w['product_division'] = (
+                                    window_df_w.get('product_division', '').astype(str).str.strip().str.casefold()
+                                )
+                                window_target_w = window_df_w[window_df_w['product_division'] == target_norm].copy()
                 labels = _compute_labels(window_target_w)
                 pos = int(labels['label'].sum()) if not labels.empty else 0
             # Update window_end if widened
@@ -168,9 +282,10 @@ def build_labels_for_division(
         pass
 
     # Cohorts from feature period
-    feature_df['product_division'] = (
-        feature_df['product_division'].astype(str).str.strip().str.casefold()
-    )
+    if 'product_division' in feature_df.columns:
+        feature_df['product_division'] = (
+            feature_df['product_division'].astype(str).str.strip().str.casefold()
+        )
     if 'product_goal' in feature_df.columns:
         feature_df['product_goal'] = feature_df['product_goal'].astype(str).str.strip().str.casefold()
 
@@ -188,7 +303,7 @@ def build_labels_for_division(
             .drop_duplicates()
             .assign(had_div=1)
         )
-    elif alias_divisions:
+    elif alias_divisions and target_type == 'division':
         had_div_df = (
             feature_df[feature_df['product_division'].isin(alias_divisions)][['customer_id']]
             .dropna()
@@ -196,7 +311,8 @@ def build_labels_for_division(
             .assign(had_div=1)
         )
     else:
-        if not rollup_mode and 'product_goal' in feature_df.columns and (feature_df['product_goal'] == target_norm).any():
+        t = str(target_type).lower()
+        if t == 'division' and 'product_goal' in feature_df.columns and (feature_df['product_goal'] == target_norm).any():
             had_div_df = (
                 feature_df[feature_df['product_goal'] == target_norm][['customer_id']]
                 .dropna()
@@ -204,33 +320,54 @@ def build_labels_for_division(
                 .assign(had_div=1)
             )
         else:
-            # Rollup mode via line fact in feature period
             try:
-                qf = (
-                    "SELECT CompanyId AS customer_id, Rec_Date AS rec_date, item_rollup "
+                sqlf = (
+                    "SELECT CompanyId AS customer_id, Rec_Date AS order_date, item_rollup, division_goal "
                     "FROM fact_sales_line WHERE Rec_Date <= :cutoff"
                 )
-                rf = pd.read_sql_query(qf, engine, params={"cutoff": cutoff_dt})
-                if not rf.empty and 'item_rollup' in rf.columns:
-                    rf['customer_id'] = pd.to_numeric(rf['customer_id'], errors='coerce').astype('Int64')
-                    ilf = rf['item_rollup'].astype(str).str.strip().str.casefold()
-                    selfeat = ilf == target_norm
+                rf = pd.read_sql_query(
+                    sqlf,
+                    engine,
+                    params={"cutoff": pd.to_datetime(cutoff_dt).date().isoformat()},
+                )
+            except Exception:
+                rf = pd.DataFrame()
+            if not rf.empty:
+                norm = lambda s: (
+                    s.astype(str).str.strip().str.lower()
+                    .str.replace(r"[^0-9a-z]+", " ", regex=True)
+                    .str.replace(r"\s+", " ", regex=True)
+                    .str.strip()
+                )
+                rf['customer_id'] = rf['customer_id'].astype(str)
+                if t == 'rollup' and 'item_rollup' in rf.columns:
+                    rf['item_rollup'] = norm(rf['item_rollup'])
+                    mask = rf['item_rollup'] == target_norm
                     had_div_df = (
-                        rf.loc[selfeat, ['customer_id']]
+                        rf.loc[mask, ['customer_id']]
+                        .dropna()
+                        .drop_duplicates()
+                        .assign(had_div=1)
+                    )
+                elif t == 'division' and 'division_goal' in rf.columns:
+                    rf['division_goal'] = norm(rf['division_goal'])
+                    mask = rf['division_goal'] == target_norm
+                    had_div_df = (
+                        rf.loc[mask, ['customer_id']]
                         .dropna()
                         .drop_duplicates()
                         .assign(had_div=1)
                     )
                 else:
                     had_div_df = (
-                        feature_df[feature_df['product_division'] == target_norm][['customer_id']]
+                        feature_df[feature_df.get('product_division') == target_norm][['customer_id']]
                         .dropna()
                         .drop_duplicates()
                         .assign(had_div=1)
                     )
-            except Exception:
+            else:
                 had_div_df = (
-                    feature_df[feature_df['product_division'] == target_norm][['customer_id']]
+                    feature_df[feature_df.get('product_division') == target_norm][['customer_id']]
                     .dropna()
                     .drop_duplicates()
                     .assign(had_div=1)

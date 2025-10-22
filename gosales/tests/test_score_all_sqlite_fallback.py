@@ -29,11 +29,12 @@ def test_score_all_etl_uses_sample_csvs_when_sqlite(monkeypatch, tmp_path):
     samples_dir = data_dir / "database_samples"
     samples_dir.mkdir(parents=True, exist_ok=True)
 
-    sales_log_csv = samples_dir / "Sales_Log.csv"
-    sales_log_csv.write_text(
-        """CustomerId,Rec Date,Division,Customer,InvoiceId,branch,rep,SWX_Core,SWX_Core_Qty,Services,Services_Qty
-ACME-001,2024-01-15,Solidworks,Acme Corp,INV-001,North,Jane Doe,1000,2,0,0
-BETA-002,2024-02-20,Services,Beta LLC,INV-002,East,John Roe,0,0,500,5
+    # Minimal line-item sample to back the Phase 0 line-item ETL path
+    sales_detail_csv = samples_dir / "table_saleslog_detail.csv"
+    sales_detail_csv.write_text(
+        """Rec_Date,Sales_Order,Item_internalid,Revenue,Amount2,GP,Term_GP,Division,CompanyId
+2024-01-15,INV-001,SKU-1,1000,200,800,0,Solidworks,ACME-001
+2024-02-20,INV-002,SKU-2,500,100,400,0,Services,BETA-002
 """,
         encoding="utf-8",
     )
@@ -85,6 +86,26 @@ Beta LLC,Beta Limited,beta.com,Technology,Technology-General,Sample,2
         return None
 
     monkeypatch.setattr(score_all.subprocess, "run", _fake_run)
+
+    # Configure sales_detail to use the locally loaded CSV-backed table on SQLite
+    # and relax the allow-list to permit the test table identifier.
+    cfg.database.source_tables["sales_detail"] = "sales_detail"
+    # Override line-item source to point at our local table; skip other DB-backed sources
+    cfg.etl.line_items.sources.sales_detail = "sales_detail"
+    cfg.etl.line_items.sources.product_info = "csv"
+    cfg.etl.line_items.sources.items_category_limited = "csv"
+    cfg.etl.line_items.sources.product_tags = "csv"
+    cfg.database.allowed_identifiers = []
+    # Disable line-type exclusions to keep tiny sample rows
+    cfg.etl.line_items.behavior.exclude_line_types = []
+
+    # Load the sample line-item CSV into the primary (SQLite) engine as 'sales_detail'
+    engine = db_mod.get_db_connection()
+    load_csv_mod.load_csv_to_db(sales_detail_csv, "sales_detail", engine)
+
+    # Stub legacy CSV ingest used by score_all for local runs; Phase 0 ignores Sales_Log
+    monkeypatch.setattr(load_csv_mod, "load_csv_to_db", lambda *args, **kwargs: None)
+    monkeypatch.setattr(score_all, "load_csv_to_db", lambda *args, **kwargs: None)
 
     score_all.score_all()
 

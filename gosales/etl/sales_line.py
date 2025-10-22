@@ -19,6 +19,7 @@ import polars as pl
 from gosales.utils.config import load_config
 from gosales.utils.db import get_db_connection
 from gosales.utils.logger import get_logger
+from gosales.utils.paths import OUTPUTS_DIR
 from gosales.sql.queries import select_all
 from gosales.utils.sql import ensure_allowed_identifier, validate_identifier
 from gosales.etl.sku_map import get_sku_mapping
@@ -175,9 +176,6 @@ DIVISION_CANONICAL_COLUMN = "division_canonical"
 ITEM_ROLLUP_COLUMN = "item_rollup"
 UNKNOWN_DIVISION = "UNKNOWN"
 
-ORDER_TAG_ROLLUP_COLUMN = "order_item_rollup"
-ORDER_GOAL_COLUMN = "order_goal"
-
 _ROLLUP_DIVISION_OVERRIDES: dict[str, str] = {
     "draftsight": "Solidworks",
     "geomagic": "Scanning",
@@ -235,6 +233,41 @@ def _build_rollup_division_lookup() -> dict[str, str]:
     return lookup
 
 
+def normalize_line_quantity(
+    frame: pl.DataFrame,
+    behavior_cfg,
+) -> pl.DataFrame:
+    """Add a normalized line quantity column `Line_Qty`.
+
+    - Picks the first available candidate column from common names: Quantity, Qty, Line_Qty, SO_Qty.
+    - Casts to Float64, fills nulls with 0, and applies absolute value to avoid negative counts.
+    - Honors return_treatment semantics: when behavior returns are excluded upstream, quantity simply reflects counts; when `separate_flag`, quantity remains absolute while `is_return_line` encodes sign.
+    """
+    if frame.is_empty():
+        return frame
+
+    # Candidate names in preferred order
+    candidates = [
+        "Line_Quantity",
+        "Quantity",
+        "Qty",
+        "Line_Qty",
+        "SO_Qty",
+        "Item_Qty",
+    ]
+    found = next((c for c in candidates if c in frame.columns), None)
+    if found is None:
+        # If not found, ensure column exists as 0.0
+        return frame.with_columns(pl.lit(0.0).alias("Line_Qty"))
+
+    col = pl.col(found).cast(pl.Float64, strict=False)
+
+    # Always use absolute; sign handling belongs to revenue or explicit flags
+    qty_expr = col.fill_null(0.0).abs()
+
+    return frame.with_columns(qty_expr.alias("Line_Qty"))
+
+
 _ROLLUP_DIVISION_LOOKUP = _build_rollup_division_lookup()
 
 
@@ -272,24 +305,13 @@ def get_rollup_goal_mappings(engine=None, config_path: str | None = None, cfg=No
     line_cfg = getattr(getattr(cfg, "etl", object()), "line_items", None)
     sources_cfg = getattr(line_cfg, "sources", None)
 
-    order_mapping_df = _load_order_tag_mapping(engine, cfg, sources_cfg)
     product_mapping_df = _load_product_tag_mapping(engine, cfg, sources_cfg)
 
-    if order_mapping_df.is_empty() and product_mapping_df.is_empty():
+    if product_mapping_df.is_empty():
         return {}, {}
 
     rollup_to_goal: dict[str, str] = {}
     rollup_to_division: dict[str, str] = {}
-
-    for row in order_mapping_df.iter_rows(named=True):
-        raw_rollup = row.get(ORDER_TAG_ROLLUP_COLUMN)
-        norm_rollup = _normalize_rollup_label(raw_rollup)
-        goal = row.get(ORDER_GOAL_COLUMN)
-        if not norm_rollup:
-            continue
-        if goal:
-            rollup_to_goal[norm_rollup] = str(goal)
-        rollup_to_division[norm_rollup] = _resolve_canonical_division(goal, raw_rollup, None)
 
     for row in product_mapping_df.iter_rows(named=True):
         raw_rollup = row.get(ITEM_ROLLUP_COLUMN)
@@ -445,52 +467,31 @@ def _add_currency_columns(
 
 
 def _load_product_tag_mapping(engine, cfg, sources_cfg) -> pl.DataFrame:
-    """Return a mapping DataFrame linking product internal IDs to item rollups and Goals."""
+    """Return a mapping DataFrame linking product internal IDs to item rollups and Goal divisions."""
 
     product_table = getattr(sources_cfg, "product_info", None) if sources_cfg else None
+    category_table = getattr(sources_cfg, "items_category_limited", None) if sources_cfg else None
     tags_table = getattr(sources_cfg, "product_tags", None) if sources_cfg else None
 
-    if not product_table or not tags_table:
+    if not tags_table:
         logger.info(
-            "Product info or product tags source missing (product=%r, tags=%r); skipping division tags bootstrap.",
-            product_table,
-            tags_table,
+            "Product tags source missing; skipping division tags bootstrap."
         )
         return pl.DataFrame()
 
     product_df = _read_source_table(engine, cfg, product_table)
+    category_df = _read_source_table(engine, cfg, category_table) if category_table else pl.DataFrame()
     tags_df = _read_source_table(engine, cfg, tags_table)
 
-    if product_df.is_empty() or tags_df.is_empty():
+    if tags_df.is_empty():
         logger.warning(
-            "Product metadata or tags returned no rows (product=%r empty=%s, tags=%r empty=%s); "
-            "division tags bootstrap skipped.",
-            product_table,
-            product_df.is_empty(),
+            "Product tags source `%s` returned no rows; skipping division tags bootstrap.",
             tags_table,
-            tags_df.is_empty(),
         )
         return pl.DataFrame()
 
-    product_pd = product_df.to_pandas()
     tags_pd = tags_df.to_pandas()
-
-    product_pd.columns = [str(col).strip().casefold() for col in product_pd.columns]
     tags_pd.columns = [str(col).strip().casefold() for col in tags_pd.columns]
-
-    internal_id_col = None
-    for candidate in ("product_internal_id", "internalid"):
-        if candidate in product_pd.columns:
-            internal_id_col = candidate
-            break
-    if internal_id_col is None or "item_rollup" not in product_pd.columns:
-        logger.warning(
-            "Product metadata source `%s` missing required columns (found: %s); skipping division tags bootstrap.",
-            product_table,
-            list(product_pd.columns),
-        )
-        return pl.DataFrame()
-
     if "item_rollup" not in tags_pd.columns:
         logger.warning(
             "Product tags source `%s` missing `item_rollup` column; skipping division tags bootstrap.",
@@ -498,120 +499,102 @@ def _load_product_tag_mapping(engine, cfg, sources_cfg) -> pl.DataFrame:
         )
         return pl.DataFrame()
 
-    goal_col = "goal" if "goal" in tags_pd.columns else None
+    goal_col = next((col for col in ("goal", "division_goal") if col in tags_pd.columns), None)
     if goal_col is None:
         logger.warning(
-            "Product tags source `%s` missing `Goal` column; skipping division tags bootstrap.",
+            "Product tags source `%s` missing Goal field; skipping division tags bootstrap.",
             tags_table,
         )
         return pl.DataFrame()
 
-    product_subset = (
-        product_pd[[internal_id_col, "item_rollup"]]
-        .dropna(subset=[internal_id_col])
-        .copy()
-    )
-    product_subset["item_rollup"] = (
-        product_subset["item_rollup"].astype("string").str.strip()
-    )
+    def _prepare_base(frame: pl.DataFrame, source_name: str | None) -> tuple[pd.DataFrame | None, str]:
+        if frame.is_empty():
+            return None, ""
+        pdf = frame.to_pandas()
+        pdf.columns = [str(col).strip().casefold() for col in pdf.columns]
+        internal_id_col = next(
+            (c for c in ("internalid", "internal_id", "item_internalid", "product_internal_id", "id") if c in pdf.columns),
+            None,
+        )
+        rollup_col = next((c for c in ("item_rollup", "item rollup") if c in pdf.columns), None)
+        if internal_id_col is None or rollup_col is None:
+            return None, ""
+        subset = pdf[[internal_id_col, rollup_col]].dropna(subset=[internal_id_col]).copy()
+        if subset.empty:
+            return None, ""
+        subset[internal_id_col] = subset[internal_id_col].astype("string").str.strip()
+        subset[rollup_col] = subset[rollup_col].astype("string").str.strip()
+        subset.replace("", pd.NA, inplace=True)
+        subset = subset.dropna(subset=[internal_id_col])
+        subset = subset.rename(columns={internal_id_col: "product_internal_id", rollup_col: "item_rollup"})
+        subset = subset.drop_duplicates(subset=["product_internal_id"], keep="first")
+        return subset, str(source_name or "")
+
+    base_pd: pd.DataFrame | None = None
+    base_source = ""
+    for candidate_df, source_name in ((category_df, category_table), (product_df, product_table)):
+        prepared, src = _prepare_base(candidate_df, source_name)
+        if prepared is not None:
+            base_pd = prepared
+            base_source = src or base_source
+            break
+
+    if base_pd is None:
+        logger.warning(
+            "No usable product metadata source found (items_category_limited=%r, product_info=%r); skipping division tags bootstrap.",
+            category_table,
+            product_table,
+        )
+        return pl.DataFrame()
 
     tags_subset = tags_pd[["item_rollup", goal_col]].dropna(subset=["item_rollup"]).copy()
     tags_subset["item_rollup"] = tags_subset["item_rollup"].astype("string").str.strip()
+    tags_subset[goal_col] = tags_subset[goal_col].astype("string").str.strip()
+    tags_subset.replace("", pd.NA, inplace=True)
 
-    mapping = (
-        product_subset.merge(tags_subset, on="item_rollup", how="left")
-        .drop_duplicates(subset=[internal_id_col], keep="first")
-    )
-    mapping["product_internal_id"] = (
-        mapping[internal_id_col].astype("string").str.strip()
-    )
-    if DIVISION_GOAL_COLUMN not in mapping.columns:
-        mapping[DIVISION_GOAL_COLUMN] = mapping[goal_col]
-    if DIVISION_GOAL_COLUMN in mapping.columns:
-        mapping[DIVISION_GOAL_COLUMN] = mapping[DIVISION_GOAL_COLUMN].where(
-            mapping[DIVISION_GOAL_COLUMN].notna(), None
+    if tags_subset.empty:
+        logger.warning(
+            "Product tags source `%s` provided no item_rollup -> Goal pairs; division tags bootstrap will carry null Goals.",
+            tags_table,
         )
+        rollup_goal_map = pd.DataFrame(columns=["item_rollup", DIVISION_GOAL_COLUMN])
+    else:
+        counts = (
+            tags_subset.groupby(["item_rollup", goal_col], dropna=False)
+            .size()
+            .reset_index(name="rows")
+        )
+        counts = counts.sort_values(["item_rollup", "rows", goal_col], ascending=[True, False, True])
+        rollup_goal_map = counts.drop_duplicates(subset=["item_rollup"], keep="first")[["item_rollup", goal_col]]
+        rollup_goal_map = rollup_goal_map.rename(columns={goal_col: DIVISION_GOAL_COLUMN})
+
+    mapping = base_pd.merge(rollup_goal_map, on="item_rollup", how="left")
+    mapping["product_internal_id"] = mapping["product_internal_id"].astype("string").str.strip()
+    mapping["item_rollup"] = mapping["item_rollup"].astype("string").str.strip()
+    mapping.replace("", pd.NA, inplace=True)
 
     mapping_df = pl.from_pandas(
-        mapping[["product_internal_id", "item_rollup", goal_col]].rename(
-            columns={goal_col: DIVISION_GOAL_COLUMN}
-        )
+        mapping[["product_internal_id", "item_rollup", DIVISION_GOAL_COLUMN]]
     )
 
     if mapping_df.is_empty():
         logger.warning(
             "Combined product/tag mapping produced no rows; skipping division tags bootstrap."
         )
-
-    return mapping_df
-
-
-def _load_order_tag_mapping(engine, cfg, sources_cfg) -> pl.DataFrame:
-    """Return mapping of product internal IDs to order-level tags and goals."""
-
-    order_table = getattr(sources_cfg, "order_tags", None) if sources_cfg else None
-    if not order_table:
-        logger.info("Order tags source missing; skipping order-level division mapping.")
-        return pl.DataFrame()
-
-    order_df = _read_source_table(engine, cfg, order_table)
-    if order_df.is_empty():
-        logger.warning(
-            "Order tags source `%s` returned no rows; skipping order-level division mapping.",
-            order_table,
-        )
-        return pl.DataFrame()
-
-    order_pd = order_df.to_pandas()
-    order_pd.columns = [str(col).strip().casefold() for col in order_pd.columns]
-
-    id_col = next((col for col in ("id", "item_internalid", "product_internal_id") if col in order_pd.columns), None)
-    if id_col is None:
-        logger.warning(
-            "Order tags source `%s` missing expected product identifier column (found: %s); skipping.",
-            order_table,
-            list(order_pd.columns),
-        )
-        return pl.DataFrame()
-
-    tag_col = next((col for col in ("tag", "item_rollup", "item_rollup_name") if col in order_pd.columns), None)
-    goal_col = next((col for col in ("goal", DIVISION_GOAL_COLUMN, "division_goal") if col in order_pd.columns), None)
-
-    if goal_col is None:
-        logger.warning(
-            "Order tags source `%s` missing goal column (found: %s); skipping.",
-            order_table,
-            list(order_pd.columns),
-        )
-        return pl.DataFrame()
-
-    selection = [id_col, goal_col]
-    if tag_col:
-        selection.append(tag_col)
-
-    order_subset = order_pd[selection].dropna(subset=[id_col]).copy()
-    if order_subset.empty:
-        logger.warning("Order tags source `%s` produced no usable rows after filtering; skipping.", order_table)
-        return pl.DataFrame()
-
-    order_subset["product_internal_id"] = order_subset[id_col].astype("string").str.strip()
-    order_subset[ORDER_GOAL_COLUMN] = order_subset[goal_col].astype("string").str.strip()
-    if tag_col:
-        order_subset[ORDER_TAG_ROLLUP_COLUMN] = order_subset[tag_col].astype("string").str.strip()
     else:
-        order_subset[ORDER_TAG_ROLLUP_COLUMN] = pd.NA
-
-    order_subset[ORDER_GOAL_COLUMN] = order_subset[ORDER_GOAL_COLUMN].replace({"": pd.NA})
-    order_subset[ORDER_TAG_ROLLUP_COLUMN] = order_subset[ORDER_TAG_ROLLUP_COLUMN].replace({"": pd.NA})
-
-    order_subset = order_subset.drop_duplicates(subset=["product_internal_id"], keep="first")
-
-    mapping_df = pl.from_pandas(
-        order_subset[["product_internal_id", ORDER_TAG_ROLLUP_COLUMN, ORDER_GOAL_COLUMN]]
-    )
-
-    if mapping_df.is_empty():
-        logger.warning("Order tags mapping is empty after conversion; skipping order-level division mapping.")
+        multi_goal_rollups = (
+            mapping_df.group_by(ITEM_ROLLUP_COLUMN, maintain_order=False)
+            .agg(pl.col(DIVISION_GOAL_COLUMN).n_unique().alias("goal_count"))
+            .filter(pl.col("goal_count") > 1)
+            .height
+        )
+        logger.info(
+            "Product mapping source `%s` produced %s rows (%s distinct sub-divisions); multi-goal sub-divisions=%s.",
+            base_source or "unknown",
+            mapping_df.height,
+            mapping_df.select(pl.col(ITEM_ROLLUP_COLUMN).n_unique()).item(),
+            multi_goal_rollups,
+        )
 
     return mapping_df
 
@@ -625,28 +608,14 @@ def _attach_division_metadata(
     """Augment the sales detail frame with item rollup and Goal-derived divisions."""
 
     required = [ITEM_ROLLUP_COLUMN, DIVISION_GOAL_COLUMN, DIVISION_CANONICAL_COLUMN]
-    order_mapping_df = _load_order_tag_mapping(engine, cfg, sources_cfg)
     product_mapping_df = _load_product_tag_mapping(engine, cfg, sources_cfg)
 
     if frame.is_empty():
-        return _ensure_columns(frame, required + [ORDER_TAG_ROLLUP_COLUMN, ORDER_GOAL_COLUMN, "product_item_rollup", "product_goal"])
+        return _ensure_columns(frame, required + ["product_item_rollup", "product_goal"])
 
     enriched = frame.with_columns(
         pl.col("Item_internalid").cast(pl.Utf8).str.strip_chars().alias("Item_internalid")
     )
-
-    if order_mapping_df.is_empty():
-        enriched = _ensure_columns(enriched, [ORDER_TAG_ROLLUP_COLUMN, ORDER_GOAL_COLUMN])
-    else:
-        enriched = enriched.join(
-            order_mapping_df,
-            left_on="Item_internalid",
-            right_on="product_internal_id",
-            how="left",
-            suffix="_order",
-        )
-        enriched = enriched.drop(["product_internal_id", "product_internal_id_order"], strict=False)
-        enriched = _ensure_columns(enriched, [ORDER_TAG_ROLLUP_COLUMN, ORDER_GOAL_COLUMN])
 
     if product_mapping_df.is_empty():
         enriched = _ensure_columns(enriched, ["product_item_rollup", "product_goal"])
@@ -667,33 +636,60 @@ def _attach_division_metadata(
         enriched = _ensure_columns(enriched, ["product_item_rollup", "product_goal"])
 
     enriched = enriched.with_columns(
-        pl.coalesce(
-            [pl.col(ORDER_TAG_ROLLUP_COLUMN), pl.col("product_item_rollup")]
-        ).alias(ITEM_ROLLUP_COLUMN),
-        pl.coalesce(
-            [pl.col(ORDER_GOAL_COLUMN), pl.col("product_goal")]
-        ).alias(DIVISION_GOAL_COLUMN),
+        pl.col("product_item_rollup").alias(ITEM_ROLLUP_COLUMN),
+        pl.col("product_goal").alias(DIVISION_GOAL_COLUMN),
     )
 
     enriched = _ensure_columns(enriched, required)
 
-    coverage_stats = (
-        enriched.select(
-            pl.len().alias("total_rows"),
-            pl.col(ORDER_GOAL_COLUMN).is_not_null().sum().alias("order_goal_rows"),
-            pl.col("product_goal").is_not_null().sum().alias("product_goal_rows"),
-            pl.col(DIVISION_GOAL_COLUMN).is_null().sum().alias("missing_goal_rows"),
-        ).to_dicts()
+    total_rows = int(enriched.height)
+    rollup_non_null = int(enriched.select(pl.col(ITEM_ROLLUP_COLUMN).is_not_null().sum()).item()) if total_rows else 0
+    goal_non_null = int(enriched.select(pl.col(DIVISION_GOAL_COLUMN).is_not_null().sum()).item()) if total_rows else 0
+    distinct_rollups = int(enriched.select(pl.col(ITEM_ROLLUP_COLUMN).n_unique()).item()) if rollup_non_null else 0
+
+    logger.info(
+        "Division goal coverage: total=%s product_tags=%s missing=%s",
+        total_rows,
+        goal_non_null,
+        total_rows - goal_non_null,
     )
-    if coverage_stats:
-        stats = coverage_stats[0]
-        logger.info(
-            "Division goal coverage: total=%s order_tags=%s product_tags=%s missing=%s",
-            stats.get("total_rows", 0),
-            stats.get("order_goal_rows", 0),
-            stats.get("product_goal_rows", 0),
-            stats.get("missing_goal_rows", 0),
+
+    multi_goal_rollups = 0
+    if not product_mapping_df.is_empty():
+        multi_goal_rollups = (
+            product_mapping_df.group_by(ITEM_ROLLUP_COLUMN, maintain_order=False)
+            .agg(pl.col(DIVISION_GOAL_COLUMN).n_unique().alias("goal_count"))
+            .filter(pl.col("goal_count") > 1)
+            .height
         )
+        if multi_goal_rollups > 0:
+            logger.warning(
+                "Detected %s sub-divisions with multiple Goal assignments; modal resolution applied.",
+                multi_goal_rollups,
+            )
+
+    coverage_rows = [
+        {"metric": "total_rows", "value": total_rows},
+        {"metric": "item_rollup_non_null", "value": rollup_non_null},
+        {"metric": "division_goal_non_null", "value": goal_non_null},
+        {"metric": "missing_item_rollup", "value": total_rows - rollup_non_null},
+        {"metric": "missing_division_goal", "value": total_rows - goal_non_null},
+        {"metric": "distinct_item_rollups", "value": distinct_rollups},
+        {"metric": "multi_goal_item_rollups", "value": multi_goal_rollups},
+    ]
+    if total_rows:
+        coverage_rows.append(
+            {"metric": "item_rollup_coverage_pct", "value": round(rollup_non_null / total_rows, 6)}
+        )
+        coverage_rows.append(
+            {"metric": "division_goal_coverage_pct", "value": round(goal_non_null / total_rows, 6)}
+        )
+
+    try:
+        OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+        pl.DataFrame(coverage_rows).write_csv(OUTPUTS_DIR / "mapping_coverage.csv")
+    except Exception as exc:
+        logger.warning("Unable to write mapping coverage CSV: %s", exc)
 
     enriched = enriched.with_columns(
         pl.struct(
@@ -737,8 +733,6 @@ def _attach_division_metadata(
 
     enriched = enriched.drop(
         [
-            ORDER_TAG_ROLLUP_COLUMN,
-            ORDER_GOAL_COLUMN,
             "product_item_rollup",
             "product_goal",
         ],
@@ -909,6 +903,9 @@ def build_fact_sales_line(engine=None, config_path: str | None = None, cfg=None)
     frame = _attach_division_metadata(frame, engine, cfg, sources_cfg)
     frame = _apply_behavior_config(frame, behavior_cfg, revenue_column=revenue_column)
 
+    # Normalize and attach per-line quantity for downstream projection/metrics
+    frame = normalize_line_quantity(frame, behavior_cfg)
+
     # Surface COGS and USD normalised amounts
     frame = frame.with_columns(pl.col(cogs_column).alias("COGS"))
     frame = _add_currency_columns(frame, currency_columns, "SalesOrder_Currency", "USD_CAD_Conversion_rate")
@@ -923,6 +920,7 @@ def build_fact_sales_line(engine=None, config_path: str | None = None, cfg=None)
         ITEM_ROLLUP_COLUMN,
         DIVISION_GOAL_COLUMN,
         DIVISION_CANONICAL_COLUMN,
+        "Line_Qty",
     ]
 
     if "is_return_line" in frame.columns and "is_return_line" not in select_columns:
@@ -988,4 +986,5 @@ __all__ = [
     "get_rollup_goal_mappings",
     "KEEP_COLUMNS",
     "DEFAULT_KEY_COLUMNS",
+    "normalize_line_quantity",
 ]

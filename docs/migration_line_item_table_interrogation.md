@@ -46,7 +46,7 @@ ORDER BY c.column_id;
   - Duplicate scan confirms duplicates exist (`has_duplicates = 1`); top offenders show counts of 4 rows per order-item, reinforcing the need to keep the most recent `last_update`.
   - Monetary columns (`Revenue`, `Amount2`, etc.) are already numeric; ensure we select latest `last_update` per order-item to avoid double-counting.
 
-### `dbo.table_Product_Info_cleaned_headers`
+### `dbo.table_All_Product_Info_cleaned_headers`
 
 ```sql
 SELECT c.name AS column_name,
@@ -56,14 +56,14 @@ SELECT c.name AS column_name,
        c.column_id
 FROM sys.columns c
 JOIN sys.types t ON c.user_type_id = t.user_type_id
-WHERE c.object_id = OBJECT_ID('[dbo].[table_Product_Info_cleaned_headers]')
+WHERE c.object_id = OBJECT_ID('[dbo].[table_All_Product_Info_cleaned_headers]')
 ORDER BY c.column_id;
 ```
 
 - Observations:
   - Contains canonical product identifiers (`internalid`, `Product_Internal_ID`) plus rollup (`item_rollup`) in a single table.
   - Columns are stored as text; we must coerce numeric IDs (`internalid`, `Product_Internal_ID`) when loading.
-  - This schema can replace `dbo.[Moneyball Assets]` and `dbo.items_category_limited`; ensure we retain `Status`/`IsRenewable` flags for asset logic.
+  - This schema replaces legacy assets views; ensure we retain `Status`/`IsRenewable` flags for asset logic.
 
 ### `dbo.analytics_product_tags`
 
@@ -236,7 +236,7 @@ SELECT TOP (200)
        p.item_rollup,
        s.tran_date
 FROM dbo.table_saleslog_detail s WITH (NOLOCK)
-LEFT JOIN dbo.table_Product_Info_cleaned_headers p
+LEFT JOIN dbo.table_All_Product_Info_cleaned_headers p
   ON p.item_id = s.item_id
 WHERE s.tran_date >= DATEADD(MONTH, -3, GETDATE())
 ORDER BY s.tran_date DESC;

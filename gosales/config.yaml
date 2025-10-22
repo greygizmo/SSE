@@ -10,27 +10,19 @@ database:
   strict_db: false
   # Optional mapping of logical sources -> actual tables/views. Use 'csv' to read from a file.
   source_tables:
-    sales_log: dbo.saleslog            # Azure SQL view for Sales Log
     sales_detail: dbo.table_saleslog_detail
-    product_info: dbo.table_Product_Info_cleaned_headers
+    product_info: dbo.table_All_Product_Info_cleaned_headers
     product_tags: dbo.analytics_product_tags
-    analytics_order_tags: dbo.analytics_order_tags
     industry_enrichment: csv           # 'csv' means read from ETL CSV path below
     # Assets & item taxonomy (Azure SQL views)
-    customer_assets_rollups: dbo.customer_asset_rollups
-    moneyball_assets: dbo.[Moneyball Assets]
+    customer_assets_rollups: 
     items_category_limited: dbo.items_category_limited
   # Optional explicit allow-list of DB objects used in dynamic SQL
   allowed_identifiers:
-    - sales_log
     - industry_enrichment
-    - dbo.saleslog
     - dbo.table_saleslog_detail
     - dbo.table_Product_Info_cleaned_headers
     - dbo.analytics_product_tags
-    - dbo.analytics_order_tags
-    - dbo.customer_asset_rollups
-    - dbo.[Moneyball Assets]
     - dbo.items_category_limited
   # Where to write curated tables: 'db' (default, same engine) or 'sqlite'
   curated_target: sqlite
@@ -68,8 +60,8 @@ etl:
     sources:
       sales_detail: dbo.table_saleslog_detail
       product_info: dbo.table_Product_Info_cleaned_headers
+      items_category_limited: dbo.items_category_limited
       product_tags: dbo.analytics_product_tags
-      order_tags: dbo.analytics_order_tags
       customer_asset_rollups: dbo.customer_asset_rollups
     dedupe:
       order_column: Sales_Order
@@ -86,7 +78,7 @@ etl:
       manual_adjustments_documented: true
   # Expand dim_customer roster: include NetSuite + Assets owners
   dim_customer:
-    sources: [sales_log, ns, assets]
+    sources: [ns, assets]
   assets:
     emit_debug_columns: true
 logging:
@@ -102,16 +94,32 @@ population:
   exclude_prospects_in_features: true
   # Which segments to include during feature-build: [warm], [cold], or [warm, cold]
   build_segments: [warm, cold]
+  cold_uses_off_subs: true
+  cold_uses_ever_assets: true
 labels:
   gp_min_threshold: 0.0
   denylist_skus_csv: gosales/data/lookup/label_denylist_skus.csv
-features:
+  # Label categorization: 'division' (Goal) or 'rollup' (sub-division/item_rollup). CLI also accepts 'sub_division'.
+  target_type: division
+  features:
   windows_months: [3, 6, 12, 24]
   gp_winsor_p: 0.99
   add_missingness_flags: true
   use_eb_smoothing: true
   use_market_basket: true
   use_als_embeddings: true
+  als_weight_by_quantity: true
+  als_weight_include_revenue: true
+  als_weight_price_factor: 1.0
+  als_weight_cap: null
+  als_weight_stats_sample_rows: 100000
+  als_division_scoped: true
+  als_scope_by_goal: true
+  als_revenue_cap_usd: null
+  als_revenue_cap_by_division: {}
+  als_time_decay_enabled: true
+  als_time_half_life_days: 180
+  als_min_scoped_interactions: 1000
   als_lookback_months: 24
   use_item2vec: false
   # Optional: run ALS over assets rollups (guarded sizes)
@@ -178,6 +186,53 @@ features:
   # Logical rollups for training/labels (keys map to canonical product_division values)
   division_aliases:
     cad: ["Solidworks", "PDM", "Simulation", "CAMWorks"]
+features:
+  windows_months: [3, 6, 12, 24]
+  gp_winsor_p: 0.99
+  add_missingness_flags: true
+  use_eb_smoothing: true
+  use_market_basket: true
+  use_als_embeddings: true
+  als_weight_by_quantity: true
+  als_weight_include_revenue: true
+  als_weight_price_factor: 1.0
+  als_weight_cap: null
+  als_weight_stats_sample_rows: 100000
+  als_division_scoped: true
+  als_scope_by_goal: true
+  als_revenue_cap_usd: null
+  als_revenue_cap_by_division: {}
+  als_time_decay_enabled: true
+  als_time_half_life_days: 180
+  als_min_scoped_interactions: 1000
+  als_lookback_months: 24
+  use_assets_als: true
+  assets_als:
+    max_rows: 80000
+    max_cols: 200
+    factors: 16
+    iters: 4
+    reg: 0.1
+  use_item2vec: false
+  use_text_tags: false
+  use_assets: true
+  force_assets_on_sqlite: true
+  affinity_lag_days: 30
+  # Disable SQLite fast-path caps so advanced windows and warm/cold flags are built
+  sqlite_skip_advanced_rows: 0
+  fastpath_minimal_return_rows: 0
+  enable_offset_windows: true
+  offset_days: [60]
+  enable_window_deltas: true
+  use_usd_monetary: true
+  enable_canonical_division_features: true
+  enable_margin_features: true
+  enable_currency_mix: true
+  enable_rollup_diversity: true
+  enable_returns_features: true
+  enable_order_composition: true
+  enable_trend_features: true
+  enable_tag_als: false
 modeling:
   seed: 42
   folds: 3

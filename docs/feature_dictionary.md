@@ -27,7 +27,7 @@
 
 ## Detailed feature reference
 ### Asset footprint (113 features)
-Moneyball asset rollups and subscription tenure metrics evaluated as of the cutoff date.
+Asset rollups and subscription tenure metrics evaluated as of the cutoff date, sourced from `table_All_Product_Info_cleaned_headers` (customer‑owned assets) aligned to sub‑division (item_rollup).
 
 | Rank | Feature | Description | Gain | Gain % |
 | ---: | --- | --- | ---: | ---: |

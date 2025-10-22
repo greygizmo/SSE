@@ -28,7 +28,7 @@ from gosales.utils.config import load_config
 from gosales.ops.run import run_context
 from gosales.etl.ingest import robust_read_csv
 from gosales.utils.logger import get_logger
-from gosales.etl.sku_map import get_sku_mapping
+# sku mapping handled within line-item ETL; no direct use here
 from gosales.etl.cleaners import clean_currency_value, coerce_datetime, summarise_dataframe_schema
 from gosales.utils.identifiers import normalize_identifier_expr, normalize_identifier_series
 from gosales.etl.contracts import (
@@ -39,7 +39,7 @@ from gosales.etl.contracts import (
     check_date_parse_and_bounds,
 )
 from gosales.etl import build_fact_sales_line, summarise_sales_header
-from gosales.etl.sales_line import get_rollup_goal_mappings
+# No direct use of rollup/goal mapping in this module; handled in sales_line ETL
 
 logger = get_logger(__name__)
 
@@ -73,15 +73,18 @@ def build_star_schema(
     use_line_item_facts: bool | None = None,
 ):
     """
-    Builds a tidy, analytics-ready star schema from the raw sales_log data.
-    
-    This function performs the following transformations:
-    1.  Reads the raw `sales_log` table.
-    2.  Creates a clean `dim_customer` dimension table.
-    3.  Defines a comprehensive mapping of raw columns to standardized SKUs and Divisions.
-    4.  "Unpivots" the wide `sales_log` table into a tidy `fact_transactions` table,
-        where each row represents a single product line item within a transaction.
-    5.  Cleans and standardizes data types for key columns.
+    Build the curated star schema using the authoritative line-item sales fact.
+
+    This implementation no longer reads or depends on the legacy `sales_log`
+    header view. It performs the following steps deterministically:
+    1.  Build `fact_sales_line` from `dbo.table_saleslog_detail` (or configured
+        equivalent), including USD-normalized monetary columns and division/rollup
+        metadata.
+    2.  Create a clean `dim_customer` roster, blending NetSuite and Assets where
+        available, with optional industry enrichment and fuzzy matching.
+    3.  Project the line-item fact into tidy `fact_transactions` for downstream
+        features, preserving invoice ids and canonical product divisions.
+    4.  Persist curated snapshots and minimal dimensions (`dim_date`, `dim_product`).
 
     Args:
         engine (sqlalchemy.engine.base.Engine): The database engine.
@@ -121,25 +124,17 @@ def build_star_schema(
         except Exception as e:
             logger.warning(f"Failed to clean curated parquet: {e}")
 
-    # Resolve source table/view names from config (supports schema-qualified names)
+    # Resolve enrichment table name (legacy Sales Log intentionally unsupported)
     db_sources = {}
     try:
         db_sources = dict(getattr(getattr(cfg, 'database', object()), 'source_tables', {}) or {})
     except Exception:
         db_sources = {}
-    sales_log_src = db_sources.get('sales_log', 'sales_log')
     ind_src = db_sources.get('industry_enrichment', 'industry_enrichment')
 
     backend = getattr(getattr(engine, 'dialect', None), 'name', '')
     is_azure_like = backend in {'mssql'}
     if not is_azure_like:
-        if isinstance(sales_log_src, str) and sales_log_src.lower() != 'csv' and sales_log_src != 'sales_log':
-            logger.info(
-                "Local engine '%s' detected; using fallback Sales Log table 'sales_log' instead of configured '%s'.",
-                backend or 'unknown',
-                sales_log_src,
-            )
-            sales_log_src = 'sales_log'
         if isinstance(ind_src, str) and ind_src.lower() != 'csv' and ind_src != 'industry_enrichment':
             logger.info(
                 "Local engine '%s' detected; using fallback industry enrichment table 'industry_enrichment' instead of '%s'.",
@@ -151,231 +146,42 @@ def build_star_schema(
     # Engines: source (raw) and curated (write target)
     curated_engine = get_curated_connection()
 
-    # Optional: build the new line-item fact in parallel with legacy processing
+    # Build the canonical line-item fact (authoritative source)
     line_items_cfg = getattr(getattr(cfg, "etl", object()), "line_items", None)
-    use_line_items = bool(getattr(line_items_cfg, "use_line_item_facts", True))
-    if use_line_items:
-        logger.info("Building fact_sales_line from line-item sales detail source...")
-        try:
-            fact_sales_line = build_fact_sales_line(engine=engine, config_path=config_path, cfg=cfg)
-        except Exception as exc:  # pragma: no cover - defensive logging
-            logger.exception("Failed to build fact_sales_line: %s", exc)
-            fact_sales_line = pl.DataFrame()
-
-        if fact_sales_line.is_empty():
-            logger.warning("fact_sales_line is empty; skipping write")
-        else:
-            sort_cols = [col for col in ["Sales_Order", "Rec_Date", "Item_internalid"] if col in fact_sales_line.columns]
-            if sort_cols:
-                fact_sales_line = fact_sales_line.sort(sort_cols, nulls_last=True)
-
-            fact_sales_line.write_database("fact_sales_line", curated_engine, if_table_exists="replace")
-            fact_line_parquet = curated_dir / "fact" / "fact_sales_line.parquet"
-            fact_sales_line.write_parquet(fact_line_parquet)
-            logger.info("fact_sales_line ready: %d rows", len(fact_sales_line))
-
-            try:
-                from gosales.etl import summarise_sales_header
-
-                fact_sales_header = summarise_sales_header(fact_sales_line)
-                fact_sales_header.write_database("fact_sales_header", curated_engine, if_table_exists="replace")
-                fact_header_parquet = curated_dir / "fact" / "fact_sales_header.parquet"
-                fact_sales_header.write_parquet(fact_header_parquet)
-                logger.info("fact_sales_header ready: %d rows", len(fact_sales_header))
-            except Exception as exc:
-                logger.warning("Unable to build fact_sales_header from line items: %s", exc)
-
-    # Read the raw data from the database using pandas first, then convert to polars
-    logger.info("Reading sales_log table...")
+    logger.info("Building fact_sales_line from line-item sales detail source...")
     try:
-        if isinstance(sales_log_src, str) and sales_log_src.lower() != "csv":
-            allow = set(getattr(getattr(cfg, 'database', object()), 'allowed_identifiers', []) or [])
-            if allow:
-                ensure_allowed_identifier(sales_log_src, allow)
-            else:
-                validate_identifier(sales_log_src)
-    except Exception as e:
-        raise
-    try:
-        # Chunked read for large sources
-        def _read_sql_chunks(sql: str, params: dict | None = None, chunksize: int = 200_000) -> pd.DataFrame:
-            try:
-                it = pd.read_sql_query(sql, engine, params=params, chunksize=chunksize)
-                frames = [chunk for chunk in it]
-                if not frames:
-                    return pd.DataFrame()
-                return pd.concat(frames, ignore_index=True)
-            except Exception:
-                return pd.read_sql(sql, engine)
+        fact_sales_line = build_fact_sales_line(engine=engine, config_path=config_path, cfg=cfg)
+    except Exception as exc:  # pragma: no cover - defensive logging
+        logger.exception("Failed to build fact_sales_line: %s", exc)
+        fact_sales_line = pl.DataFrame()
 
-        # Centralized query template
-        allow = set(getattr(getattr(cfg, 'database', object()), 'allowed_identifiers', []) or [])
-        q_sales = select_all(sales_log_src, allowlist=allow if allow else None)
-        sales_log_pd = _read_sql_chunks(q_sales)
+    if fact_sales_line.is_empty():
+        logger.error("fact_sales_line is empty; cannot proceed without legacy Sales Log (disabled).")
+        return
+    else:
+        sort_cols = [col for col in ["Sales_Order", "Rec_Date", "Item_internalid"] if col in fact_sales_line.columns]
+        if sort_cols:
+            fact_sales_line = fact_sales_line.sort(sort_cols, nulls_last=True)
 
-        # --- Normalize schema to canonical wide format ---
-        def normalize_sales_log_schema(df: pd.DataFrame) -> pd.DataFrame:
-            df = df.copy()
-            # Trim column names
-            df.columns = [str(c).strip() for c in df.columns]
+        fact_sales_line.write_database("fact_sales_line", curated_engine, if_table_exists="replace")
+        fact_line_parquet = curated_dir / "fact" / "fact_sales_line.parquet"
+        fact_sales_line.write_parquet(fact_line_parquet)
+        logger.info("fact_sales_line ready: %d rows", len(fact_sales_line))
 
-            # Create canonical columns from exact DB headers provided via config
-            for col in ["CustomerId", "Rec Date", "Division", "Customer", "InvoiceId"]:
-                if col not in df.columns:
-                    df[col] = None
-            src_map = {}
-            try:
-                src_map = dict(getattr(getattr(cfg, 'etl', object()), 'source_columns', {}) or {})
-            except Exception:
-                src_map = {}
-            cust_col = src_map.get('customer_id')
-            date_col = src_map.get('order_date')
-            div_col = src_map.get('division')
-            name_col = src_map.get('customer_name')
-            inv_col = src_map.get('invoice_id')
-            inv_date_col = src_map.get('invoice_date')
-            if cust_col and cust_col in df.columns:
-                df['CustomerId'] = df[cust_col]
-            if date_col and date_col in df.columns:
-                df['Rec Date'] = df[date_col]
-            if inv_col and inv_col in df.columns:
-                df['InvoiceId'] = df[inv_col]
-            if inv_date_col and inv_date_col in df.columns:
-                df['invoice_date'] = df[inv_date_col]
-            elif 'invoice_date' not in df.columns:
-                for candidate in ("Invoice_Date", "Invoice Date"):
-                    if candidate in df.columns:
-                        df['invoice_date'] = df[candidate]
-                        break
-            if 'invoice_date' not in df.columns:
-                df['invoice_date'] = None
-            if div_col and div_col in df.columns:
-                df['Division'] = df[div_col]
-            if name_col and name_col in df.columns:
-                df['Customer'] = df[name_col]
-            # Final fallback for Customer name
-            if df['Customer'].isna().all():
-                try:
-                    df['Customer'] = df['CustomerId'].astype(str)
-                except Exception:
-                    df['Customer'] = ""
-
-            # Ensure all mapped GP/Qty columns exist
-            mapping_local = get_sku_mapping()
-            for gp_col, meta in mapping_local.items():
-                qty_col = meta["qty_col"]
-                if gp_col not in df.columns:
-                    df[gp_col] = 0
-                if qty_col not in df.columns:
-                    df[qty_col] = 0
-
-            # Keep only rows with valid identifiers
-            def _is_filled(x: pd.Series) -> pd.Series:
-                return (~x.isna()) & (x.astype(str).str.strip() != "")
-
-            df = df[_is_filled(df["CustomerId"]) & _is_filled(df["Rec Date"])].copy()
-
-            # Drop exact duplicate PKs (keep first)
-            df = df.drop_duplicates(subset=["CustomerId", "Rec Date"], keep="first")
-            return df
-
-        sales_log_pd = normalize_sales_log_schema(sales_log_pd)
-
-        # Data contracts: required columns and PK/null checks
-        OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
-        contracts_dir = OUTPUTS_DIR / "contracts"
-        contracts_dir.mkdir(parents=True, exist_ok=True)
-
-        # Persist schema snapshot & staging parquet and profile
-        schema_json = summarise_dataframe_schema(sales_log_pd)
-        with open(contracts_dir / "schema.json", "w", encoding="utf-8") as f:
-            json.dump(schema_json, f, indent=2)
-
-        # Write normalized staging parquet (lower snake case headers for a clean copy)
-        staging_dir = Path(cfg.paths.staging)
-        staging_dir.mkdir(parents=True, exist_ok=True)
         try:
-            norm_cols = [
-                (
-                    str(c)
-                    .strip()
-                    .lower()
-                    .replace(" ", "_")
-                    .replace("/", "_")
-                    .replace("__", "_")
-                )
-                for c in sales_log_pd.columns
-            ]
-            sales_log_pd_norm = sales_log_pd.copy()
-            # Ensure unique normalized columns by de-duplicating with suffixes
-            seen: dict[str,int] = {}
-            uniq_cols: list[str] = []
-            for c in norm_cols:
-                if c in seen:
-                    seen[c] += 1
-                    uniq_cols.append(f"{c}__{seen[c]}")
-                else:
-                    seen[c] = 0
-                    uniq_cols.append(c)
-            sales_log_pd_norm.columns = uniq_cols
-            pl.from_pandas(sales_log_pd_norm).write_parquet(staging_dir / "sales_log_normalized.parquet")
-        except Exception as e:
-            logger.warning(f"Failed to write staging parquet: {e}")
+            from gosales.etl import summarise_sales_header
 
-        # Column profile
-        try:
-            prof = []
-            for col in sales_log_pd.columns:
-                series = sales_log_pd[col]
-                null_pct = float(series.isna().mean()) if hasattr(series, 'isna') else 0.0
-                card = int(series.nunique(dropna=True)) if hasattr(series, 'nunique') else 0
-                prof.append({"column": col, "null_pct": round(null_pct, 6), "cardinality": card, "dtype": str(series.dtype)})
-            with open(contracts_dir / "column_profile.json", "w", encoding="utf-8") as f:
-                json.dump(prof, f, indent=2)
-        except Exception as e:
-            logger.warning(f"Failed to write column profile: {e}")
+            fact_sales_header = summarise_sales_header(fact_sales_line)
+            fact_sales_header.write_database("fact_sales_header", curated_engine, if_table_exists="replace")
+            fact_header_parquet = curated_dir / "fact" / "fact_sales_header.parquet"
+            fact_sales_header.write_parquet(fact_header_parquet)
+            logger.info("fact_sales_header ready: %d rows", len(fact_sales_header))
+        except Exception as exc:
+            logger.warning("Unable to build fact_sales_header from line items: %s", exc)
 
-        required_cols = list({"CustomerId", "Rec Date", "Division"})
-        # Extend with GP/Qty pairs from mapping for visibility (not all required to exist)
-        mapping = get_sku_mapping()
-        for gp_col, meta in mapping.items():
-            required_cols.extend([gp_col, meta["qty_col"]])
-
-        violations = []
-        violations += check_required_columns(sales_log_pd, "sales_log", required_cols)
-
-        # PK checks (blockers)
-        pk_cols = tuple(c for c in ("CustomerId", "Rec Date") if c in sales_log_pd.columns)
-        violations += check_primary_key_not_null(sales_log_pd, "sales_log", pk_cols)
-        # Duplicate check only if both cols available (best-effort)
-        if len(pk_cols) >= 2:
-            violations += check_no_duplicate_pk(sales_log_pd, "sales_log", pk_cols)
-        # Date bounds
-        try:
-            from pandas import Timestamp
-            maxd = pd.to_datetime(cfg.run.cutoff_date, errors="coerce") if cfg.run.cutoff_date else None
-            violations += check_date_parse_and_bounds(sales_log_pd, "sales_log", "Rec Date", maxd)
-        except Exception:
-            pass
-
-        vdf = violations_to_dataframe(violations)
-        vdf.to_csv(contracts_dir / "violations.csv", index=False)
-
-        # Block on PK/null/duplicate violations unless fail_soft
-        if any(v.violation_type in {"null_in_pk", "missing_pk_column", "duplicate_pk"} for v in violations):
-            if fail_soft:
-                logger.warning("Contract violations present, continuing due to fail_soft=True")
-            else:
-                logger.error("Data contract violations detected. See outputs/contracts/violations.csv")
-                return
-
-        if staging_only:
-            logger.info("Staging-only flag set; stopping after contracts.")
-            return
-
-        sales_log = pl.from_pandas(sales_log_pd)
-    except Exception as e:
-        logger.error(f"Failed to read sales_log table: {e}")
+    # No legacy Sales Log: skip staging/contracts for that source entirely
+    if staging_only:
+        logger.info("Staging-only flag set; nothing to stage in curated without raw staging. Exiting.")
         return
 
     # --- 1. Create dim_customer with industry enrichment ---
@@ -418,30 +224,27 @@ def build_star_schema(
         logger.warning(f"Industry enrichment source not found/loaded: {e}")
         industry_enrichment = None
 
-    # Start with basic customer data from sales_log
-    # Keep both the legacy CustomerId and the ERP internal Id (ns_id) for robust joining
-    # Build per-customer record; keep exact and normalised customer name for joining with enrichment
+    # Base roster from line items (minimal; names supplied by NetSuite/Assets if available)
     dc_sales = (
-        sales_log.lazy()
-        .select(["Customer", "CustomerId"])
-        .rename({
-            "Customer": "customer_name",
-            "CustomerId": "customer_id",
-        })
+        fact_sales_line.lazy()
+        .select(["CompanyId"]) if "CompanyId" in fact_sales_line.columns else pl.LazyFrame(
+            pl.DataFrame({"CompanyId": []})
+        )
+    )
+    if not isinstance(dc_sales, pl.LazyFrame):  # defensive
+        dc_sales = pl.DataFrame(dc_sales)
+        dc_sales = dc_sales.lazy()
+    dc_sales = (
+        dc_sales
+        .rename({"CompanyId": "customer_id"})
         .group_by("customer_id")
         .agg([
-            pl.col("customer_name").first().cast(pl.Utf8).str.strip_chars().alias("customer_name"),
+            pl.lit(None).cast(pl.Utf8).alias("customer_name"),
         ])
         .with_columns([
-            # Keep customer_id as string (GUID-safe) for downstream joins
             normalize_identifier_expr(pl.col("customer_id")).alias("customer_id"),
-            # Normalised name and numeric prefix for robust matching
-            pl.col("customer_name").cast(pl.Utf8).str.to_lowercase().str.replace_all(r"\s+", " ").alias("customer_name_norm"),
-            pl.col("customer_name")
-                .cast(pl.Utf8)
-                .str.extract(r"^\s*(\d+)")
-                .cast(pl.Int64, strict=False)
-                .alias("customer_prefix_id"),
+            pl.lit(None).cast(pl.Utf8).alias("customer_name_norm"),
+            pl.lit(None).cast(pl.Int64).alias("customer_prefix_id"),
             pl.lit(1).alias("source_sales_log"),
             pl.lit(0).alias("source_ns"),
             pl.lit(0).alias("source_assets"),
@@ -453,45 +256,63 @@ def build_star_schema(
     try:
         sources_cfg = getattr(getattr(getattr(cfg, 'etl', object()), 'dim_customer', object()), 'sources', None)
         if not sources_cfg:
-            # Default precedence: ns > sales_log > assets
-            sources = ["sales_log", "ns", "assets"]
+            # Default precedence: ns > assets (line-derived roster always included)
+            sources = ["ns", "assets"]
         else:
             sources = [str(s).strip().lower() for s in sources_cfg]
     except Exception:
-        sources = ["sales_log", "ns", "assets"]
+        sources = ["ns", "assets"]
 
     frames: list[pl.LazyFrame] = []
     rank_map = {name: idx for idx, name in enumerate([s for s in sources if s in {"ns","sales_log","assets"}], start=0)}
 
-    # Sales base always present
+    # Sales base always present; assume CompanyId aligns to NetSuite internalid
+    _order_cols = [
+        "customer_id",
+        "customer_name",
+        "customer_name_norm",
+        "customer_prefix_id",
+        "internalid",
+        "source_sales_log",
+        "source_ns",
+        "source_assets",
+        "source_rank",
+        "source",
+    ]
+
     frames.append(
         dc_sales.with_columns([
             pl.lit(rank_map.get("sales_log", 1)).alias("source_rank"),
-            pl.lit("sales_log").alias("source")
-        ])
+            pl.lit("line").alias("source"),
+            # For line-derived roster, treat customer_id as the NetSuite internalid bridge
+            pl.col("customer_id").alias("internalid"),
+        ]).select(_order_cols)
     )
 
     if "ns" in sources:
         try:
             try:
-                q = "SELECT internalid AS customer_id, entityid AS customer_name FROM dim_ns_customer"
+                q = "SELECT internalid, entityid AS customer_name FROM dim_ns_customer"
                 ns_pd = pd.read_sql(q, curated_engine)
             except Exception:
-                q = "SELECT internalid AS customer_id, ns_companyname AS customer_name FROM dim_ns_customer"
+                q = "SELECT internalid, ns_companyname AS customer_name FROM dim_ns_customer"
                 ns_pd = pd.read_sql(q, curated_engine)
             if not ns_pd.empty:
-                ns_pd["customer_id"] = normalize_identifier_series(ns_pd["customer_id"]).astype(str)
+                ns_pd["internalid"] = normalize_identifier_series(ns_pd["internalid"]).astype(str)
                 ns_pd["customer_name"] = ns_pd["customer_name"].astype(str).str.strip()
                 ns_pd["customer_name_norm"] = ns_pd["customer_name"].str.lower().str.replace(r"\s+"," ", regex=True)
                 ns_pd["customer_prefix_id"] = ns_pd["customer_name"].str.extract(r"^\s*(\d+)").astype("Int64")
-                ns_pl = pl.from_pandas(ns_pd)[["customer_id","customer_name","customer_name_norm","customer_prefix_id"]]
+                # For NS-only records (no line counterpart), set customer_id to internalid for a stable key,
+                # and also carry the internalid bridge column explicitly
+                ns_pd["customer_id"] = ns_pd["internalid"].astype(str)
+                ns_pl = pl.from_pandas(ns_pd)[["customer_id","customer_name","customer_name_norm","customer_prefix_id","internalid"]]
                 ns_pl = ns_pl.lazy().with_columns([
                     pl.lit(0).alias("source_sales_log"),
                     pl.lit(1).alias("source_ns"),
                     pl.lit(0).alias("source_assets"),
                     pl.lit(rank_map.get("ns", 0)).alias("source_rank"),
                     pl.lit("ns").alias("source"),
-                ])
+                ]).select(_order_cols)
                 frames.append(ns_pl)
         except Exception as e:
             logger.warning(f"dim_ns_customer unavailable for roster union: {e}")
@@ -504,14 +325,16 @@ def build_star_schema(
                 fa_pd["customer_name"] = fa_pd["customer_name"].astype(str).str.strip()
                 fa_pd["customer_name_norm"] = fa_pd["customer_name"].str.lower().str.replace(r"\s+"," ", regex=True)
                 fa_pd["customer_prefix_id"] = fa_pd["customer_name"].str.extract(r"^\s*(\d+)").astype("Int64")
-                fa_pl = pl.from_pandas(fa_pd)[["customer_id","customer_name","customer_name_norm","customer_prefix_id"]]
+                # No internalid for assets-only rows; include null bridge
+                fa_pd["internalid"] = None
+                fa_pl = pl.from_pandas(fa_pd)[["customer_id","customer_name","customer_name_norm","customer_prefix_id","internalid"]]
                 fa_pl = fa_pl.lazy().with_columns([
                     pl.lit(0).alias("source_sales_log"),
                     pl.lit(0).alias("source_ns"),
                     pl.lit(1).alias("source_assets"),
                     pl.lit(rank_map.get("assets", 2)).alias("source_rank"),
                     pl.lit("assets").alias("source"),
-                ])
+                ]).select(_order_cols)
                 frames.append(fa_pl)
         except Exception as e:
             logger.warning(f"fact_assets unavailable for roster union: {e}")
@@ -519,7 +342,8 @@ def build_star_schema(
     # Union frames and deduplicate by customer_id with precedence
     if frames:
         dim_customer_base = pl.concat(frames, how="vertical_relaxed").with_columns([
-            pl.col("customer_id").cast(pl.Utf8)
+            pl.col("customer_id").cast(pl.Utf8),
+            pl.col("internalid").cast(pl.Utf8)
         ])
         # Keep best source per customer_id
         dim_customer_base = (
@@ -535,65 +359,44 @@ def build_star_schema(
                 pl.col("source_assets").max().alias("source_assets"),
                 pl.col("source").first().alias("source"),
                 pl.col("source_rank").first().alias("source_rank"),
+                pl.col("internalid").first().alias("internalid"),
             ])
         ).lazy()
     else:
         dim_customer_base = dc_sales
 
-    # Preserve raw sales_log data for Branch/Rep features
-    # This ensures we have the original Branch and Rep information available
-    # Column case can vary by source (e.g., 'Branch' from CSV/DB vs 'branch').
-    # Build a tolerant selector that aliases whatever exists to lowercase names.
-    branch_src = "branch" if "branch" in sales_log.columns else ("Branch" if "Branch" in sales_log.columns else None)
-    rep_src = "rep" if "rep" in sales_log.columns else ("Rep" if "Rep" in sales_log.columns else None)
-
-    select_exprs = [
-        pl.col("CustomerId"),
-        pl.col("Rec Date"),
-        (pl.col(branch_src).alias("branch") if branch_src else pl.lit(None).alias("branch")),
-        (pl.col(rep_src).alias("rep") if rep_src else pl.lit(None).alias("rep")),
-        pl.col("Customer"),
-        pl.col("Division"),
-        pl.col("invoice_date") if "invoice_date" in sales_log.columns else pl.lit(None).alias("invoice_date"),
-        pl.col("InvoiceId") if "InvoiceId" in sales_log.columns else pl.lit(None).alias("InvoiceId"),
-    ]
+    # Curated raw line metadata for Branch/Rep features from line items
+    select_exprs = []
+    for col in ("CompanyId", "Rec_Date", "Branch", "Rep", "Division", "Invoice_Date", "Sales_Order"):
+        if col in fact_sales_line.columns:
+            select_exprs.append(pl.col(col))
 
     fact_sales_log_raw = (
-        sales_log.lazy()
+        fact_sales_line.lazy()
         .select(select_exprs)
         .rename({
-            "CustomerId": "customer_id",
-            "Rec Date": "order_date",
-            "Customer": "customer_name",
+            "CompanyId": "customer_id",
+            "Rec_Date": "order_date",
             "Division": "division",
+            "Invoice_Date": "invoice_date",
+            "Sales_Order": "invoice_id",
         })
         .with_columns([
-            # Ensure consistent string typing for customer_id
             normalize_identifier_expr(pl.col("customer_id")).alias("customer_id"),
-            # Preserve original columns for feature engineering (now lowercase)
-            pl.col("branch").cast(pl.Utf8),
-            pl.col("rep").cast(pl.Utf8),
-            pl.coalesce([
-                pl.col("order_date").cast(pl.Date, strict=False),
-                pl.col("order_date").cast(pl.Utf8).str.strip_chars().str.strptime(pl.Date, format="%Y-%m-%d", strict=False),
-                pl.col("order_date").cast(pl.Utf8).str.strip_chars().str.strptime(pl.Date, format="%m/%d/%Y %H:%M", strict=False),
-                pl.col("order_date").cast(pl.Utf8).str.strip_chars().str.strptime(pl.Date, format="%m/%d/%Y", strict=False),
-            ]).alias("order_date"),
+            pl.col("order_date").cast(pl.Date, strict=False).alias("order_date"),
             pl.col("division").cast(pl.Utf8),
-            pl.coalesce([
-                pl.col("invoice_date").cast(pl.Date, strict=False),
-                pl.col("invoice_date").cast(pl.Utf8).str.strip_chars().str.strptime(pl.Date, format="%Y-%m-%d", strict=False),
-                pl.col("invoice_date").cast(pl.Utf8).str.strip_chars().str.strptime(pl.Date, format="%m/%d/%Y %H:%M", strict=False),
-                pl.col("invoice_date").cast(pl.Utf8).str.strip_chars().str.strptime(pl.Date, format="%m/%d/%Y", strict=False),
-            ]).alias("invoice_date"),
-            normalize_identifier_expr(pl.col("InvoiceId")).alias("invoice_id"),
+            (pl.col("Branch").cast(pl.Utf8).alias("branch") if "Branch" in fact_sales_line.columns else pl.lit(None).alias("branch")),
+            (pl.col("Rep").cast(pl.Utf8).alias("rep") if "Rep" in fact_sales_line.columns else pl.lit(None).alias("rep")),
+            ((pl.col("invoice_date").cast(pl.Date, strict=False).alias("invoice_date")) if "Invoice_Date" in fact_sales_line.columns else pl.lit(None).alias("invoice_date")),
+            ((normalize_identifier_expr(pl.col("invoice_id")).alias("invoice_id")) if "Sales_Order" in fact_sales_line.columns else pl.lit(None).alias("invoice_id")),
         ])
+        .select(["customer_id","order_date","branch","rep","division","invoice_date","invoice_id"])
         .filter(pl.col("customer_id").is_not_null())
     )
 
     if industry_enrichment is not None:
         # Join with industry enrichment data
-        # Note: Mapping CustomerId from sales_log to ID from industry enrichment
+        # Note: Mapping customer roster (from line facts) to industry enrichment IDs
         industry_clean = (
             industry_enrichment.lazy()
             .select([
@@ -806,144 +609,63 @@ def build_star_schema(
         logger.warning(f"Failed to write industry coverage reports: {e}")
 
     # --- 2. Define SKU and Division Mapping ---
-    # Centralized mapping for unpivot operation.
-    sku_mapping = get_sku_mapping()
-    rollup_goal_lookup, rollup_division_lookup = get_rollup_goal_mappings(engine=engine, cfg=cfg)
+    # Mapping now occurs within the line-item build; no legacy unpivot required.
 
-    # --- 3. Unpivot the data to create fact_transactions ---
-    logger.info("Unpivoting sales_log to create fact_transactions table...")
-    
-    all_transactions = []
-    
-    # Base columns to keep for every transaction line item
-    id_vars = ["CustomerId", "Rec Date", "Division"]
-    if "InvoiceId" in sales_log.columns:
-        id_vars.append("InvoiceId")
+    # --- 3. Project line items to fact_transactions (no Sales Log) ---
+    logger.info("Projecting fact_sales_line into fact_transactions (sku/goal/division from mapping)")
 
-    for gp_col, details in sku_mapping.items():
-        qty_col = details['qty_col']
-        division = details['division']
-        norm_key = _normalize_rollup_key(gp_col)
-        canonical_division = rollup_division_lookup.get(norm_key, division)
-        goal_value = rollup_goal_lookup.get(norm_key)
-
-        if gp_col in sales_log.columns and qty_col in sales_log.columns:
-            # Melt for the current SKU
-            melted_df = (
-                sales_log.lazy()
-                .select(id_vars + [gp_col, qty_col])
-                .filter(pl.col(gp_col).is_not_null() | pl.col(qty_col).is_not_null())
-                .with_columns([
-                    pl.lit(gp_col).alias("product_sku"),
-                    pl.lit(canonical_division).alias("product_division"),
-                    pl.lit(goal_value, dtype=pl.Utf8).alias("product_goal"),
-                ])
-                .rename({gp_col: "gross_profit", qty_col: "quantity"})
-                .collect()
-            )
-            all_transactions.append(melted_df)
-
-    if not all_transactions:
-        logger.error("No transactions could be processed from the sku_mapping. Aborting.")
-        return
-
-    # Combine all the melted DataFrames into one large table
-    fact_transactions = pl.concat(all_transactions, how="vertical_relaxed")
-    
-    # --- 4. Clean and Finalize the Table ---
-    logger.info("Cleaning and finalizing fact_transactions table...")
-    
-    # Convert to pandas for easier data cleaning
-    fact_transactions_pd = fact_transactions.to_pandas()
-    
-    # Clean the data
-    fact_transactions_pd['customer_id'] = normalize_identifier_series(fact_transactions_pd['CustomerId'])
-    fact_transactions_pd['order_date'] = coerce_datetime(fact_transactions_pd['Rec Date'])
-    if 'InvoiceId' in fact_transactions_pd.columns:
-        fact_transactions_pd['invoice_id'] = normalize_identifier_series(fact_transactions_pd['InvoiceId'])
+    tx_exprs = []
+    if "CompanyId" in fact_sales_line.columns:
+        tx_exprs.append(pl.col("CompanyId").alias("customer_id"))
+    if "Rec_Date" in fact_sales_line.columns:
+        tx_exprs.append(pl.col("Rec_Date").alias("order_date"))
+    if "Sales_Order" in fact_sales_line.columns:
+        tx_exprs.append(pl.col("Sales_Order").alias("invoice_id"))
+    tx_exprs.append((pl.col("item_rollup").cast(pl.Utf8) if "item_rollup" in fact_sales_line.columns else pl.lit("UNKNOWN")).alias("product_sku"))
+    tx_exprs.append((pl.col("division_canonical").cast(pl.Utf8) if "division_canonical" in fact_sales_line.columns else pl.lit("UNKNOWN")).alias("product_division"))
+    if "division_goal" in fact_sales_line.columns:
+        tx_exprs.append(pl.col("division_goal").cast(pl.Utf8).alias("product_goal"))
+    # Monetary and qty
+    if "GP_usd" in fact_sales_line.columns:
+        gp_expr = pl.col("GP_usd")
+    elif "GP" in fact_sales_line.columns:
+        gp_expr = pl.col("GP")
     else:
-        fact_transactions_pd['invoice_id'] = pd.Series([None] * len(fact_transactions_pd))
+        gp_expr = pl.lit(0.0)
+    tx_exprs.append(gp_expr.alias("gross_profit"))
+    # Include normalized revenue if present for ALS and composition
+    if "Revenue_usd" in fact_sales_line.columns:
+        tx_exprs.append(pl.col("Revenue_usd").cast(pl.Float64, strict=False).alias("revenue"))
+    elif "Revenue" in fact_sales_line.columns:
+        tx_exprs.append(pl.col("Revenue").cast(pl.Float64, strict=False).alias("revenue"))
+    else:
+        tx_exprs.append(pl.lit(0.0).alias("revenue"))
+    # Use normalized per-line quantity when present; default to 1.0
+    if "Line_Qty" in fact_sales_line.columns:
+        tx_exprs.append(pl.col("Line_Qty").cast(pl.Float64, strict=False).alias("quantity"))
+    else:
+        tx_exprs.append(pl.lit(1.0).alias("quantity"))
 
-    if 'invoice_id' in fact_transactions_pd.columns:
-        missing_invoice = fact_transactions_pd['invoice_id'].isna() | (fact_transactions_pd['invoice_id'] == '')
-        if missing_invoice.any():
-            surrogate_keys = (
-                fact_transactions_pd.loc[missing_invoice, 'customer_id'].fillna('UNK').astype(str)
-                + '|'
-                + fact_transactions_pd.loc[missing_invoice, 'order_date'].dt.strftime('%Y%m%d')
-            )
-            counts = surrogate_keys.groupby(surrogate_keys).cumcount()
-            fact_transactions_pd.loc[missing_invoice, 'invoice_id'] = (
-                'AUTO-' + surrogate_keys.fillna('UNK') + '-' + (counts + 1).astype(str)
-            )
+    fact_transactions = (
+        fact_sales_line.lazy()
+        .select(tx_exprs)
+        .with_columns([
+            normalize_identifier_expr(pl.col("customer_id")).alias("customer_id"),
+            pl.col("order_date").cast(pl.Date, strict=False).alias("order_date"),
+            pl.col("product_sku").cast(pl.Utf8).str.strip_chars().alias("product_sku"),
+            pl.col("product_division").cast(pl.Utf8).str.strip_chars().alias("product_division"),
+            pl.col("product_goal").cast(pl.Utf8) if "division_goal" in fact_sales_line.columns else pl.lit(None).alias("product_goal"),
+            pl.col("gross_profit").cast(pl.Float64, strict=False),
+            pl.col("quantity").cast(pl.Float64, strict=False),
+        ])
+        .filter(pl.col("customer_id").is_not_null())
+        .collect()
+    )
 
-    # Drop rows without a mapped customer_id
-    fact_transactions_pd = fact_transactions_pd[fact_transactions_pd['customer_id'].notna()].copy()
-
-    # Clean currency columns using shared cleaner
-    fact_transactions_pd['gross_profit'] = fact_transactions_pd['gross_profit'].apply(clean_currency_value)
-    fact_transactions_pd['quantity'] = pd.to_numeric(fact_transactions_pd['quantity'], errors='coerce').fillna(0)
-    
-    # Route product_division for SKUs that depend on source DB Division (e.g., AM_Support)
-    try:
-        _map = get_sku_mapping()
-        routed = [
-            (k, v.get('db_division_routes', {}))
-            for k, v in _map.items()
-            if isinstance(v, dict) and 'db_division_routes' in v
-        ]
-        if routed and 'Division' in fact_transactions_pd.columns:
-            for sku_key, route in routed:
-                if not route:
-                    continue
-                mask = fact_transactions_pd['product_sku'] == sku_key
-                if mask.any():
-                    # Map row-wise using source Division column
-                    mapped_divisions = (
-                        fact_transactions_pd.loc[mask, 'Division']
-                    )
-                    fact_transactions_pd.loc[mask, 'product_division'] = mapped_divisions.map(
-                        lambda x: route.get(str(x).strip(), fact_transactions_pd.loc[mask, 'product_division'].iloc[0])
-                    )
-                    if 'product_goal' in fact_transactions_pd.columns:
-                        goal_override = rollup_goal_lookup.get(_normalize_rollup_key(sku_key))
-                        if goal_override:
-                            fact_transactions_pd.loc[mask, 'product_goal'] = goal_override
-    except Exception as e:
-        logger.warning(f"Division routing step skipped/failed: {e}")
-
-    # Filter out rows with no meaningful transaction data
-    fact_transactions_pd = fact_transactions_pd[
-        (fact_transactions_pd['gross_profit'] != 0) | (fact_transactions_pd['quantity'] != 0)
-    ]
-    
-    # Normalize division strings (trim) and select/sort final columns
-    fact_transactions_pd['product_division'] = fact_transactions_pd['product_division'].astype(str).str.strip()
-    if 'product_goal' in fact_transactions_pd.columns:
-        fact_transactions_pd['product_goal'] = fact_transactions_pd['product_goal'].astype(object)
-        goal_mask = fact_transactions_pd['product_goal'].notna()
-        if goal_mask.any():
-            fact_transactions_pd.loc[goal_mask, 'product_goal'] = (
-                fact_transactions_pd.loc[goal_mask, 'product_goal'].astype(str).str.strip()
-            )
-        fact_transactions_pd.loc[~goal_mask, 'product_goal'] = None
-    final_cols = ['customer_id', 'order_date', 'product_sku', 'product_division']
-    if 'product_goal' in fact_transactions_pd.columns:
-        final_cols.append('product_goal')
-    final_cols.extend(['gross_profit', 'quantity'])
-    if 'invoice_id' in fact_transactions_pd.columns:
-        final_cols.insert(1, 'invoice_id')
-    fact_transactions_pd = fact_transactions_pd[final_cols] \
-        .sort_values(by=[c for c in final_cols if c in fact_transactions_pd.columns], kind='mergesort') \
-        .reset_index(drop=True)
-    
-    # Round monetary and quantities for idempotency
-    if not fact_transactions_pd.empty:
-        fact_transactions_pd['gross_profit'] = fact_transactions_pd['gross_profit'].round(2)
-        fact_transactions_pd['quantity'] = fact_transactions_pd['quantity'].round(0)
-
-    # Convert back to polars
-    fact_transactions = pl.from_pandas(fact_transactions_pd)
+    # Deterministic sort
+    sort_cols = [c for c in ["customer_id", "order_date", "product_division", "product_sku"] if c in fact_transactions.columns]
+    if sort_cols:
+        fact_transactions = fact_transactions.sort(sort_cols, nulls_last=True)
 
     fact_transactions.write_database("fact_transactions", curated_engine, if_table_exists="replace")
 
@@ -970,7 +692,6 @@ def build_star_schema(
     # Row count audit
     try:
         row_counts = pd.DataFrame([
-            {"table": "sales_log", "rows": int(len(sales_log_pd))},
             {"table": "dim_customer", "rows": int(len(dim_customer))},
             {"table": "fact_transactions", "rows": int(len(fact_transactions))},
         ])

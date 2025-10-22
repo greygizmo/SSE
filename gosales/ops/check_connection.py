@@ -28,7 +28,12 @@ def _preview_sql_for_table(dialect: str, table: str) -> str:
 
 
 @click.command()
-@click.option("--table", "table_name", default=None, help="Logical table to test (e.g., sales_log)")
+@click.option(
+    "--table",
+    "table_name",
+    default=None,
+    help="Logical table to test (e.g., fact_sales_line, industry_enrichment)",
+)
 @click.option("--config", default=str((Path(__file__).parents[1] / "config.yaml").resolve()))
 @click.option("--verbose/--no-verbose", default=True)
 def main(table_name: Optional[str], config: str, verbose: bool) -> None:
@@ -50,7 +55,8 @@ def main(table_name: Optional[str], config: str, verbose: bool) -> None:
     if table_name:
         tests = [table_name]
     else:
-        tests = ["sales_log", "industry_enrichment"]
+        # Default health checks target core line-item source and enrichment
+        tests = ["sales_detail", "industry_enrichment"]
 
     ok = True
     for logical in tests:

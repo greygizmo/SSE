@@ -166,8 +166,26 @@ def _gate_population(
         assets_on_subs = pd.to_numeric(df.get("assets_on_subs_total", 0), errors="coerce").fillna(0.0) > 0
     except Exception:
         assets_on_subs = pd.Series(False, index=df.index)
+    # Optional broadened cold definition
+    try:
+        use_off = bool(getattr(getattr(cfg_obj, "population", object()), "cold_uses_off_subs", True))
+    except Exception:
+        use_off = True
+    try:
+        use_ever = bool(getattr(getattr(cfg_obj, "population", object()), "cold_uses_ever_assets", True))
+    except Exception:
+        use_ever = True
+    try:
+        assets_off = pd.to_numeric(df.get("assets_off_subs_total", 0), errors="coerce").fillna(0.0) > 0 if use_off else pd.Series(False, index=df.index)
+    except Exception:
+        assets_off = pd.Series(False, index=df.index)
+    try:
+        assets_ever = pd.to_numeric(df.get("assets_ever_total", 0), errors="coerce").fillna(0.0) > 0 if use_ever else pd.Series(False, index=df.index)
+    except Exception:
+        assets_ever = pd.Series(False, index=df.index)
 
-    cold = (~warm) & (assets_active | assets_on_subs)
+    cold_assets_flag = assets_active | assets_on_subs | assets_off | assets_ever
+    cold = (~warm) & cold_assets_flag
     warm_n = int(warm.sum())
     cold_n = int(cold.sum())
     prospects_excluded = max(0, int(pre - (warm_n + cold_n)))

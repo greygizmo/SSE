@@ -24,13 +24,19 @@ logger = get_logger(__name__)
 
 
 @click.command()
-@click.option("--division", required=True, help="Target division name")
+@click.option("--division", required=True, help="Target name (division/goal/rollup value)")
 @click.option("--cutoff", required=True, help="Cutoff date YYYY-MM-DD (or comma-separated list)")
 @click.option("--window-months", default=6, type=int)
 @click.option("--mode", default="expansion", type=click.Choice(["expansion", "all"]))
 @click.option("--gp-min-threshold", default=0.0, type=float)
+@click.option(
+    "--target-type",
+    default=None,
+    type=click.Choice(["division", "goal", "rollup", "sub_division"]),
+    help="Categorization to use for labels (default from config or 'division').",
+)
 @click.option("--config", default=str((Path(__file__).parents[1] / "config.yaml").resolve()))
-def main(division: str, cutoff: str, window_months: int, mode: str, gp_min_threshold: float, config: str) -> None:
+def main(division: str, cutoff: str, window_months: int, mode: str, gp_min_threshold: float, target_type: str | None, config: str) -> None:
     cfg = load_config(config)
     OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
     # Prefer curated connection (e.g., SQLite) so labels align with built fact tables
@@ -45,6 +51,12 @@ def main(division: str, cutoff: str, window_months: int, mode: str, gp_min_thres
     for cut in cutoffs:
         # Apply per-division window override if configured
         w_override = int(getattr(cfg.labels, 'per_division_window_months', {}).get(division.lower(), window_months))
+        effective_target_type = target_type
+        if effective_target_type == "sub_division":
+            effective_target_type = "rollup"
+        elif effective_target_type == "goal":
+            effective_target_type = "division"
+
         params = LabelParams(
             division=division,
             cutoff=cut,
@@ -53,9 +65,23 @@ def main(division: str, cutoff: str, window_months: int, mode: str, gp_min_thres
             gp_min_threshold=gp_min_threshold,
             min_positive_target=getattr(cfg.labels, 'sparse_min_positive_target', None),
             max_window_months=int(getattr(cfg.labels, 'sparse_max_window_months', 12)),
+            target_type=effective_target_type,  # type: ignore[arg-type]
         )
+        log_target = effective_target_type or getattr(cfg.labels, 'target_type', 'division')
+        if log_target == "goal":
+            log_target = "division"
+        elif log_target == "sub_division":
+            log_target = "rollup"
 
-        logger.info(f"Building labels: division={division}, cutoff={cut}, window={window_months}, mode={mode}, thresh={gp_min_threshold}")
+        logger.info(
+            "Building labels: division=%s, cutoff=%s, window=%s, mode=%s, thresh=%s, target_type=%s",
+            division,
+            cut,
+            window_months,
+            mode,
+            gp_min_threshold,
+            log_target,
+        )
         labels = build_labels_for_division(engine, params)
         if labels.is_empty():
             logger.warning("Empty labels frame; skipping write for this cutoff.")
@@ -86,6 +112,7 @@ def main(division: str, cutoff: str, window_months: int, mode: str, gp_min_thres
             "window_months": int(window_months),
             "mode": mode,
             "gp_min_threshold": float(gp_min_threshold),
+            "target_type": log_target,
             "counts": {
                 "rows": int(len(labels_pd)),
                 "positives": int(labels_pd["label"].sum()),

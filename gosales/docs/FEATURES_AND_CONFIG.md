@@ -78,6 +78,16 @@ All options live in `gosales/config.yaml`. Key entries:
   - `top_k_percents`, `capacity_percent`: business thresholds
   - `calibration_methods`: `platt` and/or `isotonic`
   - `n_jobs`: LightGBM threads (default 1 for strict determinism). Increase cautiously; `deterministic=true` is set.
+
+- population
+  - `warm_window_months`: months of recency to define warm; not warm implies eligible for cold/prospect.
+  - `include_prospects`: when false, exclude rows that are neither warm nor cold.
+  - `cold_uses_off_subs`: when true, customers with off‑subscription assets count toward cold if not warm.
+  - `cold_uses_ever_assets`: when true, customers with any historical assets (ever) count toward cold if not warm.
+
+Notes
+- Cold is computed as “not warm AND has qualifying assets,” where qualifying assets include active/on‑subs by default and, when enabled, off‑subs and ever‑owned totals. This broadening captures former owners lacking recent transactions without admitting true prospects.
+- Product metadata and asset rollups are sourced from `dbo.table_All_Product_Info_cleaned_headers`, a superset view that includes full asset coverage. Override with `database.source_tables.product_info` if needed.
   - `final_calibration_max_rows`: when > 0, cap rows used for final CV calibration by sampling a stratified subset. Prevents multi-hour runs on very large populations without changing per-cutoff training logic.
   - Calibration fallback: if calibrated probabilities are degenerate (`std(p)<0.01`), the trainer falls back to uncalibrated predictions; if still degenerate, it uses a constant prevalence baseline. Metadata records `calibration_fallback`.
 

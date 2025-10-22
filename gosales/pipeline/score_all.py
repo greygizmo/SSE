@@ -347,13 +347,22 @@ def score_all(
             sl_src = str(src.get('sales_log', '')).strip()
             use_db_source = bool(sl_src and sl_src.lower() != 'csv' and is_azure_like)
             if use_db_source:
-                logger.info("Sales Log source is mapped to DB object '%s'; skipping local CSV ingest.", sl_src)
+                logger.info(
+                    "Sales Log source is mapped to DB object '%s'; skipping local CSV ingest."
+                    " Note: Sales Log is deprecated for Phase 0 curated builds.",
+                    sl_src,
+                )
             else:
                 if not is_azure_like and sl_src and sl_src.lower() != 'csv':
                     logger.info(
                         "Overriding configured Sales Log source '%s' for local engine '%s'; loading sample CSVs.",
                         sl_src,
                         backend or "unknown",
+                    )
+                if not sl_src or sl_src.lower() == 'csv':
+                    logger.warning(
+                        "Deprecated path: loading legacy Sales Log CSV for demos/validation. "
+                        "Phase 0 curated builds ignore Sales Log and rebuild facts from line items."
                     )
                 # Define the CSV files and their corresponding table names
                 csv_files = {

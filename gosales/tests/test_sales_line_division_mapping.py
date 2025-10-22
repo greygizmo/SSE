@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import polars as pl
 import pytest
 
@@ -43,7 +45,7 @@ def test_load_product_tag_mapping_produces_expected_overrides(monkeypatch):
     assert rollup_division[geomagic_key] == "Scanning"
 
 
-def test_attach_division_metadata_prefers_order_tags(monkeypatch):
+def test_attach_division_metadata_uses_product_mapping(monkeypatch, tmp_path):
     base = pl.DataFrame(
         {
             "Item_internalid": ["123"],
@@ -52,13 +54,6 @@ def test_attach_division_metadata_prefers_order_tags(monkeypatch):
         }
     )
 
-    order_mapping = pl.DataFrame(
-        {
-            "product_internal_id": ["123"],
-            sl.ORDER_TAG_ROLLUP_COLUMN: ["Draftsight"],
-            sl.ORDER_GOAL_COLUMN: ["Draftsight"],
-        }
-    )
     product_mapping = pl.DataFrame(
         {
             "product_internal_id": ["123"],
@@ -67,14 +62,15 @@ def test_attach_division_metadata_prefers_order_tags(monkeypatch):
         }
     )
 
-    monkeypatch.setattr(sl, "_load_order_tag_mapping", lambda *args, **kwargs: order_mapping)
     monkeypatch.setattr(sl, "_load_product_tag_mapping", lambda *args, **kwargs: product_mapping)
+    tmp_outputs = Path(tmp_path) / "outputs"
+    monkeypatch.setattr(sl, "OUTPUTS_DIR", tmp_outputs)
 
     enriched = sl._attach_division_metadata(base, engine=None, cfg=None, sources_cfg=None)
 
-    assert enriched[sl.ITEM_ROLLUP_COLUMN][0] == "Draftsight"
-    assert enriched[sl.DIVISION_GOAL_COLUMN][0] == "Draftsight"
-    assert enriched[sl.DIVISION_CANONICAL_COLUMN][0] == "Solidworks"
+    assert enriched[sl.ITEM_ROLLUP_COLUMN][0] == "GeoMagic"
+    assert enriched[sl.DIVISION_GOAL_COLUMN][0] == "Scanning"
+    assert enriched[sl.DIVISION_CANONICAL_COLUMN][0] == "Scanning"
 
 
 def test_apply_behavior_config_filters_line_types_and_returns():

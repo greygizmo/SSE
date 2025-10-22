@@ -8,17 +8,10 @@ database:
   sqlite_path: gosales/gosales.db
   strict_db: false
   source_tables:
-    sales_log: dbo.saleslog
     industry_enrichment: csv
-    customer_assets_rollups: dbo.customer_asset_rollups
-    moneyball_assets: dbo.[Moneyball Assets]
     items_category_limited: dbo.items_category_limited
   allowed_identifiers:
-  - sales_log
   - industry_enrichment
-  - dbo.saleslog
-  - dbo.customer_asset_rollups
-  - dbo.[Moneyball Assets]
   - dbo.items_category_limited
   curated_target: sqlite
   curated_sqlite_path: gosales/gosales_curated.db
@@ -47,7 +40,6 @@ etl:
     customer_name: New_Business
   dim_customer:
     sources:
-    - sales_log
     - ns
     - assets
   assets:
@@ -76,6 +68,18 @@ features:
   use_eb_smoothing: true
   use_market_basket: true
   use_als_embeddings: true
+  als_weight_by_quantity: true
+  als_weight_include_revenue: true
+  als_weight_price_factor: 1.0
+  als_weight_cap: null
+  als_weight_stats_sample_rows: 100000
+  als_division_scoped: true
+  als_scope_by_goal: true
+  als_revenue_cap_usd: null
+  als_revenue_cap_by_division: {}
+  als_time_decay_enabled: true
+  als_time_half_life_days: 180
+  als_min_scoped_interactions: 1000
   als_lookback_months: 24
   use_item2vec: false
   use_assets_als: true

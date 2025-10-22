@@ -1,5 +1,7 @@
 # GoSales ETL Migration Plan: Transition to Line-Item Sources and Division Standardization
 
+Note (2025-10-19): Phase 0 now rebuilds `fact_transactions` exclusively from `fact_sales_line`. All legacy `sales_log` fallbacks have been removed from the curated star build. A compatibility snapshot `fact_sales_log_raw` is still emitted, but it is derived from line items and used only for Branch/Rep metadata in features.
+
 Version: 0.1 (planning draft)
 Owner: GoSales Engine maintainers
 Status: Proposed (no code changes yet)
@@ -9,9 +11,42 @@ This document is the authoritative runbook to migrate the GoSales Engine from le
 ## Executive Summary
 
 - Replace `dbo.saleslog` with `dbo.table_saleslog_detail` as the primary sales fact (line-level grain). Reconstruct header-level aggregations where needed in a controlled, deterministic way.
-- Replace `dbo.[Moneyball Assets]` and `dbo.items_category_limited` with `dbo.table_Product_Info_cleaned_headers`, augmented by `dbo.analytics_product_tags` for the canonical Division field (`Goal`).
+- Replace `(deprecated)` and `dbo.items_category_limited` with `dbo.table_All_Product_Info_cleaned_headers`, augmented by `dbo.analytics_product_tags` for the canonical Division field (`Goal`).
 - Treat `dbo.Customer_asset_rollups` as an optional validator/shortcut during migration; plan to compute these rollups from line items for transparency and leakage-safety.
 - Introduce config toggles to enable dual-run A/B comparisons, quick rollback, and controlled cutovers without breaking existing CLIs or downstream artifacts.
+- Terminology: we continue to call Goals "divisions" and now refer to `item_rollup` as the corresponding "sub-division" throughout code, docs, and CLI options.
+
+## Cutover Policy (Updated)
+
+- Parity against the legacy `dbo.saleslog` is not required and will not be pursued. Manual adjustments present in the legacy header view are considered out of scope and will not be reconstructed.
+- The engine operates exclusively on line-item sources (`fact_sales_line` and derived views). Legacy `sales_log` references are deprecated and no longer used in ETL.
+- Parity diagnostics and mismatch logging are optional utilities only; they are not part of acceptance criteria.
+
+## QA and Fallbacks (Feature Engine)
+
+- The feature engine now performs explicit QA when loading `fact_sales_line`:
+  - Verifies base columns exist: `customer_id`, `order_date`.
+  - When DB reads fail, falls back to curated parquet at `paths.curated/fact/fact_sales_line.parquet`.
+  - When optional columns are missing, injects safe defaults to preserve resilience:
+    - `division_canonical` → "UNKNOWN"
+    - `item_rollup` → "unknown"
+    - `SalesOrder_Currency` → "UNKNOWN"
+    - `USD_CAD_Conversion_rate` → NaN (avoids numeric coercion errors)
+  - If `database.strict_db: true` and the fact cannot be loaded or base columns are missing, the engine raises with an actionable message instead of silently degrading.
+
+- Impact: when line-item facts are unavailable, line-derived feature families are disabled with a clear warning, keeping the end-to-end run deterministic and explainable.
+
+## ALS Weighting Policy (Line-Item Interactions)
+
+- Defaults (ON unless changed in config):
+  - `features.als_weight_by_quantity: true` — weights include a quantity term via `log1p(1+qty)`.
+  - `features.als_weight_include_revenue: true` — weights include a price term via `price_factor * log1p(1+revenue_usd)`.
+  - `features.als_division_scoped: true` — embeddings are computed from interactions filtered to the target division plus configured aliases.
+  - `features.als_time_decay_enabled: true` with `features.als_time_half_life_days: 180` — weights are multiplied by `exp(-lambda*age_days)` where `lambda = ln(2)/half_life`.
+  - Optional caps to avoid over-weighting rare, expensive lines: `features.als_revenue_cap_usd` (global) and `features.als_revenue_cap_by_division` (dict of canonical division -> USD cap).
+  - Optional overall cap on the final weight: `features.als_weight_cap`.
+
+- Feature stats now record ALS policy and sampled weight quantiles in `feature_stats_<division>_<cutoff>.json` under `als_policy`.
 
 ## Non‑Negotiables and Invariants
 
@@ -26,9 +61,9 @@ This document is the authoritative runbook to migrate the GoSales Engine from le
 | Legacy Source | New Source | Notes |
 | --- | --- | --- |
 | `dbo.saleslog` | `dbo.table_saleslog_detail` | Migrates from header/transaction grain to line-item grain. Header views reconstructed deterministically.
-| `dbo.[Moneyball Assets]` | `dbo.table_Product_Info_cleaned_headers` | Product metadata, including item rollups and attributes.
+| `(deprecated)` | `dbo.table_All_Product_Info_cleaned_headers` | Product metadata, including item rollups and attributes (superset of the legacy view).
 | `dbo.items_category_limited` | `dbo.table_Product_Info_cleaned_headers` | Item rollups and categories now sourced here.
-| Divisions via rollups | `dbo.analytics_order_tags`, `dbo.analytics_product_tags` (`Goal`) | Canonical Division prioritizes transaction-level tags, then rollup-level `Goal`. Define precedence and multi-goal strategy.
+| Divisions via rollups | `dbo.items_category_limited`, `dbo.analytics_product_tags` (`Goal`) | Sub-division (`item_rollup`) comes from items_category_limited; Goal/Division comes from analytics_product_tags. The repo treats Goals as Divisions and item_rollup as sub-divisions.
 | `dbo.Customer_asset_rollups` | Optional (validator/shortcut) | Keep as optional reference; plan deterministic recomputation from lines.
 
 ## Design Overview
@@ -44,7 +79,7 @@ This document is the authoritative runbook to migrate the GoSales Engine from le
   - Built from `fact_sales_line` by grouping to header-level where needed by existing consumers (summing eligible amounts, excluding tax/freight/discount-only per rules).
 
 - Dimensions
-  - `dim_product` from `dbo.table_Product_Info_cleaned_headers` (canonical product key, sku, name, rollup, type, active, brand, uom, effective dates).
+- `dim_product` from `dbo.table_All_Product_Info_cleaned_headers` (canonical product key, sku, name, rollup, type, active, brand, uom, effective dates).
   - `dim_product_tags` bridge mapping product key → `Goal` (Division). Handle 1:n with a clear strategy (default: primary-only).
   - `dim_customer` as today, unchanged interfaces; ensure keys consistent with sales facts.
   - `dim_date` standard.
@@ -54,7 +89,8 @@ This document is the authoritative runbook to migrate the GoSales Engine from le
 - Initial scaffolding for line-item ingestion lives in `gosales/etl/sales_line.py`; integration with the curated star build now writes `fact_sales_line` (table + parquet) whenever `etl.line_items.use_line_item_facts` is enabled.
 - `table_saleslog_detail` is treated as the authoritative transaction source, with `Sales_Order` as the canonical order identifier.
 - COGS is surfaced directly via `Amount2`, with USD-normalised counterparts added for monetary columns.
-- Expose canonical division columns (`item_rollup`, `division_goal`, `division_canonical`) by applying `dbo.analytics_order_tags` first (per `Item_internalid`), then `dbo.analytics_product_tags` as fallback so downstream features consume Goal-aware partitions without losing legacy naming.
+- Expose canonical division columns (`item_rollup` as sub-division, `division_goal`, `division_canonical`) by joining `table_saleslog_detail.Item_internalid` to `items_category_limited.internalId` for the sub-division and then `analytics_product_tags.item_rollup` for the Division (Goal). Legacy `Division` remains a final fallback only when Goal metadata is missing.
+- Emit `gosales/outputs/mapping_coverage.csv` during each build summarizing coverage (total rows, unmapped sub-divisions, unmapped divisions) so mapping regressions are visible immediately.
 - `summarise_sales_header()` aggregates the line-item fact back to a `fact_sales_header` table for parity checks against the legacy view.
 
 - **Grain & Keys**
@@ -129,9 +165,16 @@ Derived fields surfaced by the scaffolding:
 
 ### Division Mapping
 
-- Canonical Division: `Goal` derived from `dbo.analytics_order_tags` (per `Item_internalid`) when available; otherwise fall back to `dbo.analytics_product_tags`.
+- Canonical Division: `Goal` derived from the sub-division/Goal chain (`items_category_limited` → `analytics_product_tags`). Legacy `Division` is used only when a sub-division or Goal is unavailable.
 - Precedence rule (configurable): `order_tags.goal` → `product_tags.Goal` → product header rollup → `"Unknown"`.
 - Multi-goal strategy (configurable): `primary_only` (default), `prefer_business_priority`, or `explode_multi` (line duplicated per division with weights = 1/n unless configured otherwise).
+
+### Phase 1 Labels: Goal/Rollup Toggle
+
+- New config knob `labels.target_type` controls label categorization: `division` (legacy), `goal` (Goal-aware), or `rollup` (item_rollup).
+- CLI support: `python -m gosales.pipeline.build_labels --division <name> --target-type division|rollup|sub_division ...` ("division" maps to Goal, "sub_division" maps to item_rollup).
+- Computation sources GP from `fact_sales_line` when using `goal` or `rollup` via `COALESCE(GP_usd, GP)`, ensuring accurate net GP sums per customer in the window. Falls back to `fact_transactions.gross_profit` when line fact is unavailable.
+- Determinism and leakage safety are preserved: cutoff filters applied before joins; outputs sorted/stable; missing artifacts degrade gracefully to legacy paths.
 
 ## Interrogation Plan (Read‑Only, Safe Queries)
 
@@ -147,11 +190,11 @@ JOIN sys.types t ON c.user_type_id = t.user_type_id
 WHERE c.object_id = OBJECT_ID('[dbo].[table_saleslog_detail]')
 ORDER BY c.column_id;
 
--- table_Product_Info_cleaned_headers
+-- table_All_Product_Info_cleaned_headers
 SELECT c.name AS column_name, t.name AS data_type, c.max_length, c.is_nullable
 FROM sys.columns c
 JOIN sys.types t ON c.user_type_id = t.user_type_id
-WHERE c.object_id = OBJECT_ID('[dbo].[table_Product_Info_cleaned_headers]')
+WHERE c.object_id = OBJECT_ID('[dbo].[table_All_Product_Info_cleaned_headers]')
 ORDER BY c.column_id;
 
 -- analytics_product_tags
@@ -176,7 +219,7 @@ FROM (
 
 -- Product key consistency (choose stable key present in both sources)
 SELECT TOP (100) item_id, item_sku, item_rollup
-FROM dbo.table_Product_Info_cleaned_headers WITH (NOLOCK);
+FROM dbo.table_All_Product_Info_cleaned_headers WITH (NOLOCK);
 
 -- Tag multiplicity per product
 SELECT product_key_column, COUNT(DISTINCT Goal) AS goals
@@ -259,7 +302,7 @@ SELECT TOP (200)
        p.item_sku,
        p.item_rollup
 FROM dbo.table_saleslog_detail s WITH (NOLOCK)
-LEFT JOIN dbo.table_Product_Info_cleaned_headers p
+LEFT JOIN dbo.table_All_Product_Info_cleaned_headers p
   ON p.item_id = s.item_id
 WHERE s.tran_date >= DATEADD(MONTH, -3, GETDATE())
 ORDER BY s.tran_date DESC;
@@ -340,7 +383,7 @@ Add to `gosales/config.yaml` and mirror in `gosales/config_no_cal.yaml`. Validat
 ```yaml
 sources:
   sales_detail: "[dbo].[table_saleslog_detail]"
-  product_info: "[dbo].[table_Product_Info_cleaned_headers]"
+  product_info: "[dbo].[table_All_Product_Info_cleaned_headers]"
   product_tags: "[dbo].[analytics_product_tags]"
   customer_asset_rollups: "[dbo].[Customer_asset_rollups]"  # optional
 
@@ -349,9 +392,9 @@ etl:
     use_line_item_facts: true  # default true; disable only for emergency rollback
     sources:
       sales_detail: "[dbo].[table_saleslog_detail]"
-      product_info: "[dbo].[table_Product_Info_cleaned_headers]"
+      product_info: "[dbo].[table_All_Product_Info_cleaned_headers]"
       product_tags: "[dbo].[analytics_product_tags]"
-      order_tags: "[dbo].[analytics_order_tags]"
+      items_category_limited: "[dbo].[items_category_limited]"
       customer_asset_rollups: "[dbo].[Customer_asset_rollups]"
     dedupe:
       order_column: "Sales_Order"
@@ -393,7 +436,7 @@ random:
   - Transaction count: distinct `transaction_id` within window (unless configured otherwise).
   - Recency: min(`tran_date`) or max(`tran_date`) per definition; must be explicitly set and documented.
 
-- `dbo.[Moneyball Assets]` and `dbo.items_category_limited` → `dim_product` + `dim_product_tags`:
+- `(deprecated)` and `dbo.items_category_limited` → `dim_product` + `dim_product_tags`:
   - Any `item_rollup` fields sourced from product headers.
   - Canonical Division from tags (`Goal`), with precedence/fallback rules.
 
@@ -495,7 +538,7 @@ Emit validation artifacts under `gosales/outputs/validation/...` and summarize t
 - Feature and label determinism tests (checksum assertions for sample fixtures).
 - End-to-end tests for ranking determinism and division mapping.
 - Skip/mark slow suites (ALS/SHAP) unless explicitly enabled; seed randomness.
-- Validation CLI: `PYTHONPATH="$PWD" python -m gosales.validation.line_item_parity --config gosales/config.yaml --cutoff "<ISO-date>"` (writes division delta CSV/JSON under `gosales/outputs/validation/line_item_parity/`).
+- Validation CLI (optional/legacy diagnostic): `python -m gosales.validation.line_item_parity` remains available for one-off analysis but is not required for cutover.
 
 Run locally:
 
@@ -506,11 +549,9 @@ pytest gosales/tests/test_phase4_rank_normalization.py -q
 
 ## Acceptance Criteria (Go/No-Go)
 
-- All tests green under both old and new sources (via dual-run).
-- All validation gates pass within thresholds; any exceptions documented and signed off.
+- All tests green with line-item sources enabled (no dependency on legacy views).
 - Deterministic artifacts (checksums unchanged across repeated runs with same config).
 - Documentation updated (this plan, artifact catalog, feature/label docs).
-- Optional: parity confirmed against `dbo.Customer_asset_rollups`, with deltas understood or reconciled.
 
 ## Appendix A — SQL Playbook (Safe Sampling)
 
@@ -538,7 +579,7 @@ ORDER BY rows DESC;
   - quantities/prices/amounts: `...`
   - line type/flags: `...`
 
-- Product info required fields in `table_Product_Info_cleaned_headers`:
+- Product info required fields in `table_All_Product_Info_cleaned_headers`:
   - stable product key: `...`
   - sku/name/rollup/type/active/uom/brand: `...`
 
@@ -549,3 +590,13 @@ ORDER BY rows DESC;
 
 Complete and check in this section once interrogation is done.
 
+
+## Forward Validation Snapshot — CAD (2024-09-30)
+
+- Config: validation.bootstrap_n=150; validation.segment_columns=[]
+- CLI: capacity_grid=10; accounts_per_rep_grid=0
+- Targeting: Goal/alias (CAD rollup) with line-item rollup fallback
+- Metrics: AUC=0.8248; PR-AUC=0.2761; Brier=0.0578; Cal MAE=0.0373
+- Capture@10%: 0.4222
+- Drift (PSI ≥ 0.25): als_assets_f3=0.54; als_assets_f9=0.39
+- Artifacts: gosales/outputs/validation/cad/2024-09-30/

@@ -188,7 +188,7 @@ graph TD
     end
 ```
 
-1.  **ETL**: Raw CSVs are loaded and transformed into a clean `fact_transactions` table (includes `invoice_id` when available).
+1.  **ETL**: Raw CSVs are loaded and transformed into a clean `fact_transactions` table (includes `invoice_id` when available). Product metadata and asset rollups source from `dbo.table_All_Product_Info_cleaned_headers` for complete coverage.
 1a. **Eventization**: `fact_events` aggregates line items by invoice and stamps per-model labels (Printers, SWX_Seats, etc.).
 2.  **Feature Engineering**: A `cutoff_date` is used to build features *only* from historical data.
 3.  **Target Labeling**: The model is trained to predict purchases that happen in a *future* window.
@@ -275,6 +275,17 @@ The orchestrator `pipeline/score_all.py` collects training targets as (divisions
 - Stability (Jaccard) vs last run
   - Meaning: Overlap between this run’s top‑N and the previous run’s top‑N (0–1).
   - Why it matters: High (~0.7–0.9) = consistent targeting; low (~0.3) = shift due to seasonality, new data, or configuration change.
+
+---
+
+### Population Gating (Warm/Cold)
+
+- Warm: transactions in the last `population.warm_window_months` months (recency <= months×30 days).
+- Cold: not warm and owning active or on‑subscription assets at cutoff.
+- Broadened cold (optional): when `population.cold_uses_off_subs` and/or `population.cold_uses_ever_assets` are true, former owners (off‑subs) and ever‑owners (historical assets) are included in cold if not warm.
+- Prospects: neither warm nor cold; excluded when `population.include_prospects: false`.
+
+Product metadata and asset rollups are read from `dbo.table_All_Product_Info_cleaned_headers` by default for complete coverage.
   - Action: If stability drops unexpectedly, review data recency, config changes, and business events.
 
 - Coverage and weight adjustments

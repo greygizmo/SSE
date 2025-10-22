@@ -46,9 +46,9 @@ class Run:
 @dataclass
 class LineItemsSources:
     sales_detail: str = "dbo.table_saleslog_detail"
-    product_info: str = "dbo.table_Product_Info_cleaned_headers"
+    product_info: str = "dbo.table_All_Product_Info_cleaned_headers"
+    items_category_limited: str = "dbo.items_category_limited"
     product_tags: str = "dbo.analytics_product_tags"
-    order_tags: str | None = "dbo.analytics_order_tags"
     customer_asset_rollups: str = "dbo.customer_asset_rollups"
 
 
@@ -85,6 +85,8 @@ class ETL:
     currency: str = "USD"
     fail_on_contract_breach: bool = True
     allow_unknown_columns: bool = False
+    # Optional CSV path for industry enrichment when `database.source_tables.industry_enrichment: csv`
+    industry_enrichment_csv: Optional[Path] = None
     # Industry enrichment fuzzy-match controls
     enable_industry_fuzzy: bool = True
     fuzzy_min_unmatched: int = 50
@@ -110,12 +112,16 @@ class PopulationConfig:
     exclude_prospects_in_features: bool = False
     # Which segments to build in features: ['warm'], ['cold'], or ['warm','cold']
     build_segments: list[str] = field(default_factory=lambda: ["warm", "cold"])
+    # Broaden cold definition: include former/ever owners when not warm
+    cold_uses_off_subs: bool = True
+    cold_uses_ever_assets: bool = True
 
 
 @dataclass
 class Labels:
     gp_min_threshold: float = 0.0
     denylist_skus_csv: Optional[Path] = None
+    target_type: str = "division"
     # Per-division window overrides for sparse groups
     per_division_window_months: Dict[str, int] = field(default_factory=dict)
     # Sparse division label widening targets
@@ -190,6 +196,28 @@ class Features:
     # product_division values present in curated facts. Keys and values are
     # normalized downstream via casefold/trim in consumers.
     division_aliases: Dict[str, list[str]] = field(default_factory=dict)
+    # ALS weighting toggle: when true, interactions weight includes quantity (log1p) in addition to positive GP
+    als_weight_by_quantity: bool = True
+    # Include normalized revenue (USD) term in ALS weights
+    als_weight_include_revenue: bool = True
+    # Scale factor for price term contribution
+    als_weight_price_factor: float = 1.0
+    # Optional cap on final ALS weight (None disables)
+    als_weight_cap: float | None = None
+    # Sampling rows for ALS weight stats (to keep stats light); 0 disables sampling
+    als_weight_stats_sample_rows: int = 100000
+    # Division-aware embedding scope (filter interactions to target division + aliases)
+    als_division_scoped: bool = True
+    # Prefer Goal-based scoping when available (product_goal), else canonical division
+    als_scope_by_goal: bool = True
+    # Revenue caps to avoid over-weighting rare, high-priced interactions
+    als_revenue_cap_usd: float | None = None
+    als_revenue_cap_by_division: Dict[str, float] = field(default_factory=dict)
+    # Time decay controls (default on)
+    als_time_decay_enabled: bool = True
+    als_time_half_life_days: int = 180
+    # Minimum scoped interaction pairs (customer,item) before falling back to global embedding
+    als_min_scoped_interactions: int = 1000
 
 
 @dataclass
@@ -562,6 +590,11 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
             currency=str(etl_cfg.get("currency", "USD")),
             fail_on_contract_breach=bool(etl_cfg.get("fail_on_contract_breach", True)),
             allow_unknown_columns=bool(etl_cfg.get("allow_unknown_columns", False)),
+            industry_enrichment_csv=(
+                Path(etl_cfg.get("industry_enrichment_csv"))
+                if etl_cfg.get("industry_enrichment_csv")
+                else None
+            ),
             enable_industry_fuzzy=bool(etl_cfg.get("enable_industry_fuzzy", True)),
             fuzzy_min_unmatched=int(etl_cfg.get("fuzzy_min_unmatched", 50)),
             fuzzy_skip_if_coverage_ge=float(etl_cfg.get("fuzzy_skip_if_coverage_ge", 0.95)),
@@ -572,17 +605,8 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
                     **{
                         "sales_detail": str(((etl_cfg.get("line_items", {}) or {}).get("sources", {}) or {}).get("sales_detail", LineItemsSources().sales_detail)),
                         "product_info": str(((etl_cfg.get("line_items", {}) or {}).get("sources", {}) or {}).get("product_info", LineItemsSources().product_info)),
+                        "items_category_limited": str(((etl_cfg.get("line_items", {}) or {}).get("sources", {}) or {}).get("items_category_limited", LineItemsSources().items_category_limited)),
                         "product_tags": str(((etl_cfg.get("line_items", {}) or {}).get("sources", {}) or {}).get("product_tags", LineItemsSources().product_tags)),
-                        "order_tags": (
-                            str(order_tags_raw)
-                            if (
-                                order_tags_raw := (
-                                    (etl_cfg.get("line_items", {}) or {}).get("sources", {}) or {}
-                                ).get("order_tags", LineItemsSources().order_tags)
-                            )
-                            not in (None, "")
-                            else None
-                        ),
                         "customer_asset_rollups": str(((etl_cfg.get("line_items", {}) or {}).get("sources", {}) or {}).get("customer_asset_rollups", LineItemsSources().customer_asset_rollups)),
                     }
                 ),
@@ -620,6 +644,7 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
         labels=Labels(
             gp_min_threshold=float(labels_cfg.get("gp_min_threshold", 0.0)),
             denylist_skus_csv=(Path(labels_cfg["denylist_skus_csv"]).resolve() if labels_cfg.get("denylist_skus_csv") else None),
+            target_type=str(labels_cfg.get("target_type", "division")),
             per_division_window_months=dict(labels_cfg.get("per_division_window_months", {})),
             sparse_min_positive_target=(int(labels_cfg.get("sparse_min_positive_target")) if labels_cfg.get("sparse_min_positive_target") is not None else None),
             sparse_max_window_months=int(labels_cfg.get("sparse_max_window_months", 12)),
@@ -632,6 +657,18 @@ def load_config(config_path: Optional[str | Path] = None, cli_overrides: Optiona
             use_market_basket=bool(feat_cfg.get("use_market_basket", True)),
             use_als_embeddings=bool(feat_cfg.get("use_als_embeddings", False)),
             als_lookback_months=int(feat_cfg.get("als_lookback_months", 12)),
+            als_weight_by_quantity=bool(feat_cfg.get("als_weight_by_quantity", True)),
+            als_weight_include_revenue=bool(feat_cfg.get("als_weight_include_revenue", True)),
+            als_weight_price_factor=float(feat_cfg.get("als_weight_price_factor", 1.0)),
+            als_weight_cap=(float(feat_cfg.get("als_weight_cap")) if feat_cfg.get("als_weight_cap") is not None else None),
+            als_weight_stats_sample_rows=int(feat_cfg.get("als_weight_stats_sample_rows", 100000)),
+            als_division_scoped=bool(feat_cfg.get("als_division_scoped", True)),
+            als_scope_by_goal=bool(feat_cfg.get("als_scope_by_goal", True)),
+            als_revenue_cap_usd=(float(feat_cfg.get("als_revenue_cap_usd")) if feat_cfg.get("als_revenue_cap_usd") is not None else None),
+            als_revenue_cap_by_division=dict(feat_cfg.get("als_revenue_cap_by_division", {})),
+            als_time_decay_enabled=bool(feat_cfg.get("als_time_decay_enabled", True)),
+            als_time_half_life_days=int(feat_cfg.get("als_time_half_life_days", 180)),
+            als_min_scoped_interactions=int(feat_cfg.get("als_min_scoped_interactions", 1000)),
             use_assets_als=bool(feat_cfg.get("use_assets_als", False)),
             assets_als=AssetsALSConfig(
                 max_rows=int(assets_als_cfg.get("max_rows", 20_000)),

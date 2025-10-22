@@ -13,6 +13,7 @@ from gosales.utils.db import get_db_connection
 from gosales.utils.logger import get_logger
 from gosales.utils import config as cfg
 from gosales.utils.paths import OUTPUTS_DIR
+from gosales.utils.config import load_config
 from gosales.features.als_embed import customer_als_embeddings
 from gosales.etl.sku_map import division_set, get_model_targets, get_sku_mapping
 from gosales.utils.normalize import normalize_division
@@ -37,6 +38,150 @@ def _safe_read_sql_query(engine, query: str, params: dict | None = None) -> pd.D
             extra={"query_head": head, "error": str(exc)},
         )
         return pd.DataFrame()
+
+
+def _qa_required_line_columns(
+    *,
+    use_usd: bool,
+    enable_canonical: bool,
+    enable_margin: bool,
+    enable_currency: bool,
+    enable_diversity: bool,
+    enable_returns: bool,
+    enable_order_comp: bool,
+    enable_trend: bool,
+) -> tuple[set[str], set[str]]:
+    """Return (required, optional) column names for fact_sales_line based on feature toggles.
+
+    We keep required set minimal to preserve resilience, and treat others as optional
+    with zero/placeholder fallbacks.
+    """
+    required: set[str] = {"customer_id", "order_date"}
+    optional: set[str] = set()
+
+    if enable_canonical:
+        optional.add("division_canonical")  # UNKNOWN fallback ok
+    if enable_diversity:
+        optional.add("item_rollup")  # 'unknown' fallback ok
+
+    # Monetary columns: prefer USD if configured, otherwise native
+    gp_cols = {"GP_usd", "GP"} if use_usd else {"GP"}
+    rev_cols = {"Revenue_usd", "Revenue"} if use_usd else {"Revenue"}
+    term_gp_cols = {"Term_GP_usd", "Term_GP"} if use_usd else {"Term_GP"}
+
+    if enable_margin or enable_trend or enable_order_comp or enable_returns or enable_currency:
+        # At least one revenue column is required to compute rates/returns; gp optional with zeros
+        required |= set(rev_cols)
+        optional |= set(gp_cols) | set(term_gp_cols)
+
+    if enable_currency:
+        optional |= {"SalesOrder_Currency", "USD_CAD_Conversion_rate"}
+
+    # Returns flag is optional (derivable from negative revenue)
+    optional.add("is_return_line")
+    optional.add("Sales_Order")
+
+    return required, optional
+
+
+def _load_fact_sales_line_with_fallback(engine, cutoff_iso: str) -> pd.DataFrame:
+    """Load fact_sales_line with progressive fallbacks.
+
+    1) Try SQL with extended columns including return flag.
+    2) Fallback SQL without return flag.
+    3) Fallback to curated parquet if present.
+    """
+    # Attempt SQL with return flag
+    try:
+        line_query = """
+            SELECT
+                CompanyId AS customer_id,
+                Rec_Date AS order_date,
+                division_canonical,
+                item_rollup,
+                Sales_Order,
+                Revenue_usd,
+                Revenue,
+                GP_usd,
+                GP,
+                Term_GP_usd,
+                Term_GP,
+                SalesOrder_Currency,
+                USD_CAD_Conversion_rate,
+                is_return_line
+            FROM fact_sales_line
+            WHERE Rec_Date <= :cutoff
+        """
+        return pd.read_sql_query(line_query, engine, params={"cutoff": cutoff_iso})
+    except Exception as exc:
+        logger.warning(
+            "Line-item feature load failed with extended columns (%s); retrying without return flag.",
+            exc,
+        )
+
+    # Fallback SQL without return flag (literal to dodge driver param issues)
+    try:
+        fallback_query = f"""
+            SELECT
+                CompanyId AS customer_id,
+                Rec_Date AS order_date,
+                division_canonical,
+                item_rollup,
+                Sales_Order,
+                Revenue_usd,
+                Revenue,
+                GP_usd,
+                GP,
+                Term_GP_usd,
+                Term_GP,
+                SalesOrder_Currency,
+                USD_CAD_Conversion_rate
+            FROM fact_sales_line
+            WHERE Rec_Date <= '{cutoff_iso}'
+        """
+        return pd.read_sql_query(fallback_query, engine)
+    except Exception as fallback_exc:
+        logger.warning("Line-item feature fallback load failed: %s", fallback_exc)
+
+    # Fallback to curated parquet if available
+    try:
+        c = load_config()
+        parquet_path = (c.paths.curated / "fact" / "fact_sales_line.parquet").resolve()
+        if parquet_path.exists():
+            logger.info("Loading fact_sales_line from parquet fallback: %s", parquet_path)
+            import polars as _pl
+
+            pl_df = _pl.read_parquet(str(parquet_path))
+            # Select and rename to expected aliases
+            select_cols = [
+                "CompanyId",
+                "Rec_Date",
+                "division_canonical",
+                "item_rollup",
+                "Sales_Order",
+                "Revenue_usd",
+                "Revenue",
+                "GP_usd",
+                "GP",
+                "Term_GP_usd",
+                "Term_GP",
+                "SalesOrder_Currency",
+                "USD_CAD_Conversion_rate",
+                "is_return_line",
+            ]
+            keep = [c for c in select_cols if c in pl_df.columns]
+            pl_df = pl_df.select(keep)
+            # Filter by cutoff
+            if "Rec_Date" in pl_df.columns:
+                pl_df = pl_df.filter(_pl.col("Rec_Date") <= _pl.lit(cutoff_iso))
+            # Rename
+            rename_map = {"CompanyId": "customer_id", "Rec_Date": "order_date"}
+            pl_df = pl_df.rename(rename_map)
+            return pl_df.to_pandas()
+    except Exception as parquet_exc:
+        logger.warning("Parquet fallback for fact_sales_line failed: %s", parquet_exc)
+
+    return pd.DataFrame()
 
 
 def _coerce_flag_series(series: pd.Series, truthy: set[str] | None = None) -> pd.Series:
@@ -941,54 +1086,56 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
             need_line = True
 
         if need_line:
-            cutoff_literal_param = pd.to_datetime(cutoff_dt).strftime("%Y-%m-%d") if cutoff_dt is not None else pd.Timestamp.utcnow().strftime("%Y-%m-%d")
+            cutoff_literal_param = (
+                pd.to_datetime(cutoff_dt).strftime("%Y-%m-%d")
+                if cutoff_dt is not None
+                else pd.Timestamp.utcnow().strftime("%Y-%m-%d")
+            )
+            line_df = _load_fact_sales_line_with_fallback(engine, cutoff_literal_param)
+
+            # QA: verify minimal schema and inject safe defaults
             try:
-                line_query = """
-                    SELECT
-                        CompanyId AS customer_id,
-                        Rec_Date AS order_date,
-                        division_canonical,
-                        item_rollup,
-                        Sales_Order,
-                        Revenue_usd,
-                        Revenue,
-                        GP_usd,
-                        GP,
-                        Term_GP_usd,
-                        Term_GP,
-                        SalesOrder_Currency,
-                        USD_CAD_Conversion_rate,
-                        is_return_line
-                    FROM fact_sales_line
-                    WHERE Rec_Date <= :cutoff
-                """
-                line_df = pd.read_sql_query(line_query, engine, params={"cutoff": cutoff_literal_param})
-            except Exception as exc:
-                logger.warning("Line-item feature load failed with extended columns (%s); retrying without return flag.", exc)
-                try:
-                    
-                    fallback_query = f"""
-                        SELECT
-                            CompanyId AS customer_id,
-                            Rec_Date AS order_date,
-                            division_canonical,
-                            item_rollup,
-                            Sales_Order,
-                            Revenue_usd,
-                            Revenue,
-                            GP_usd,
-                            GP,
-                            Term_GP_usd,
-                            Term_GP,
-                            SalesOrder_Currency,
-                            USD_CAD_Conversion_rate
-                        FROM fact_sales_line
-                        WHERE Rec_Date <= '{cutoff_literal_param}'
-                    """
-                    line_df = pd.read_sql_query(fallback_query, engine)
-                except Exception as fallback_exc:
-                    logger.warning("Line-item feature fallback load failed: %s", fallback_exc)
+                strict_db = bool(getattr(cfg.load_config().database, "strict_db", False))
+            except Exception:
+                strict_db = False
+
+            if line_df is None or line_df.empty:
+                msg = (
+                    "fact_sales_line could not be loaded from DB or parquet; "
+                    "line-derived features will be disabled."
+                )
+                if strict_db:
+                    raise RuntimeError(
+                        msg + " Set database.strict_db=False or ensure curated facts are built."
+                    )
+                logger.warning(msg)
+            else:
+                # Ensure required base columns exist
+                missing_base = [c for c in ("customer_id", "order_date") if c not in line_df.columns]
+                if missing_base:
+                    msg = f"fact_sales_line is missing base columns: {missing_base}"
+                    if strict_db:
+                        raise RuntimeError(msg)
+                    logger.warning(msg + "; disabling line-derived features.")
                     line_df = pd.DataFrame()
+                else:
+                    # Coerce dtypes and add safe defaults for optional fields
+                    try:
+                        line_df["customer_id"] = line_df["customer_id"].astype(str)
+                    except Exception:
+                        pass
+                    try:
+                        line_df["order_date"] = pd.to_datetime(line_df["order_date"], errors="coerce")
+                    except Exception:
+                        pass
+                    if "SalesOrder_Currency" not in line_df.columns:
+                        line_df["SalesOrder_Currency"] = "UNKNOWN"
+                    if "USD_CAD_Conversion_rate" not in line_df.columns:
+                        line_df["USD_CAD_Conversion_rate"] = np.nan
+                    if "division_canonical" not in line_df.columns:
+                        line_df["division_canonical"] = "UNKNOWN"
+                    if "item_rollup" not in line_df.columns:
+                        line_df["item_rollup"] = "unknown"
         for w in window_months:
             start_dt = cutoff_dt - pd.DateOffset(months=w)
             effective_end = cutoff_dt
@@ -1791,6 +1938,8 @@ def create_feature_matrix(engine, division_name: str, cutoff_date: str = None, p
                 factors=16,
                 lookback_months=cfgmod.features.als_lookback_months,
                 lag_days=lag_days,
+                weight_by_quantity=bool(getattr(getattr(cfgmod, 'features', object()), 'als_weight_by_quantity', True)),
+                division_name=division_name,
             )
             if not als_df.is_empty():
                 # Ensure type consistency before joining

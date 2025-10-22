@@ -1,4 +1,4 @@
-"""Command-line entry point for generating model feature matrices.
+﻿"""Command-line entry point for generating model feature matrices.
 
 It wraps :func:`gosales.features.engine.create_feature_matrix` with CLI options
 for division, cutoff, and optional embedding sources, writing the resulting
@@ -72,6 +72,8 @@ def main(division: str, cutoff: str, windows: str, config: str, with_eb: bool, w
                     factors=als_factors,
                     lookback_months=cfg.features.als_lookback_months,
                     lag_days=lag_days,
+                    weight_by_quantity=bool(getattr(getattr(cfg, 'features', object()), 'als_weight_by_quantity', True)),
+                    division_name=division,
                 )
                 if "customer_id" in als_df.columns and als_df.height > 0:
                     fm_id_dtype = fm.schema.get("customer_id")
@@ -96,6 +98,12 @@ def main(division: str, cutoff: str, windows: str, config: str, with_eb: bool, w
                         als_exprs.append(pl.lit(0.0, dtype=pl.Float64).alias(col))
                 if als_exprs:
                     fm = fm.with_columns(als_exprs)
+                # Capture scoped_fallback flag from ALS embedder if available
+                try:
+                    from gosales.features.als_embed import get_last_scoped_fallback
+                    scoped_fallback = bool(get_last_scoped_fallback())
+                except Exception:
+                    scoped_fallback = False
             if fm.is_empty():
                 logger.warning(f"Empty feature matrix for cutoff {cut}")
                 continue
@@ -155,6 +163,55 @@ def main(division: str, cutoff: str, windows: str, config: str, with_eb: bool, w
                     for col in fm_pd.columns
                 }
             }
+            # ALS policy + light stats (computed on a sampled tx window to limit cost)
+            try:
+                if cfg.features.use_als_embeddings:
+                    start_dt = pd.to_datetime(cut) - pd.DateOffset(months=cfg.features.als_lookback_months)
+                    end_dt = pd.to_datetime(cut)
+                    q = (
+                        "SELECT quantity, gross_profit, revenue FROM fact_transactions "
+                        "WHERE order_date <= :end AND order_date >= :start"
+                    )
+                    txs = pd.read_sql_query(q, engine, params={"start": start_dt.strftime("%Y-%m-%d"), "end": end_dt.strftime("%Y-%m-%d")})
+                    if not txs.empty:
+                        # Deterministic sampling to keep stats light
+                        n = int(getattr(cfg.features, 'als_weight_stats_sample_rows', 100000) or 0)
+                        if n and len(txs) > n:
+                            txs = txs.sample(n=n, random_state=42)
+                        qty = pd.to_numeric(txs.get("quantity", 1.0), errors="coerce").fillna(1.0)
+                        gp = pd.to_numeric(txs.get("gross_profit", 0.0), errors="coerce").fillna(0.0).clip(lower=0.0)
+                        rev = pd.to_numeric(txs.get("revenue", 0.0), errors="coerce").fillna(0.0).clip(lower=0.0)
+                        q_term = np.log1p(1.0 + qty) if bool(getattr(cfg.features, 'als_weight_by_quantity', True)) else 0.0
+                        gp_term = np.log1p(1.0 + gp)
+                        price_term = float(getattr(cfg.features, 'als_weight_price_factor', 1.0)) * (np.log1p(1.0 + rev) if bool(getattr(cfg.features, 'als_weight_include_revenue', True)) else 0.0)
+                        w = (q_term + gp_term + price_term).astype('float64')
+                        cap_val = getattr(cfg.features, 'als_weight_cap', None)
+                        if cap_val is not None:
+                            try:
+                                w = np.minimum(w, float(cap_val))
+                            except Exception:
+                                pass
+                        stats["als_policy"] = {
+                            "weight_by_quantity": bool(getattr(cfg.features, 'als_weight_by_quantity', True)),
+                            "include_revenue": bool(getattr(cfg.features, 'als_weight_include_revenue', True)),
+                            "price_factor": float(getattr(cfg.features, 'als_weight_price_factor', 1.0)),
+                            "weight_cap": (float(cap_val) if cap_val is not None else None),
+                            "division_scoped": bool(getattr(cfg.features, 'als_division_scoped', True)),
+                            "time_decay_enabled": bool(getattr(cfg.features, 'als_time_decay_enabled', True)),
+                            "half_life_days": int(getattr(cfg.features, 'als_time_half_life_days', 180)),
+                            "scoped_fallback": bool(scoped_fallback),
+                            "quantity_nonzero_rate": float(round((qty > 0).mean(), 6)),
+                            "als_weight_quantiles": {
+                                "min": float(np.nanmin(w)),
+                                "p50": float(np.nanpercentile(w, 50)),
+                                "p90": float(np.nanpercentile(w, 90)),
+                                "p99": float(np.nanpercentile(w, 99)),
+                                "max": float(np.nanmax(w)),
+                            },
+                        }
+            except Exception:
+                # Non-blocking: policy metrics are best-effort
+                pass
             # Winsor caps for gp_sum features per config
             try:
                 p = float(cfg.features.gp_winsor_p)
@@ -206,5 +263,6 @@ def main(division: str, cutoff: str, windows: str, config: str, with_eb: bool, w
 
 if __name__ == "__main__":
     main()
+
 
 

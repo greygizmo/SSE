@@ -30,7 +30,7 @@ This catalog enumerates every artifact the GoSales Engine produces across the pi
 | `feature_catalog_<division>_<cutoff>.csv` | `gosales/outputs/` | Lists every engineered feature with coverage. | Supports explainability, data dictionary tasks, and downstream schema contracts.【F:README.md†L20-L26】【F:README.md†L137-L139】 |
 | `feature_stats_<division>_<cutoff>.json` | `gosales/outputs/features/` | Captures winsorization thresholds, coverage, and checksums. | Detects drift and validates deterministic feature generation.【F:README.md†L20-L26】 |
 | `feature_list.json` | `gosales/outputs/` | Canonical list of expected features. | Used at scoring time to reindex matrices and prevent LightGBM shape mismatches.【F:README.md†L231-L235】 |
-| `population_gating_features_<division>_<cutoff>.csv` | `gosales/outputs/` | Early roster summary (pre/post, warm, cold, prospects_excluded) for feature build. | Explains why the roster shrank and documents warm/cold segmentation.
+| `population_gating_features_<division>_<cutoff>.csv` | `gosales/outputs/` | Early roster summary (pre/post, warm, cold, prospects_excluded) for feature build. | Explains why the roster shrank and documents warm/cold segmentation. Cold considers active/on‑subs assets by default; when `population.cold_uses_off_subs`/`cold_uses_ever_assets` are true, former/ever owners (off_subs/ever) are included if not warm.
 | `roster_diagnostics_<division>_<cutoff>.csv` | `gosales/outputs/` | Source and set diagnostics (pre_tx_ids, pred_tx_ids, asset_owner_ids, unions/intersections, eligible, post_roster). | Single‑file narrative for debugging roster math and expectations.
 
 ## Phase 3 — Modeling

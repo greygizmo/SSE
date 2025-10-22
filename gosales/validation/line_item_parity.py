@@ -1,4 +1,4 @@
-"""Compute revenue/GP parity deltas between legacy sales log and line-item facts.
+"""Compute revenue/GP parity deltas between legacy Sales Log (deprecated) and line-item facts.
 
 This validation aggregates both sources at the division level, compares totals,
 and emits CSV/JSON artifacts under ``gosales/outputs/validation/line_item_parity``.
@@ -323,7 +323,11 @@ def _write_outputs(result: ParityResult, output_dir: Path) -> None:
     "--legacy-table",
     type=str,
     default=None,
-    help="Optional override for legacy sales table. Defaults to database.source_tables.sales_log.",
+    help=(
+        "Optional override for legacy table (deprecated). "
+        "Defaults to database.source_tables.sales_log when present; "
+        "Phase 0 no longer reads Sales Log for curated builds."
+    ),
 )
 def main(config: str, cutoff: str | None, delta_threshold: float, output_dir: str, legacy_table: str | None) -> None:
     """CLI entry point to compute division-level parity between legacy and line-item sources."""

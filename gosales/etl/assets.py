@@ -15,7 +15,7 @@ from datetime import datetime, timedelta
 
 from gosales.utils.db import get_db_connection, get_curated_connection
 from gosales.utils.sql import validate_identifier, ensure_allowed_identifier
-from gosales.sql.queries import moneyball_assets_select, items_category_limited_select
+from gosales.sql.queries import select_all, items_category_limited_select
 from gosales.utils.config import load_config
 from gosales.utils.logger import get_logger
 from gosales.utils.identifiers import normalize_identifier_series
@@ -34,35 +34,37 @@ def _norm(s: pd.Series) -> pd.Series:
 
 
 def _load_sources() -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Load Moneyball Assets and Item Category mapping from the configured Azure SQL views.
+    """Load assets from Product Info headers (preferred) and item taxonomy mapping.
 
     Returns
     -------
-    moneyball : pandas.DataFrame
-        Canonicalized Moneyball asset rows with normalized text columns.
+    assets_like_mb : pandas.DataFrame
+        Canonicalized asset rows shaped like the legacy Moneyball payload with
+        columns: customer_name, product, purchase_date, expiration_date, qty,
+        internalid (item internalid when available), plus normalized helpers.
     items : pandas.DataFrame
         Item taxonomy with `itemid` and `Item_Rollup` and normalized join keys.
     """
     cfg = load_config()
     src = getattr(cfg, 'database', None)
     tables = dict(getattr(src, 'source_tables', {}) or {})
-    moneyball_view = tables.get('moneyball_assets', '[dbo].[Moneyball Assets]')
+    # Prefer the comprehensive All-Product view; config may override
+    product_view = tables.get('product_info', 'dbo.table_All_Product_Info_cleaned_headers')
     items_view = tables.get('items_category_limited', '[dbo].[items_category_limited]')
     # Validate identifiers to mitigate injection risk in f-strings
     try:
         allow = set(getattr(getattr(cfg, 'database', object()), 'allowed_identifiers', []) or [])
         if allow:
-            ensure_allowed_identifier(str(moneyball_view), allow)
+            ensure_allowed_identifier(str(product_view), allow)
             ensure_allowed_identifier(str(items_view), allow)
         else:
-            validate_identifier(str(moneyball_view))
+            validate_identifier(str(product_view))
             validate_identifier(str(items_view))
     except Exception as e:
         raise ValueError(f"Invalid view identifier in config.database.source_tables: {e}")
 
     eng = get_db_connection()
 
-    logger.info("Reading Moneyball Assets…")
     def _read_chunks(sql: str, chunksize: int = 200_000) -> pd.DataFrame:
         try:
             it = pd.read_sql_query(sql, eng, chunksize=chunksize)
@@ -73,9 +75,43 @@ def _load_sources() -> Tuple[pd.DataFrame, pd.DataFrame]:
         except Exception:
             return pd.read_sql(sql, eng)
 
-    mb_sql = moneyball_assets_select(moneyball_view)
-    mb = _read_chunks(mb_sql)
-    # Normalize
+    logger.info("Reading Product Info cleaned headers as assets…")
+    ph_sql = select_all(product_view, allowlist=set(getattr(getattr(cfg, 'database', object()), 'allowed_identifiers', []) or []) or None)
+    ph = _read_chunks(ph_sql)
+    # Shape into Moneyball-like columns expected by downstream join logic
+    mb_cols = ['customer_name', 'product', 'purchase_date', 'expiration_date', 'qty', 'internalid', 'cust_internalid', 'item_rollup_ph']
+    mb = pd.DataFrame(columns=mb_cols)
+    if not ph.empty:
+        phc = ph.copy()
+        phc.columns = [str(c).strip() for c in phc.columns]
+        # Flexible selectors
+        def pick(cands: list[str]) -> str | None:
+            lower_map = {c.lower().replace(' ', '_'): c for c in phc.columns}
+            for cand in cands:
+                key = cand.lower()
+                if key in lower_map:
+                    return lower_map[key]
+            return None
+        cust_name = pick(['customer', 'customer_name', 'customer_company_name'])
+        cust_internal = pick(['customer_internal_id', 'customer_internalid', 'customer_internal_id_'])
+        itemid = pick(['itemid', 'item_id', 'item'])
+        item_internalid = pick(['item_internalid', 'internalid_item', 'item_internal_id'])
+        rollup_col = pick(['item_rollup', 'item_rollup_'])
+        qty_col = pick(['qty', 'quantity'])
+        pur_col = pick(['purchase_date', 'purchased_date', 'install_date', 'start_date'])
+        exp_col = pick(['expiration_date', 'expire_date', 'end_date'])
+        # Build mb-like frame
+        mb = pd.DataFrame({
+            'customer_name': phc[cust_name].astype(str).str.strip() if cust_name else '',
+            'product': (phc[itemid] if itemid else phc.get('Item_Rollup', pd.Series([''] * len(phc)))).astype(str).str.strip(),
+            'purchase_date': pd.to_datetime(phc[pur_col], errors='coerce') if pur_col else pd.NaT,
+            'expiration_date': pd.to_datetime(phc[exp_col], errors='coerce') if exp_col else pd.NaT,
+            'qty': (pd.to_numeric(phc[qty_col], errors='coerce').fillna(1.0) if qty_col else pd.Series([1.0] * len(phc))).astype(float),
+            'internalid': (phc[item_internalid] if item_internalid else pd.Series([''] * len(phc))).astype(str).str.strip(),
+            'cust_internalid': (phc[cust_internal] if cust_internal else pd.Series([None] * len(phc))).astype(str).str.strip(),
+            'item_rollup_ph': (phc[rollup_col] if rollup_col else pd.Series([None] * len(phc))).astype(str).str.strip(),
+        })
+    # Normalize helpers
     mb['customer_name'] = mb['customer_name'].astype(str).str.strip()
     mb['customer_name_norm'] = _norm(mb['customer_name'])
     mb['product'] = mb['product'].astype(str).str.strip()
@@ -84,6 +120,9 @@ def _load_sources() -> Tuple[pd.DataFrame, pd.DataFrame]:
     mb['expiration_date'] = pd.to_datetime(mb['expiration_date'], errors='coerce')
     mb['qty'] = pd.to_numeric(mb['qty'], errors='coerce').fillna(1.0).astype(float)
     mb['internalid'] = mb['internalid'].astype(str)
+    # Normalize customer internal ids where present
+    if 'cust_internalid' in mb.columns:
+        mb['cust_internalid'] = mb['cust_internalid'].astype(str).str.strip()
 
     logger.info("Reading items_category_limited...")
     items_sql = items_category_limited_select(items_view)
@@ -98,15 +137,35 @@ def _load_sources() -> Tuple[pd.DataFrame, pd.DataFrame]:
 
 
 def _map_customers_to_ids(mb: pd.DataFrame) -> pd.DataFrame:
-    """Attach canonical customer_id to Moneyball rows.
+    """Attach canonical customer_id to asset rows.
 
-    Primary strategy: use NetSuite internalid where available; fall back to legacy
-    name-based joins only for the small slice of rows missing internalid.
+    Preferred strategy: use NetSuite Customer_Internal_Id when present; fall back
+    to curated name-based joins only for rows without a valid internal id.
     """
 
     mapped = mb.copy()
 
-    # 1) Preferred mapping: align on NetSuite company name (entityid or ns_companyname)
+    # 1) Preferred mapping: align by Customer_Internal_Id if present
+    try:
+        if 'cust_internalid' in mapped.columns:
+            cur = get_curated_connection()
+            ns_df = pd.read_sql("SELECT internalid, customer_id FROM dim_customer", cur)
+            ns_df = ns_df.dropna(subset=['internalid', 'customer_id']).copy()
+            ns_df['internalid'] = ns_df['internalid'].astype(str).str.strip()
+            lut = ns_df.drop_duplicates('internalid').set_index('internalid')['customer_id']
+            mapped['customer_id'] = mapped['cust_internalid'].astype(str).str.strip().map(lut)
+    except Exception as exc:
+        logger.warning(f"customer_internalid mapping failed; will try name-based mapping: {exc}")
+
+    if 'customer_id' not in mapped.columns:
+        mapped['customer_id'] = pd.Series([None] * len(mapped))
+    mapped['customer_id'] = normalize_identifier_series(mapped['customer_id'])
+
+    missing_mask = mapped['customer_id'].isna()
+    if not missing_mask.any():
+        return mapped
+
+    # 2) Fallback map via curated dim_ns_customer name columns
     try:
         ns_cur = get_curated_connection()
         # Try entityid first; fallback to ns_companyname
@@ -117,40 +176,26 @@ def _map_customers_to_ids(mb: pd.DataFrame) -> pd.DataFrame:
         ns_df = ns_df.dropna(subset=['internalid', 'company_name']).copy()
         ns_df['company_name_norm'] = _norm(ns_df['company_name'])
         ns_map = ns_df.drop_duplicates('company_name_norm').set_index('company_name_norm')['internalid']
-        mapped['customer_id'] = mapped['customer_name_norm'].map(ns_map)
+        mapped.loc[missing_mask, 'customer_id'] = normalize_identifier_series(
+            mapped.loc[missing_mask, 'customer_name_norm'].map(ns_map)
+        )
     except Exception as exc:
-        logger.warning(f"dim_ns_customer lookup failed, falling back to legacy mapping: {exc}")
-        mapped['customer_id'] = None
+        logger.warning(f"dim_ns_customer name mapping failed: {exc}")
 
-    mapped['customer_id'] = normalize_identifier_series(mapped['customer_id'])
-
+    # 3) Last resort via curated dim_customer names
     missing_mask = mapped['customer_id'].isna()
-    if not missing_mask.any():
-        return mapped
-
-    # 2) Fallback map via dim_customer (or raw sales_log) for rows without matches.
-    try:
-        cur = get_curated_connection()
-        dc = pd.read_sql("SELECT customer_id, customer_name, customer_name_norm FROM dim_customer", cur)
-    except Exception:
+    if missing_mask.any():
         try:
-            src = get_db_connection()
-            sl = pd.read_sql(
-                "SELECT [Customer] AS customer_name, [CompanyId] AS customer_id FROM dbo.saleslog",
-                src,
-            )
-            sl['customer_name_norm'] = _norm(sl['customer_name'])
-            dc = sl.groupby('customer_name_norm')[['customer_name', 'customer_id']].first().reset_index()
+            cur = get_curated_connection()
+            dc = pd.read_sql("SELECT customer_id, customer_name, customer_name_norm FROM dim_customer", cur)
+            if not dc.empty:
+                dc = dc.dropna(subset=['customer_name_norm', 'customer_id']).copy()
+                dc['customer_name_norm'] = _norm(dc['customer_name_norm'])
+                id_map = dc.drop_duplicates('customer_name_norm').set_index('customer_name_norm')['customer_id']
+                fallback_ids = mapped.loc[missing_mask, 'customer_name_norm'].map(id_map)
+                mapped.loc[missing_mask, 'customer_id'] = normalize_identifier_series(fallback_ids)
         except Exception as e:
-            logger.warning(f"Failed to load customer id map from curated and sales_log: {e}")
-            dc = pd.DataFrame(columns=['customer_name_norm', 'customer_id'])
-
-    if not dc.empty:
-        dc = dc.dropna(subset=['customer_name_norm', 'customer_id']).copy()
-        dc['customer_name_norm'] = _norm(dc['customer_name_norm'])
-        id_map = dc.drop_duplicates('customer_name_norm').set_index('customer_name_norm')['customer_id']
-        fallback_ids = mapped.loc[missing_mask, 'customer_name_norm'].map(id_map)
-        mapped.loc[missing_mask, 'customer_id'] = normalize_identifier_series(fallback_ids)
+            logger.warning(f"Failed to load customer id map from dim_customer: {e}")
 
     return mapped
 
@@ -306,10 +351,22 @@ def build_fact_assets(write: bool = True) -> pd.DataFrame:
     except Exception as _exc:
         logger.warning(f"Authoritative assets join failed, using name-based fallback only: {_exc}")
 
+    # Prefer rollup from Product Info when present
+    if 'item_rollup' not in joined.columns:
+        joined['item_rollup'] = pd.NA
+    joined['item_rollup'] = joined['item_rollup'].replace('', pd.NA)
+    if 'item_rollup_ph' in joined.columns:
+        _mask = joined['item_rollup'].isna()
+        if _mask.any():
+            joined.loc[_mask, 'item_rollup'] = joined.loc[_mask, 'item_rollup_ph']
+
     # Map to customer_id via dim_customer
     joined = _map_customers_to_ids(joined)
 
     # Final schema
+    for _col in ['department', 'category', 'sub_category_a', 'sub_category_b', 'audience', 'itemid', 'name', 'product', 'product_norm', 'customer_name_norm']:
+        if _col not in joined.columns:
+            joined[_col] = pd.NA
     fact = joined[[
         'customer_id', 'customer_name', 'customer_name_norm',
         'product', 'product_norm', 'qty',

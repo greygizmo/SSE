@@ -2650,12 +2650,34 @@ elif tab == "Configuration & Launch":
         with col1:
             st.markdown("**Data Sources**")
             if cfg:
-                sales_log_source = st.selectbox(
-                    "Sales Log Source",
-                    ["csv", "dbo.saleslog"],
-                    index=["csv", "dbo.saleslog"].index(cfg.database.source_tables.get("sales_log", "csv")),
-                    help="Source for sales transaction data"
-                )
+                # Only show selector if config still declares a sales_log source
+                try:
+                    src_map = getattr(getattr(cfg, 'database', object()), 'source_tables', {}) or {}
+                    has_sales_log = 'sales_log' in src_map and str(src_map.get('sales_log') or '').strip() != ''
+                except Exception:
+                    has_sales_log = False
+                if has_sales_log:
+                    sales_log_source = st.selectbox(
+                        "Legacy Sales Log Source (deprecated)",
+                        ["csv", "dbo.saleslog"],
+                        index=["csv", "dbo.saleslog"].index(cfg.database.source_tables.get("sales_log", "csv")),
+                        help=(
+                            "Deprecated. Phase 0 no longer reads Sales Log for curated builds. "
+                            "Use line-item sources for facts; this selector remains for legacy validation only."
+                        )
+                    )
+                    if sales_log_source:
+                        st.warning(
+                            "Sales Log is deprecated and not used by Phase 0 builds. "
+                            "Keep using fact_sales_line for modeling and reports.",
+                            icon="⚠️",
+                        )
+                else:
+                    st.info(
+                        "Sales Log is removed from default configs and hidden here. "
+                        "Curated builds use line-item sources exclusively.",
+                        icon="ℹ️",
+                    )
 
                 industry_source = st.selectbox(
                     "Industry Enrichment Source",
